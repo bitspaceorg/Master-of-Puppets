@@ -1,0 +1,71 @@
+---
+title: "Viewport Core"
+description: "Scene management, camera, and render orchestration internals"
+slug: "reference-viewport"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "viewport"]
+---
+
+## Location
+
+```
+src/viewport/
+  viewport.c            — Viewport lifecycle, scene, camera, rendering
+  viewport_internal.h   — Internal struct definitions
+```
+
+## Internal Structures
+
+### MopViewport
+
+```c
+struct MopViewport {
+    const MopRhiBackend *rhi;          /* Backend function table    */
+    MopRhiDevice        *device;       /* Backend device instance   */
+    MopRhiFramebuffer   *framebuffer;  /* Color+depth+ID targets    */
+    MopBackendType       backend_type; /* Active backend enum value */
+
+    int width, height;                 /* Framebuffer dimensions    */
+    MopColor      clear_color;         /* Per-frame clear value     */
+    MopRenderMode render_mode;         /* Solid or wireframe        */
+
+    /* Camera */
+    MopVec3 cam_eye, cam_target, cam_up;
+    float   cam_fov_radians, cam_near, cam_far;
+    MopMat4 view_matrix, projection_matrix;
+
+    /* Scene — flat array with active flags */
+    struct MopMesh meshes[MOP_MAX_MESHES];
+    uint32_t       mesh_count;
+};
+```
+
+### MopMesh (internal)
+
+```c
+struct MopMesh {
+    MopRhiBuffer *vertex_buffer;
+    MopRhiBuffer *index_buffer;
+    uint32_t      vertex_count, index_count;
+    uint32_t      object_id;
+    MopMat4       transform;
+    MopColor      base_color;
+    bool          active;
+};
+```
+
+## Scene Management
+
+Meshes are stored in a flat array of `MOP_MAX_MESHES` (4096) entries.  Adding a mesh scans for an inactive slot or appends.  Removing a mesh marks it inactive and destroys its RHI buffers.  The viewport destroy function walks the entire array.
+
+## Rendering Orchestration
+
+`mop_viewport_render` is the only function that calls into the RHI for drawing.  It:
+
+1. Calls `frame_begin` to clear
+2. Iterates active meshes, computing MVP for each
+3. Calls `draw` for each mesh
+4. Calls `frame_end` to finalize
+
+No sorting is performed — meshes are drawn in array order.  Depth testing handles visibility.

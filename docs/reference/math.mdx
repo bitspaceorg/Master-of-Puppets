@@ -1,0 +1,86 @@
+---
+title: "Math Module"
+description: "Vector and matrix operations used throughout the engine"
+slug: "reference-math"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "math"]
+---
+
+## Location
+
+```
+src/math/math.c          — Implementation
+include/mop/types.h      — Type definitions and function declarations
+```
+
+## Matrix Convention
+
+All matrices are **column-major**, matching OpenGL convention.
+
+```
+MopMat4.d[col * 4 + row]
+
+Column 0: d[0..3]
+Column 1: d[4..7]
+Column 2: d[8..11]
+Column 3: d[12..15]
+```
+
+The indexing macro used internally:
+
+```c
+#define M(mat, row, col) ((mat).d[(col) * 4 + (row)])
+```
+
+## Vector Operations
+
+| Function             | Signature                          | Description           |
+| -------------------- | ---------------------------------- | --------------------- |
+| `mop_vec3_add`       | `(Vec3, Vec3) → Vec3`             | Component-wise add    |
+| `mop_vec3_sub`       | `(Vec3, Vec3) → Vec3`             | Component-wise sub    |
+| `mop_vec3_scale`     | `(Vec3, float) → Vec3`            | Scalar multiply       |
+| `mop_vec3_cross`     | `(Vec3, Vec3) → Vec3`             | Cross product         |
+| `mop_vec3_dot`       | `(Vec3, Vec3) → float`            | Dot product           |
+| `mop_vec3_length`    | `(Vec3) → float`                  | Euclidean length      |
+| `mop_vec3_normalize` | `(Vec3) → Vec3`                   | Unit vector (0 if degenerate) |
+
+## Matrix Operations
+
+| Function               | Signature                                    | Description                  |
+| ---------------------- | -------------------------------------------- | ---------------------------- |
+| `mop_mat4_identity`    | `() → Mat4`                                  | Identity matrix              |
+| `mop_mat4_perspective` | `(fov_rad, aspect, near, far) → Mat4`        | Symmetric perspective frustum |
+| `mop_mat4_look_at`     | `(eye, center, up) → Mat4`                   | View matrix                  |
+| `mop_mat4_rotate_y`    | `(angle_rad) → Mat4`                         | Rotation around Y axis       |
+| `mop_mat4_rotate_x`    | `(angle_rad) → Mat4`                         | Rotation around X axis       |
+| `mop_mat4_translate`   | `(Vec3) → Mat4`                              | Translation matrix           |
+| `mop_mat4_scale`       | `(Vec3) → Mat4`                              | Non-uniform scale            |
+| `mop_mat4_multiply`    | `(Mat4, Mat4) → Mat4`                        | Matrix product `A * B`       |
+| `mop_mat4_mul_vec4`    | `(Mat4, Vec4) → Vec4`                        | Matrix-vector product `M * v`|
+
+## Perspective Matrix
+
+Uses the standard OpenGL infinite-far formulation:
+
+```
+| 1/(a·tan(fov/2))   0               0                    0              |
+| 0                   1/tan(fov/2)    0                    0              |
+| 0                   0               -(f+n)/(f-n)         -2fn/(f-n)     |
+| 0                   0               -1                   0              |
+```
+
+Where `a = aspect`, `f = far`, `n = near`.
+
+## Look-At Matrix
+
+Constructs an orthonormal basis `(s, u, -f)` from `eye`, `center`, and `up`, then applies the inverse translation.
+
+```
+| s.x   s.y   s.z   -dot(s,eye) |
+| u.x   u.y   u.z   -dot(u,eye) |
+|-f.x  -f.y  -f.z    dot(f,eye) |
+| 0     0     0      1           |
+```
+
+Stored column-major: `s` occupies row 0, `u` occupies row 1, `-f` occupies row 2, translation occupies column 3.

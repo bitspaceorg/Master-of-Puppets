@@ -1,0 +1,70 @@
+---
+title: "OpenGL Backend"
+description: "OpenGL 3.3 core profile backend contract"
+slug: "reference-backend-opengl"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "backend", "opengl"]
+---
+
+## Status
+
+**Not yet implemented.**  This document defines the contract for the OpenGL backend.  Enable with `make MOP_ENABLE_OPENGL=1` once implemented.
+
+## Location
+
+```
+src/backend/opengl/
+  opengl_backend.c    — RHI function table implementation
+```
+
+## Design
+
+### Context Creation
+
+The OpenGL backend creates an offscreen rendering context:
+
+- **macOS:** CGL pixel buffer context with `kCGLOGLPVersion_3_2_Core`
+- **Linux:** EGL with `EGL_OPENGL_API` and pbuffer surface
+
+No window or display server connection is required.
+
+### Framebuffer
+
+An FBO with three attachments:
+
+| Attachment | Format     | Purpose          |
+| ---------- | ---------- | ---------------- |
+| Color 0    | `RGBA8`    | Color output     |
+| Depth      | `DEPTH24`  | Depth testing    |
+| Color 1    | `R32UI`    | Object ID buffer |
+
+### Shaders
+
+Vertex shader:
+- Inputs: `aPosition` (vec3), `aNormal` (vec3), `aColor` (vec4)
+- Uniforms: `uMVP` (mat4), `uModel` (mat4)
+- Outputs: `vNormal` (vec3), `vColor` (vec4)
+
+Fragment shader:
+- Computes flat shading: `ambient + diffuse * max(N·L, 0)`
+- Writes `fragColor` (vec4) to color 0
+- Writes `fragObjectId` (uint) to color 1
+
+### Draw Call
+
+1. Bind VAO with vertex buffer
+2. Upload `uMVP`, `uModel`, `uObjectId` uniforms
+3. `glDrawElements(GL_TRIANGLES, ...)`
+
+### Readback
+
+`glReadPixels` from the FBO.  Color is read as `GL_RGBA` / `GL_UNSIGNED_BYTE`.  Object ID is read as `GL_RED_INTEGER` / `GL_UNSIGNED_INT`.  Depth is read as `GL_DEPTH_COMPONENT` / `GL_FLOAT`.
+
+## RHI Handle Mapping
+
+| RHI Handle           | OpenGL Concrete Type                    |
+| -------------------- | --------------------------------------- |
+| `MopRhiDevice`       | GL context + shader program + VAO state |
+| `MopRhiBuffer`       | `GLuint` buffer object                  |
+| `MopRhiFramebuffer`  | FBO + texture/renderbuffer attachments   |

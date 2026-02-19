@@ -1,0 +1,53 @@
+---
+title: "Picking System"
+description: "Object picking via per-pixel ID buffer"
+slug: "reference-picking"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "picking"]
+---
+
+## Overview
+
+Every backend maintains a per-pixel `uint32_t` object-ID buffer alongside color and depth.  Picking reads this buffer to identify the object at a given screen coordinate.
+
+## Object IDs
+
+| Value  | Meaning                         |
+| ------ | ------------------------------- |
+| `0`    | Background (no object)          |
+| `1+`   | Application-defined object ID   |
+
+Multiple meshes may share the same ID if the application treats them as one selectable entity.
+
+## Backend Contract
+
+Every backend must:
+
+1. Allocate an object-ID buffer during `framebuffer_create`
+2. Clear it to `0` during `frame_begin`
+3. Write `draw_call->object_id` for every rasterized pixel during `draw`
+4. Implement `pick_read_id(device, fb, x, y) → uint32_t`
+5. Implement `pick_read_depth(device, fb, x, y) → float`
+
+## Result Struct
+
+```c
+typedef struct MopPickResult {
+    bool     hit;         /* true if object_id != 0 at (x,y) */
+    uint32_t object_id;   /* valid only when hit == true      */
+    float    depth;        /* [0,1] normalized depth           */
+} MopPickResult;
+```
+
+## Usage
+
+```c
+mop_viewport_render(viewport);
+MopPickResult r = mop_viewport_pick(viewport, mouse_x, mouse_y);
+if (r.hit) {
+    select_object(r.object_id);
+}
+```
+
+Picking reads the most recently rendered frame.  Render before picking.

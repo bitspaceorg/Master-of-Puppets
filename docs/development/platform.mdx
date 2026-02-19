@@ -1,0 +1,46 @@
+---
+title: "Platform Behavior"
+description: "macOS and Linux platform-specific details"
+slug: "development-platform"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["development", "platform"]
+---
+
+## Supported Platforms
+
+| Platform       | CPU Backend | OpenGL Backend        | Vulkan Backend         |
+| -------------- | ----------- | --------------------- | ---------------------- |
+| macOS (arm64)  | Yes         | CGL offscreen context | MoltenVK               |
+| macOS (x86_64) | Yes         | CGL offscreen context | MoltenVK               |
+| Linux (x86_64) | Yes         | EGL offscreen context | Native Vulkan          |
+
+## Compile-Time Platform Detection
+
+```c
+#if defined(MOP_PLATFORM_MACOS)
+    /* macOS-specific code */
+#elif defined(MOP_PLATFORM_LINUX)
+    /* Linux-specific code */
+#endif
+```
+
+These macros are set by the Makefile based on `uname -s`.
+
+## macOS Notes
+
+- OpenGL is deprecated on macOS but still functional through `OpenGL.framework`
+- CGL provides offscreen pixel buffer contexts without requiring a window
+- Vulkan is available through MoltenVK (translates Vulkan → Metal)
+- The Nix flake provides `darwin.apple_sdk.frameworks.OpenGL`
+
+## Linux Notes
+
+- OpenGL offscreen contexts use EGL (`libEGL`)
+- Vulkan is available through Mesa (Intel, AMD) or proprietary drivers (NVIDIA)
+- The Nix flake provides `libGL`, `vulkan-loader`, `vulkan-validation-layers`
+- Link flags: `-lm -ldl` are added automatically on Linux
+
+## CPU Backend
+
+The CPU backend has no platform dependencies.  It works identically on both platforms.  This makes it the reliable fallback for any environment.

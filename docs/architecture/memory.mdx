@@ -1,0 +1,56 @@
+---
+title: "Memory Ownership"
+description: "Who allocates, who frees, and how data flows across boundaries"
+slug: "architecture-memory"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["architecture", "memory"]
+---
+
+## Principles
+
+1. **Every allocation has exactly one owner.**
+2. **Ownership never transfers implicitly.**
+3. **Every `create` has a matching `destroy`.**
+4. **The application never frees internal pointers.**
+
+## Ownership Table
+
+| Resource               | Owner            | Created by                  | Freed by                     |
+| ---------------------- | ---------------- | --------------------------- | ---------------------------- |
+| `MopViewport`          | Application      | `mop_viewport_create`       | `mop_viewport_destroy`       |
+| `MopMesh` (handle)     | Viewport         | `mop_viewport_add_mesh`     | `mop_viewport_remove_mesh` or viewport destroy |
+| RHI Device             | Viewport         | `rhi->device_create`        | `rhi->device_destroy`        |
+| RHI Framebuffer        | Viewport         | `rhi->framebuffer_create`   | `rhi->framebuffer_destroy`   |
+| RHI Buffer             | Viewport         | `rhi->buffer_create`        | `rhi->buffer_destroy`        |
+| Vertex/index arrays    | Application      | Application code            | Application code             |
+| Color buffer pointer   | Backend          | Backend internal             | Backend internal              |
+
+## Copy Semantics
+
+When the application calls `mop_viewport_add_mesh`, the engine **copies** vertex and index data into RHI buffers.  The application may free its arrays immediately.
+
+```
+Application                    Engine
+     │                            │
+     │  mop_viewport_add_mesh()   │
+     │ ─────────────────────────> │
+     │   (vertices[], indices[])  │
+     │                            │── rhi->buffer_create (copies data)
+     │  returns MopMesh*          │
+     │ <───────────────────────── │
+     │                            │
+     │  free(vertices)            │   (safe: engine has its own copy)
+```
+
+## Readback Pointers
+
+`mop_viewport_read_color` returns a **borrowed** pointer.  The application must not free it.  Invalidated by:
+
+- `mop_viewport_render` (next frame overwrites)
+- `mop_viewport_resize` (framebuffer reallocated)
+- `mop_viewport_destroy` (everything freed)
+
+## Leak Prevention
+
+`mop_viewport_destroy` walks the mesh array and destroys every active mesh's buffers before destroying the framebuffer and device.  No leaks even if the application skips `mop_viewport_remove_mesh`.

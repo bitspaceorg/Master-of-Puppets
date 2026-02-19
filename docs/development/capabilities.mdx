@@ -1,0 +1,46 @@
+---
+title: "Backend Capabilities"
+description: "Feature matrix for each rendering backend"
+slug: "development-capabilities"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["development", "backends"]
+---
+
+## Feature Matrix
+
+| Feature                  | CPU | OpenGL | Vulkan |
+| ------------------------ | --- | ------ | ------ |
+| Solid rendering          | Yes | Yes    | Yes    |
+| Wireframe rendering      | Yes | Yes    | Yes    |
+| Depth buffering          | Yes | Yes    | Yes    |
+| Backface culling         | Yes | Yes    | Yes    |
+| Flat shading             | Yes | Yes    | Yes    |
+| Object ID picking        | Yes | Yes    | Yes    |
+| Framebuffer readback     | Yes | Yes    | Yes    |
+| Offscreen (no window)    | Yes | Yes    | Yes    |
+| Platform dependency      | None| GL 3.3 | Vk 1.0 |
+| GPU acceleration         | No  | Yes    | Yes    |
+
+## Performance Characteristics
+
+| Backend | Geometry throughput | Pixel fill rate | Readback cost |
+| ------- | ------------------- | --------------- | ------------- |
+| CPU     | Low                 | Low             | Zero (direct memory) |
+| OpenGL  | High                | High            | `glReadPixels` (moderate) |
+| Vulkan  | High                | High            | Staging buffer copy (moderate) |
+
+## Selection Guidance
+
+- **CPU:** Testing, CI, environments without GPU, reference output
+- **OpenGL:** macOS or Linux with GL 3.3 support, simple integration
+- **Vulkan:** Maximum control, validation layers, cross-platform GPU access
+
+## Default Backend
+
+`MOP_BACKEND_AUTO` selects:
+
+1. OpenGL (if `MOP_HAS_OPENGL` is defined)
+2. CPU (always available)
+
+Applications that prefer Vulkan should request it explicitly via `MOP_BACKEND_VULKAN`.

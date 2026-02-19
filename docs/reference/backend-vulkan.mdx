@@ -1,0 +1,72 @@
+---
+title: "Vulkan Backend"
+description: "Vulkan 1.0 headless backend contract"
+slug: "reference-backend-vulkan"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "backend", "vulkan"]
+---
+
+## Status
+
+**Not yet implemented.**  This document defines the contract for the Vulkan backend.  Enable with `make MOP_ENABLE_VULKAN=1` once implemented.
+
+## Location
+
+```
+src/backend/vulkan/
+  vulkan_backend.c    — RHI function table implementation
+  shaders/            — GLSL source for SPIR-V compilation
+```
+
+## Design
+
+### Instance and Device
+
+Headless Vulkan — no surface or swapchain extensions.  Required extensions:
+
+- None beyond core Vulkan 1.0
+
+The backend selects the first discrete GPU, falling back to integrated.  A single graphics queue is used.
+
+### Render Pass
+
+Three attachments:
+
+| Attachment | Format              | Usage                |
+| ---------- | ------------------- | -------------------- |
+| Color      | `VK_FORMAT_R8G8B8A8_UNORM` | Color output   |
+| Depth      | `VK_FORMAT_D32_SFLOAT`      | Depth testing  |
+| Object ID  | `VK_FORMAT_R32_UINT`        | Picking buffer |
+
+### Pipeline
+
+- Vertex input: position (vec3), normal (vec3), color (vec4) — matching `MopVertex` layout
+- Push constants: MVP (mat4), model (mat4), objectId (uint)
+- Polygon mode: `VK_POLYGON_MODE_FILL` or `VK_POLYGON_MODE_LINE`
+- Depth test: enabled, compare `VK_COMPARE_OP_LESS`
+- Cull mode: `VK_CULL_MODE_BACK_BIT`
+
+### Command Recording
+
+Per-frame:
+
+1. `vkBeginCommandBuffer`
+2. `vkCmdBeginRenderPass` (clear values for all attachments)
+3. For each draw call: bind pipeline, push constants, bind vertex/index buffer, `vkCmdDrawIndexed`
+4. `vkCmdEndRenderPass`
+5. Copy color/depth/ID images to host-visible staging buffers
+6. `vkEndCommandBuffer`
+7. `vkQueueSubmit` + `vkQueueWaitIdle`
+
+### Readback
+
+Map staging buffers to read RGBA8 color, float depth, and uint32 object ID.
+
+## RHI Handle Mapping
+
+| RHI Handle           | Vulkan Concrete Type                              |
+| -------------------- | ------------------------------------------------- |
+| `MopRhiDevice`       | VkInstance, VkDevice, VkQueue, VkCommandPool, pipelines |
+| `MopRhiBuffer`       | VkBuffer + VkDeviceMemory                          |
+| `MopRhiFramebuffer`  | VkFramebuffer + VkImage × 3 + staging buffers      |

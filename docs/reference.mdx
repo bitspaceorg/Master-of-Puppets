@@ -1,0 +1,24 @@
+---
+title: "Reference"
+description: "Technical reference for every module, type, and function"
+slug: "reference"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "overview"]
+---
+
+Module-level technical reference for the Master of Puppets engine.  Each page documents the contract, types, and implementation details for one subsystem.
+
+## Modules
+
+| Module                                             | Source                  | Description                              |
+| -------------------------------------------------- | ----------------------- | ---------------------------------------- |
+| [API Contracts](reference-api)                     | `include/mop/*.h`       | Public function preconditions and postconditions |
+| [RHI](reference-rhi)                               | `src/rhi/`              | Render hardware interface abstraction    |
+| [Math](reference-math)                             | `src/math/`             | Vector and matrix operations             |
+| [Viewport Core](reference-viewport)                | `src/viewport/`         | Scene management and render orchestration |
+| [Picking](reference-picking)                       | (cross-cutting)         | Object-ID buffer picking system          |
+| [Software Rasterizer](reference-rasterizer)        | `src/rasterizer/`       | Shared software rasterization            |
+| [CPU Backend](reference-backend-cpu)               | `src/backend/cpu/`      | CPU backend (delegates to rasterizer)    |
+| [OpenGL Backend](reference-backend-opengl)         | `src/backend/opengl/`   | OpenGL 3.3 core backend (contract)       |
+| [Vulkan Backend](reference-backend-vulkan)         | `src/backend/vulkan/`   | Vulkan 1.0 headless backend (contract)   |

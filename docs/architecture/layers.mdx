@@ -1,0 +1,60 @@
+---
+title: "Layer Separation"
+description: "Strict boundary rules between architectural layers"
+slug: "architecture-layers"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["architecture", "layers"]
+---
+
+## Rules
+
+Every source file belongs to exactly one layer.  These rules are enforced by include-path structure — violations are caught in code review.
+
+### Rule 1 — Public headers are self-contained
+
+Every file in `include/mop/` must compile with only C standard library headers and other `include/mop/` headers.  No file in `include/mop/` may include anything from `src/`.
+
+### Rule 2 — No backend headers in public API
+
+The tokens `GL`, `Vk`, `EGL`, `CGL`, `vulkan`, or `opengl` must never appear in `include/mop/`.
+
+### Rule 3 — Viewport core uses RHI, never backend
+
+Files in `src/viewport/` may include `src/rhi/rhi.h`.  They must never include files from `src/backend/`.
+
+### Rule 4 — Backends are isolated
+
+A backend in `src/backend/opengl/` must never include files from `src/backend/vulkan/` or `src/backend/cpu/`.  Backends share the RHI contract — nothing else.
+
+### Rule 5 — Math is a leaf
+
+`src/math/math.c` depends only on `include/mop/types.h` and `<math.h>`.
+
+## Verification
+
+```bash
+# No backend headers in public API
+grep -r "opengl\|vulkan\|GL/\|Vk" include/mop/
+
+# No backend includes in viewport core
+grep -r "backend/" src/viewport/
+
+# No cross-backend includes
+grep -r "opengl" src/backend/vulkan/
+grep -r "vulkan" src/backend/opengl/
+```
+
+All commands must produce no output.
+
+## Directory → Layer Mapping
+
+| Directory              | Layer            | Allowed dependencies                             |
+| ---------------------- | ---------------- | ------------------------------------------------ |
+| `include/mop/`        | Public API       | C stdlib                                         |
+| `src/math/`           | Math             | `include/mop/types.h`, C stdlib                  |
+| `src/rhi/`            | RHI              | `include/mop/`, C stdlib                         |
+| `src/viewport/`       | Viewport Core    | `include/mop/`, `src/rhi/`                       |
+| `src/backend/cpu/`    | CPU Backend      | `include/mop/`, `src/rhi/`                       |
+| `src/backend/opengl/` | OpenGL Backend   | `include/mop/`, `src/rhi/`, OpenGL headers       |
+| `src/backend/vulkan/` | Vulkan Backend   | `include/mop/`, `src/rhi/`, Vulkan headers       |

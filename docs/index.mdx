@@ -1,0 +1,50 @@
+---
+title: "Master of Puppets Documentation"
+description: "Knowledge base for the Master of Puppets viewport rendering engine"
+slug: "index"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["index", "overview"]
+---
+
+Master of Puppets is a backend-agnostic viewport rendering engine written in C11.  It provides a clean, layered architecture for rendering 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API.
+
+## Documentation
+
+| Section                      | Purpose                                              |
+| ---------------------------- | ---------------------------------------------------- |
+| [Architecture](architecture) | System design, layer separation, data flow           |
+| [Reference](reference)       | Module-level API contracts and implementation detail |
+| [Development](development)   | Build system, platform support, contribution guide   |
+
+## Architecture
+
+| Page                                                | Topic                                              |
+| --------------------------------------------------- | -------------------------------------------------- |
+| [System Architecture](architecture)                 | Layer diagram, dependency rules, design rationale  |
+| [Layer Separation](architecture-layers)              | Strict boundary rules between layers               |
+| [Frame Lifecycle](architecture-frame-lifecycle)      | What happens during a single render frame          |
+| [Threading Model](architecture-threading)            | Single-threaded guarantees, future-proofing        |
+| [Memory Ownership](architecture-memory)              | Who allocates, who frees, no implicit transfers    |
+| [Extension Strategy](architecture-extension)         | How to add backends, features, and subsystems      |
+
+## Reference — Module Map
+
+| Layer        | Modules                      | Docs                                        |
+| ------------ | ---------------------------- | ------------------------------------------- |
+| **Public**   | types, viewport, scene, pick | [API Contracts](reference-api)              |
+| **RHI**      | Device, Buffer, Framebuffer  | [RHI](reference-rhi)                        |
+| **CPU**      | Rasterizer, Backend          | [CPU Backend](reference-backend-cpu)        |
+| **OpenGL**   | Backend                      | [OpenGL Backend](reference-backend-opengl)  |
+| **Vulkan**   | Backend                      | [Vulkan Backend](reference-backend-vulkan)  |
+| **Math**     | Vec3, Mat4, transforms       | [Math](reference-math)                      |
+| **Picking**  | Object ID buffer             | [Picking](reference-picking)                |
+
+## Development
+
+| Page                                                 | Topic                                   |
+| ---------------------------------------------------- | --------------------------------------- |
+| [Build](development-build)                           | Make + Nix build system                 |
+| [Platform Behavior](development-platform)            | macOS and Linux specifics               |
+| [Backend Capabilities](development-capabilities)     | What each backend supports              |
+| [Contributing](development-contributing)             | How to add code and documentation       |

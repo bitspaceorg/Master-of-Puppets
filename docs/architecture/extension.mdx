@@ -1,0 +1,64 @@
+---
+title: "Extension Strategy"
+description: "How to add backends, features, and subsystems to the engine"
+slug: "architecture-extension"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["architecture", "extension"]
+---
+
+## Adding a New Backend
+
+1. **Create directory:** `src/backend/<name>/`
+2. **Define internal types:** Concrete structs for `MopRhiDevice`, `MopRhiBuffer`, `MopRhiFramebuffer`
+3. **Implement all 14 RHI functions** — see [RHI](reference-rhi) for the full contract
+4. **Expose factory:** `const MopRhiBackend *mop_rhi_backend_<name>(void);`
+5. **Register in dispatcher:** Add a `case` to `mop_rhi_get_backend` in `src/rhi/rhi.c`
+6. **Add source to root Makefile:** Append the `.c` file to `CORE_SRCS` and add the obj directory to `obj_dirs`
+7. **Write documentation:** Create `docs/reference/backend-<name>.mdx`
+
+The new backend must pass the same visual tests as the CPU backend (identical output within floating-point tolerance).
+
+Software rasterization backends can reuse the shared rasterizer at `src/rasterizer/` — include `"rasterizer/rasterizer.h"` for `MopSwFramebuffer`, `MopSwClipVertex`, and all `mop_sw_*` functions.
+
+## Adding a New Public API Function
+
+1. **Declare in the appropriate header** under `include/mop/`
+2. **Implement in viewport core** (`src/viewport/viewport.c`)
+3. **If the function needs backend support:** Add a new function pointer to `MopRhiBackend` and implement in every backend
+4. **Document the contract** in [API Contracts](reference-api)
+5. **Update the example** if the function demonstrates a new capability
+
+## Adding a New Vertex Attribute
+
+The current fixed vertex format (`MopVertex`) includes position, normal, and color.  To add UV coordinates:
+
+1. Add `MopVec2 uv` to `MopVertex` in `include/mop/types.h`
+2. Update the software rasterizer to interpolate UVs during rasterization
+3. Update GPU backend shaders to accept and pass through UVs
+4. Add texture support to the RHI (new `MopRhiTexture` handle and bind function)
+
+## Adding a New Subsystem
+
+For a major new subsystem (e.g., shadow mapping, post-processing):
+
+1. Create `src/<subsystem>/`
+2. Create internal headers in `src/<subsystem>/`
+3. Expose public API in `include/mop/` if application-facing
+4. Create `docs/reference/<subsystem>.mdx`
+5. Link from `docs/reference.mdx`
+
+The subsystem must follow the same layer rules — it may consume the RHI but must not reference backend internals.
+
+## Documentation-Code Invariant
+
+For every directory under `src/`, a corresponding `.mdx` file must exist under `docs/reference/`.  For every `.mdx` file under `docs/reference/`, there must be a corresponding implementation.
+
+```
+docs/reference/rhi.mdx           ↔  src/rhi/
+docs/reference/rasterizer.mdx    ↔  src/rasterizer/
+docs/reference/backend-cpu.mdx   ↔  src/backend/cpu/
+docs/reference/math.mdx          ↔  src/math/
+```
+
+This invariant is checked during review.  If you add code, add docs.  If you add docs, add code.

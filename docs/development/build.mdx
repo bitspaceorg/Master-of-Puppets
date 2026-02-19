@@ -1,0 +1,93 @@
+---
+title: "Build System"
+description: "Make + Nix build instructions for Master of Puppets"
+slug: "development-build"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["development", "build"]
+---
+
+## Build Tools
+
+| Tool  | Role                            |
+| ----- | ------------------------------- |
+| Make  | Build orchestration             |
+| Nix   | Reproducible toolchain and deps |
+| cc    | C11 compiler (clang or gcc)     |
+| ar    | Static archive creation         |
+
+Nix is the canonical build method.  Make is the build driver.  No CMake, no autotools.
+
+## Quick Start
+
+### With Nix (recommended)
+
+```bash
+nix develop          # Enter development shell
+make                 # Build static library
+```
+
+### With Nix Build
+
+```bash
+nix build            # Build in a pure Nix sandbox
+ls ./result/lib/     # libmop.a
+```
+
+### Without Nix
+
+If you have a C11 compiler and `make` installed:
+
+```bash
+make CC=clang        # Or CC=gcc
+```
+
+## Make Targets
+
+| Target         | Effect                                    |
+| -------------- | ----------------------------------------- |
+| `make`         | Build the static library (`libmop.a`)     |
+| `make lib`     | Same as `make`                            |
+| `make clean`   | Remove `build/` directory                 |
+| `make install` | Install to `PREFIX` (default `/usr/local`)|
+
+## Build Outputs
+
+```
+build/
+  obj/          — Object files (mirrors src/ structure)
+  lib/
+    libmop.a    — Static library
+```
+
+## Compiler Flags
+
+```
+-std=c11 -Wall -Wextra -Wpedantic -Werror
+-Wno-unused-parameter -Wno-missing-field-initializers
+```
+
+Debug mode (default): `-O0 -g`
+Release mode: `-O2 -DNDEBUG` (set `RELEASE=1`)
+
+## Nix Flake Structure
+
+The `flake.nix` provides:
+
+- `packages.default` — Nix derivation that builds the project
+- `devShells.default` — Development shell with compiler, make, clang-tools
+
+The core library has zero platform-specific dependencies beyond a C11 compiler.
+
+## Examples
+
+Examples live in `examples/` with their own `Makefile` and `flake.nix`.
+
+```bash
+cd examples && nix develop    # SDL3 + pkg-config
+make                          # Build all examples
+make run                      # Run interactive viewport
+make run-headless             # Run headless PPM exporter
+```
+
+See `examples/Makefile` for all targets.

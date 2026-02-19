@@ -1,0 +1,76 @@
+---
+title: "Architecture"
+description: "System architecture, layer model, and design rationale"
+slug: "architecture"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["architecture", "design"]
+---
+
+Master of Puppets is structured as a strict four-layer stack.  Every dependency points downward.  No layer may reference a layer above it.
+
+```
+  ┌──────────────────────────────┐
+  │        Application           │   examples/rotating_cube.c
+  ├──────────────────────────────┤
+  │      Viewport Public API     │   include/mop/*.h
+  ├──────────────────────────────┤
+  │       Viewport Core          │   src/viewport/
+  ├──────────────────────────────┤
+  │  Render Hardware Interface   │   src/rhi/
+  ├──────────────────────────────┤
+  │   Backend Implementations    │   src/backend/{cpu,opengl,vulkan}/
+  └──────────────────────────────┘
+```
+
+## Subsections
+
+| Page                                            | Topic                                              |
+| ----------------------------------------------- | -------------------------------------------------- |
+| [Layer Separation](architecture-layers)          | Strict boundary rules between layers               |
+| [Frame Lifecycle](architecture-frame-lifecycle)  | What happens during a single render frame          |
+| [Threading Model](architecture-threading)        | Single-threaded guarantees, future-proofing        |
+| [Memory Ownership](architecture-memory)          | Who allocates, who frees, no implicit transfers    |
+| [Extension Strategy](architecture-extension)     | How to add backends, features, and subsystems      |
+
+## Layer Responsibilities
+
+### Application
+
+The application is any program that links against `libmop.a`.  It sees only the public headers in `include/mop/`.  It creates viewports, adds meshes, sets cameras, calls render, reads back pixels.
+
+### Viewport Public API
+
+Defined in `include/mop/*.h`.  Exposes opaque handles (`MopViewport *`, `MopMesh *`), value types (`MopVec3`, `MopMat4`, `MopColor`), and free functions.  No backend-specific types appear here.
+
+### Viewport Core
+
+Defined in `src/viewport/`.  Owns the scene graph (flat mesh array), camera state, and rendering orchestration.  Calls the RHI to create buffers, begin frames, issue draw calls, and read back results.  Never calls backend APIs directly.
+
+### Render Hardware Interface (RHI)
+
+Defined in `src/rhi/rhi.h`.  A function-pointer table (`MopRhiBackend`) that every backend must populate.  The viewport core holds a pointer to this table and calls through it.
+
+### Backend Implementations
+
+Each backend lives in `src/backend/<name>/` and implements every function in `MopRhiBackend`.
+
+## Dependency Rules
+
+| From            | May depend on          | Must not depend on         |
+| --------------- | ---------------------- | -------------------------- |
+| Application     | `include/mop/`        | `src/` (anything internal) |
+| Viewport Core   | `include/mop/`, `rhi` | Backend internals          |
+| RHI             | `include/mop/`        | Backend internals          |
+| Backend         | `include/mop/`, `rhi` | Viewport core, other backends |
+| Math            | C standard library     | Everything else            |
+
+## Design Rationale
+
+**Opaque handles** provide ABI stability.  The application never sees `sizeof(MopViewport)`, so internal fields can change without recompilation.
+
+**Function-pointer table** enables runtime backend selection.  The application chooses `MOP_BACKEND_CPU` or `MOP_BACKEND_OPENGL` at viewport creation — no recompilation needed.
+
+**Flat mesh array** with `active` flags avoids allocator complexity.  The upper bound `MOP_MAX_MESHES` (4096) can be raised by recompiling.
+
+**Column-major matrices** match OpenGL and Vulkan conventions.  `MopMat4.d[col * 4 + row]`.

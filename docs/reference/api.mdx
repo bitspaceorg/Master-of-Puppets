@@ -1,0 +1,129 @@
+---
+title: "API Contracts"
+description: "Public API function contracts, preconditions, and postconditions"
+slug: "reference-api"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "api"]
+---
+
+## Headers
+
+| Header          | Contents                                  |
+| --------------- | ----------------------------------------- |
+| `types.h`       | Value types, math utilities               |
+| `backend.h`     | Backend enumeration and query functions   |
+| `viewport.h`    | Viewport lifecycle, camera, rendering     |
+| `scene.h`       | Mesh creation, removal, transforms        |
+| `picking.h`     | Object picking via ID buffer              |
+
+## Viewport Lifecycle
+
+### `mop_viewport_create`
+
+```c
+MopViewport *mop_viewport_create(const MopViewportDesc *desc);
+```
+
+| Precondition | `desc` non-NULL, `width > 0`, `height > 0`, valid `backend` |
+| ------------ | ------------------------------------------------------------ |
+| Returns      | Valid pointer or NULL on failure                              |
+| Ownership    | Caller owns the pointer; must call `mop_viewport_destroy`    |
+| Defaults     | Camera at `(0,0,5)`, clear `(0.1,0.1,0.1,1)`, solid mode   |
+
+### `mop_viewport_destroy`
+
+```c
+void mop_viewport_destroy(MopViewport *viewport);
+```
+
+| Precondition | NULL or valid viewport pointer |
+| ------------ | ------------------------------ |
+| Effect       | Destroys all meshes, RHI resources, and the viewport itself |
+| NULL         | No-op                          |
+
+### `mop_viewport_resize`
+
+```c
+void mop_viewport_resize(MopViewport *viewport, int width, int height);
+```
+
+| Precondition | `width > 0`, `height > 0`                           |
+| ------------ | ---------------------------------------------------- |
+| Effect       | Reallocates framebuffer, recomputes projection matrix |
+
+## Camera
+
+### `mop_viewport_set_camera`
+
+```c
+void mop_viewport_set_camera(MopViewport *viewport,
+                             MopVec3 eye, MopVec3 target, MopVec3 up,
+                             float fov_degrees,
+                             float near_plane, float far_plane);
+```
+
+| Precondition | `eye != target`, `up` not parallel to view direction  |
+| ------------ | ----------------------------------------------------- |
+| Precondition | `fov_degrees` in `(0, 180)`, `0 < near < far`        |
+| Effect       | Recomputes view and projection matrices immediately    |
+
+## Scene
+
+### `mop_viewport_add_mesh`
+
+```c
+MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc);
+```
+
+| Precondition | Valid arrays, `index_count % 3 == 0`, indices in bounds |
+| ------------ | ------------------------------------------------------- |
+| Copy         | Vertex and index data are **copied** into RHI buffers   |
+| Ownership    | Viewport owns the mesh; app may free its arrays after    |
+| Limit        | `MOP_MAX_MESHES` (4096)                                  |
+
+### `mop_mesh_set_transform`
+
+```c
+void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform);
+```
+
+| Effect | Updates the mesh model matrix; takes effect on next render |
+| ------ | ---------------------------------------------------------- |
+
+## Rendering
+
+### `mop_viewport_render`
+
+```c
+void mop_viewport_render(MopViewport *viewport);
+```
+
+| Effect | Clears buffers, draws all active meshes, finalizes frame |
+| ------ | -------------------------------------------------------- |
+| Sync   | Fully synchronous — returns only when all pixels are written |
+
+### `mop_viewport_read_color`
+
+```c
+const uint8_t *mop_viewport_read_color(MopViewport *viewport,
+                                       int *out_width, int *out_height);
+```
+
+| Returns    | Pointer to RGBA8 data, row-major, top-left origin |
+| ---------- | ------------------------------------------------- |
+| Lifetime   | Valid until next `render`, `resize`, or `destroy`  |
+| Ownership  | Borrowed — caller must not free                    |
+
+## Picking
+
+### `mop_viewport_pick`
+
+```c
+MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y);
+```
+
+| Returns  | `hit=true` with `object_id` and `depth` if a rendered object exists at `(x,y)` |
+| -------- | ------------------------------------------------------------------------------- |
+| Depth    | Normalized `[0, 1]` — 0 is near plane, 1 is far plane                          |
+| Timing   | Reads from the most recently rendered frame                                      |

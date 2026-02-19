@@ -1,0 +1,95 @@
+---
+title: "Software Rasterizer"
+description: "Shared software rasterization module"
+slug: "reference-rasterizer"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "rasterizer"]
+---
+
+## Location
+
+```
+src/rasterizer/
+  rasterizer.h    — Public interface (types + functions)
+  rasterizer.c    — Implementation
+```
+
+## Overview
+
+The software rasterizer is shared rendering infrastructure.  It provides framebuffer management, frustum clipping, triangle rasterization, and line drawing.  Any backend that needs CPU-side rasterization can include `"rasterizer/rasterizer.h"` and call these functions directly.
+
+The CPU backend (`src/backend/cpu/`) delegates all rendering to this module.
+
+## Types
+
+### MopSwFramebuffer
+
+```c
+typedef struct MopSwFramebuffer {
+    int       width, height;
+    uint8_t  *color;       /* RGBA8, size = width * height * 4 */
+    float    *depth;       /* float,  size = width * height     */
+    uint32_t *object_id;   /* uint32, size = width * height     */
+} MopSwFramebuffer;
+```
+
+All buffers use top-left origin.  Row stride equals width.
+
+### MopSwClipVertex
+
+```c
+typedef struct MopSwClipVertex {
+    MopVec4  position;   /* clip-space (before perspective divide) */
+    MopVec3  normal;     /* world-space normal */
+    MopColor color;      /* vertex color */
+} MopSwClipVertex;
+```
+
+## Functions
+
+### Framebuffer Management
+
+| Function                    | Description                                    |
+| --------------------------- | ---------------------------------------------- |
+| `mop_sw_framebuffer_alloc`  | Allocate color, depth, and ID buffers          |
+| `mop_sw_framebuffer_free`   | Free all framebuffer storage                   |
+| `mop_sw_framebuffer_clear`  | Clear to color, depth 1.0, object_id 0         |
+
+### Rasterization
+
+| Function                      | Description                                  |
+| ----------------------------- | -------------------------------------------- |
+| `mop_sw_rasterize_triangle`   | Clip, shade, and rasterize a triangle        |
+| `mop_sw_clip_polygon`         | Sutherland-Hodgman frustum clipping          |
+| `mop_sw_draw_line`            | Bresenham line drawing with depth             |
+
+## Clipping
+
+`mop_sw_clip_polygon` clips against 6 frustum planes in clip space using the Sutherland-Hodgman algorithm:
+
+```
++X: w + x ≥ 0    -X: w - x ≥ 0
++Y: w + y ≥ 0    -Y: w - y ≥ 0
++Z: w + z ≥ 0    -Z: w - z ≥ 0
+```
+
+Maximum output vertices per triangle: 24.  Vertex attributes (position, normal, color) are linearly interpolated at clip boundaries.
+
+## Rasterization
+
+`mop_sw_rasterize_triangle` is the main entry point.  It performs:
+
+1. Frustum clipping via `mop_sw_clip_polygon`
+2. Triangle fan decomposition of the clipped polygon
+3. For each sub-triangle:
+   - Perspective divide (`xyz / w`) → NDC
+   - Viewport transform → screen pixels (Y flipped for top-left origin)
+   - Backface culling (screen-space signed area)
+   - Flat shading: ambient 0.2 + diffuse 0.8 × max(N·L, 0)
+   - Half-space edge function rasterization (solid) or Bresenham (wireframe)
+   - Per-pixel depth test → write color, depth, object_id
+
+## Line Drawing
+
+`mop_sw_draw_line` implements Bresenham's algorithm with depth interpolation.  Used for wireframe mode.

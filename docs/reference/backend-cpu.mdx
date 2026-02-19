@@ -1,0 +1,106 @@
+---
+title: "CPU Backend"
+description: "Software triangle rasterization backend"
+slug: "reference-backend-cpu"
+author: "rahulmnavneeth"
+date: "19 FEB 2026"
+tags: ["reference", "backend", "cpu"]
+---
+
+## Location
+
+```
+src/backend/cpu/
+  cpu_backend.c       — RHI function table implementation
+
+src/rasterizer/
+  rasterizer.h        — Shared software rasterizer interface
+  rasterizer.c        — Triangle rasterization, clipping, line drawing
+```
+
+The CPU backend is a thin RHI adapter that delegates all rasterization to the shared software rasterizer at `src/rasterizer/`.
+
+## Capabilities
+
+| Feature              | Supported |
+| -------------------- | --------- |
+| Solid rendering      | Yes       |
+| Wireframe rendering  | Yes       |
+| Depth buffering      | Yes       |
+| Backface culling     | Yes       |
+| Flat shading         | Yes       |
+| Object ID picking    | Yes       |
+| Framebuffer readback | Yes       |
+| Platform dependency  | None      |
+
+The CPU backend is always available.  It requires no GPU, no drivers, and no platform-specific code.
+
+## Internal Types
+
+### MopSwFramebuffer
+
+```c
+typedef struct MopSwFramebuffer {
+    int       width, height;
+    uint8_t  *color;       /* RGBA8, size = w * h * 4 */
+    float    *depth;       /* float,  size = w * h     */
+    uint32_t *object_id;   /* uint32, size = w * h     */
+} MopSwFramebuffer;
+```
+
+### RHI Handle Mapping
+
+| RHI Handle           | CPU Concrete Type         | Contents                  |
+| -------------------- | ------------------------- | ------------------------- |
+| `MopRhiDevice`       | `struct { int; }`         | Placeholder (no state)    |
+| `MopRhiBuffer`       | `struct { void*, size }`  | `memcpy` of vertex/index data |
+| `MopRhiFramebuffer`  | `struct { MopSwFramebuffer, readback* }` | Color+depth+ID arrays |
+
+## Rasterization Pipeline
+
+For each `draw` call:
+
+1. **Vertex fetch:** Read `MopVertex` array from buffer
+2. **Triangle loop:** For each 3 indices:
+   a. **MVP transform:** Multiply position by `mvp` → clip space
+   b. **Normal transform:** Multiply normal by model matrix (upper 3x3) → world space
+   c. **Frustum clipping:** Sutherland-Hodgman against 6 planes
+   d. **Triangle fan:** Clipped polygon → fan of sub-triangles
+   e. For each sub-triangle:
+      - **Perspective divide:** `xyz / w` → NDC `[-1, 1]`
+      - **Viewport transform:** NDC → screen pixels (Y flipped for top-left origin)
+      - **Backface cull:** Screen-space signed area test
+      - **Flat shading:** Average face normal · directional light
+      - **Rasterize:** Half-space edge functions (solid) or Bresenham (wireframe)
+      - **Per-pixel:** Depth test → write color, depth, object_id
+
+## Clipping
+
+Uses Sutherland-Hodgman algorithm.  The triangle is clipped sequentially against 6 frustum planes in clip space:
+
+```
++X: w + x ≥ 0
+-X: w - x ≥ 0
++Y: w + y ≥ 0
+-Y: w - y ≥ 0
++Z: w + z ≥ 0
+-Z: w - z ≥ 0
+```
+
+Maximum output vertices after clipping a single triangle: 24 (each plane can add at most one vertex; 3 + 6 × 3 < 24 with some margin).
+
+## Lighting
+
+Fixed directional light at `(0.3, 1.0, 0.5)` (world space).  Ambient factor: `0.2`.  Diffuse factor: `0.8 * max(N·L, 0)`.  Total: `clamp(ambient + diffuse)`.
+
+## Edge Function Rasterization
+
+For each pixel in the triangle's bounding box:
+
+```c
+w0 = edge(v1, v2, pixel)
+w1 = edge(v2, v0, pixel)
+w2 = edge(v0, v1, pixel)
+```
+
+CW and CCW triangles are both handled: if the triangle's signed area is negative (CW after Y-flip), all edge values are negated before the `≥ 0` test.  Barycentric weights are normalized by absolute area.
