@@ -1,0 +1,71 @@
+---
+title: "Scene Graph"
+description: "Hierarchical transforms and parent-child mesh relationships"
+slug: "architecture-scene-graph"
+author: "rahulmnavneeth"
+date: "20 FEB 2026"
+tags: ["architecture", "scene-graph", "transforms"]
+---
+
+## Overview
+
+MOP provides a single-level parent-child hierarchy for mesh transforms.  A mesh may have one parent; when a parent has a transform, its children inherit it.  This is sufficient for common patterns like attaching objects to moving platforms or grouping related geometry.
+
+## Data Model
+
+Each internal `MopMesh` stores:
+
+```c
+int32_t  parent_index;     /* -1 = no parent (root)     */
+MopMat4  world_transform;  /* Computed each frame        */
+```
+
+The `world_transform` is the product of the parent's world transform and the mesh's own local TRS matrix.  Root meshes have `world_transform = local_transform`.
+
+## Render-Time Computation
+
+During `mop_viewport_render`, world transforms are computed in two passes:
+
+1. **Pass 1 — Roots:** For every mesh with `parent_index == -1`, `world_transform = local_transform`.
+2. **Pass 2 — Children:** For every mesh with `parent_index >= 0`, `world_transform = parent.world_transform * local_transform`.
+
+This two-pass approach guarantees parents are resolved before children without requiring topological sorting or recursion.
+
+## API
+
+### mop_mesh_set_parent
+
+```c
+void mop_mesh_set_parent(MopMesh *mesh, MopMesh *parent, MopViewport *viewport);
+```
+
+Sets the mesh's parent.  Both meshes must belong to the same viewport.  The viewport is needed to resolve the parent's internal index.
+
+### mop_mesh_clear_parent
+
+```c
+void mop_mesh_clear_parent(MopMesh *mesh);
+```
+
+Makes the mesh a root node (removes its parent relationship).
+
+## Limitations
+
+- **Single level:** MOP supports one level of nesting (parent → child).  Deep hierarchies (grandparent → parent → child) are not propagated beyond one level.
+- **No automatic cleanup:** Removing a parent does not remove its children.  Children become orphaned (their `parent_index` may point to an inactive slot).  Clear parent references before removing a parent mesh.
+- **No sibling ordering:** Children are rendered in mesh array order, not insertion order relative to their parent.
+
+## Usage Pattern
+
+```c
+/* Create a platform and an object on top */
+MopMesh *platform = mop_viewport_add_mesh(vp, &platform_desc);
+MopMesh *object   = mop_viewport_add_mesh(vp, &object_desc);
+
+/* Object follows platform */
+mop_mesh_set_parent(object, platform, vp);
+mop_mesh_set_position(object, (MopVec3){0, 1, 0});  /* local offset */
+
+/* Moving the platform moves the object too */
+mop_mesh_set_position(platform, (MopVec3){3, 0, 0});
+```

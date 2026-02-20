@@ -1,0 +1,124 @@
+---
+title: "Particle System"
+description: "Particle emitters, presets, and billboard rendering"
+slug: "reference-particle"
+author: "rahulmnavneeth"
+date: "20 FEB 2026"
+tags: ["reference", "particle", "simulation"]
+---
+
+## Location
+
+```
+include/mop/particle.h    — Public API
+src/particle/particle.c   — Emitter simulation and mesh generation
+```
+
+## Overview
+
+The particle system provides fire, smoke, and spark effects through a simple emitter API.  Each emitter owns a pool of particles.  Every frame, the viewport core advances all emitters, generates camera-facing billboard quads, and renders them with the configured blend mode.
+
+## Types
+
+### MopParticleEmitterDesc
+
+```c
+typedef struct MopParticleEmitterDesc {
+    uint32_t    max_particles;     /* Pool size (upper bound on live particles) */
+    float       emit_rate;         /* Particles spawned per second             */
+    float       lifetime_min;      /* Minimum particle lifetime (seconds)      */
+    float       lifetime_max;      /* Maximum particle lifetime (seconds)      */
+    MopVec3     position;          /* Emitter world-space position             */
+    MopVec3     velocity_min;      /* Random velocity range minimum            */
+    MopVec3     velocity_max;      /* Random velocity range maximum            */
+    MopVec3     gravity;           /* Acceleration applied each frame          */
+    float       size_start;        /* Particle size at birth                   */
+    float       size_end;          /* Particle size at death                   */
+    MopColor    color_start;       /* Color at birth                           */
+    MopColor    color_end;         /* Color at death                           */
+    MopBlendMode blend_mode;       /* Blend mode for rendering                 */
+    MopTexture *sprite;            /* Optional sprite texture (NULL = flat)    */
+} MopParticleEmitterDesc;
+```
+
+### MopParticle
+
+```c
+typedef struct MopParticle {
+    MopVec3  position;
+    MopVec3  velocity;
+    float    lifetime;
+    float    max_lifetime;
+    float    size;
+    MopColor color;
+    bool     alive;
+} MopParticle;
+```
+
+## Lifecycle Functions
+
+### mop_viewport_add_emitter
+
+```c
+MopParticleEmitter *mop_viewport_add_emitter(MopViewport *viewport,
+                                              const MopParticleEmitterDesc *desc);
+```
+
+Creates an emitter and adds it to the viewport.  The descriptor is copied.  Returns `NULL` on allocation failure.
+
+### mop_viewport_remove_emitter
+
+```c
+void mop_viewport_remove_emitter(MopViewport *viewport,
+                                  MopParticleEmitter *emitter);
+```
+
+Removes the emitter from the viewport and frees all resources.  The pointer is invalid after this call.
+
+## Configuration Functions
+
+### mop_emitter_set_position
+
+```c
+void mop_emitter_set_position(MopParticleEmitter *emitter, MopVec3 position);
+```
+
+Moves the emitter.  Existing particles are unaffected — only new spawns use the new position.
+
+### mop_emitter_set_rate
+
+```c
+void mop_emitter_set_rate(MopParticleEmitter *emitter, float rate);
+```
+
+Changes the emission rate (particles per second).  Set to 0 to stop spawning without deactivating.
+
+### mop_emitter_set_active
+
+```c
+void mop_emitter_set_active(MopParticleEmitter *emitter, bool active);
+```
+
+Enables or disables spawning.  Existing live particles continue their lifecycle regardless.
+
+## Presets
+
+Three convenience constructors return pre-configured `MopParticleEmitterDesc` values:
+
+| Function                         | Particles | Lifetime    | Blend    | Behavior                                |
+|----------------------------------|-----------|-------------|----------|-----------------------------------------|
+| `mop_particle_preset_smoke()`    | 200       | 2.0–4.0 s   | ALPHA    | Gray, grows, rises slowly               |
+| `mop_particle_preset_fire()`     | 300       | 0.5–1.5 s   | ADDITIVE | Yellow to red, shrinks, rises fast      |
+| `mop_particle_preset_sparks()`   | 500       | 0.3–0.8 s   | ADDITIVE | Orange, small, gravity pulls down       |
+
+Presets return descriptors at position `(0, 0, 0)`.  Call `mop_emitter_set_position` after creation to place them.
+
+## Rendering
+
+Particles are rendered as camera-facing billboard quads.  The viewport core extracts the camera's right and up vectors and passes them to `mop_emitter_update`, which generates axis-aligned quads in the particle's mesh buffer.  The mesh is submitted to the RHI with the emitter's blend mode.
+
+Render order: particles are drawn after opaque geometry and water, sorted back-to-front relative to the camera.
+
+## Time Control
+
+Particle simulation is driven by `mop_viewport_set_time(viewport, t)`.  The viewport computes `dt` from the difference between consecutive time values and passes it to each emitter's update function.

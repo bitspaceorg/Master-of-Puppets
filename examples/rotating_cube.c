@@ -2,29 +2,12 @@
  * Master of Puppets — Interactive Viewport Example (SDL3)
  *
  * A real-time interactive viewport rendered by the CPU backend and
- * displayed in an SDL3 window.  Supports object selection and
- * Translate / Rotate / Scale gizmos.
+ * displayed in an SDL3 window.  The app only maps SDL events to MOP
+ * input enums and reacts to MOP output events.  All interaction logic
+ * (selection, gizmo, camera, click-vs-drag) is owned by MOP.
  *
- * Controls:
- *   Left-drag     Orbit camera (preserves selection)
- *   Left-click    Select / deselect objects
- *   Right-drag    Pan camera
- *   Scroll        Zoom in / out
- *   T             Translate gizmo mode
- *   G             Rotate gizmo mode
- *   E             Scale gizmo mode
- *   W             Toggle wireframe / solid
- *   Space         Toggle auto-rotation
- *   R             Reset camera + deselect
- *   Arrow keys    Move camera on XZ plane
- *   S             Spawn cube at random position
- *   Escape        Deselect (or quit if nothing selected)
- *   Q             Quit
- *
- * Build:
- *   cd examples && nix develop    # provides SDL3 + pkg-config
- *   cd .. && make interactive     # builds with pkg-config --cflags/--libs sdl3
- *   make run                      # launches the viewport
+ * Keybindings are loaded from mop.lua if available; otherwise hardcoded
+ * defaults are used.  Edit mop.lua to remap any key.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -33,10 +16,10 @@
 #include <SDL3/SDL.h>
 
 #include <stdio.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 /* -------------------------------------------------------------------------
  * Constants
@@ -44,48 +27,18 @@
 
 #define WINDOW_W          960
 #define WINDOW_H          720
-#define PI                3.14159265358979323846f
 #define MAX_SCENE_OBJECTS 128
-#define CLICK_THRESHOLD   5.0f
 
 /* -------------------------------------------------------------------------
- * Types
+ * Types — app-level registry (business logic only)
  * ------------------------------------------------------------------------- */
 
 typedef struct {
     bool     active;
     uint32_t object_id;
     MopMesh *mesh;
-    MopVec3  position, rotation, scale_val;
     bool     auto_rotates;
-    bool     gizmo_enabled;
 } SceneObject;
-
-/* -------------------------------------------------------------------------
- * Orbit camera
- * ------------------------------------------------------------------------- */
-
-typedef struct {
-    MopVec3 target;
-    float   distance;
-    float   yaw;
-    float   pitch;
-} OrbitCamera;
-
-static MopVec3 orbit_eye(const OrbitCamera *cam) {
-    float cp = cosf(cam->pitch);
-    return (MopVec3){
-        cam->target.x + cam->distance * cp * sinf(cam->yaw),
-        cam->target.y + cam->distance * sinf(cam->pitch),
-        cam->target.z + cam->distance * cp * cosf(cam->yaw)
-    };
-}
-
-static void orbit_apply(const OrbitCamera *cam, MopViewport *vp) {
-    mop_viewport_set_camera(vp, orbit_eye(cam), cam->target,
-                            (MopVec3){ 0, 1, 0 },
-                            60.0f, 0.1f, 100.0f);
-}
 
 /* -------------------------------------------------------------------------
  * Cube geometry — X-macro generated
@@ -121,34 +74,6 @@ static const uint32_t CUBE_INDICES[] = {
 #define CUBE_INDEX_COUNT (sizeof(CUBE_INDICES) / sizeof(CUBE_INDICES[0]))
 
 /* -------------------------------------------------------------------------
- * Ground plane
- * ------------------------------------------------------------------------- */
-
-static const MopVertex GROUND_VERTS[] = {
-    {{ -3, 0, -3 }, { 0,1,0 }, { .35f,.35f,.38f,1 }},
-    {{  3, 0, -3 }, { 0,1,0 }, { .35f,.35f,.38f,1 }},
-    {{  3, 0,  3 }, { 0,1,0 }, { .35f,.35f,.38f,1 }},
-    {{ -3, 0,  3 }, { 0,1,0 }, { .35f,.35f,.38f,1 }},
-};
-static const uint32_t GROUND_IDX[] = { 0,1,2, 2,3,0 };
-
-/* -------------------------------------------------------------------------
- * Transform helpers
- * ------------------------------------------------------------------------- */
-
-static MopMat4 compose_trs(MopVec3 pos, MopVec3 rot, MopVec3 scl) {
-    MopMat4 s  = mop_mat4_scale(scl);
-    MopMat4 rx = mop_mat4_rotate_x(rot.x);
-    MopMat4 ry = mop_mat4_rotate_y(rot.y);
-    MopMat4 rz = mop_mat4_rotate_z(rot.z);
-    MopMat4 t  = mop_mat4_translate(pos);
-    return mop_mat4_multiply(t,
-           mop_mat4_multiply(rz,
-           mop_mat4_multiply(ry,
-           mop_mat4_multiply(rx, s))));
-}
-
-/* -------------------------------------------------------------------------
  * Scene management
  * ------------------------------------------------------------------------- */
 
@@ -161,14 +86,39 @@ static SceneObject *scene_add(SceneObject scene[], MopViewport *vp,
     obj->active       = true;
     obj->object_id    = id;
     obj->mesh         = mop_viewport_add_mesh(vp, desc);
-    obj->position     = pos;
-    obj->rotation     = (MopVec3){0,0,0};
-    obj->scale_val    = (MopVec3){1,1,1};
     obj->auto_rotates = auto_rot;
-    obj->gizmo_enabled = true;
-    MopMat4 xf = compose_trs(pos, obj->rotation, obj->scale_val);
-    mop_mesh_set_transform(obj->mesh, &xf);
+    mop_mesh_set_position(obj->mesh, pos);
     return obj;
+}
+
+/* -------------------------------------------------------------------------
+ * SDL key name → config key name (lowercase)
+ * ------------------------------------------------------------------------- */
+
+static const char *sdl_key_to_config_name(SDL_Keycode key, char *buf, int len) {
+    const char *name = SDL_GetKeyName(key);
+    if (!name || !name[0]) return NULL;
+
+    int i = 0;
+    while (name[i] && i < len - 1) {
+        buf[i] = (char)tolower((unsigned char)name[i]);
+        i++;
+    }
+    buf[i] = '\0';
+    return buf;
+}
+
+/* -------------------------------------------------------------------------
+ * OBJ import file dialog callback (SDL3 async)
+ * ------------------------------------------------------------------------- */
+
+static void obj_dialog_callback(void *userdata, const char *const *filelist,
+                                 int filter) {
+    (void)filter;
+    char **out = (char **)userdata;
+    if (filelist && filelist[0]) {
+        *out = strdup(filelist[0]);
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -218,12 +168,12 @@ int main(int argc, char *argv[]) {
     }
     mop_viewport_set_clear_color(vp, (MopColor){ .12f,.12f,.16f,1 });
 
-    /* ---- Camera ---- */
-    OrbitCamera cam = {
-        .target = { 0, .4f, 0 }, .distance = 4.5f,
-        .yaw = .6f, .pitch = .4f
-    };
-    orbit_apply(&cam, vp);
+    /* ---- Load optional Lua config ---- */
+    MopConfig *cfg = mop_config_load("mop.lua");
+    if (cfg) {
+        mop_config_apply(cfg, vp);
+        printf("Loaded config from mop.lua\n");
+    }
 
     /* ---- Scene registry ---- */
     SceneObject scene[MAX_SCENE_OBJECTS];
@@ -237,14 +187,6 @@ int main(int argc, char *argv[]) {
         .object_id = cube_id
     }, (MopVec3){0, .5f, 0}, true);
 
-    uint32_t ground_id = next_id++;
-    (void)ground_id;
-    scene_add(scene, vp, &(MopMeshDesc){
-        .vertices = GROUND_VERTS, .vertex_count = 4,
-        .indices  = GROUND_IDX, .index_count = 6,
-        .object_id = ground_id
-    }, (MopVec3){0, 0, 0}, false);
-
     /* ---- SDL texture for CPU framebuffer blit ---- */
     int win_w = WINDOW_W, win_h = WINDOW_H;
     SDL_Texture *tex = SDL_CreateTexture(
@@ -252,20 +194,10 @@ int main(int argc, char *argv[]) {
         SDL_TEXTUREACCESS_STREAMING, win_w, win_h
     );
 
-    /* ---- Selection & gizmo state ---- */
-    uint32_t     selected_id    = 0;
-    MopGizmo    *gizmo          = mop_gizmo_create(vp);
-    bool         dragging_gizmo = false;
-    MopGizmoAxis drag_axis      = MOP_GIZMO_AXIS_NONE;
+    /* ---- OBJ import state (for async SDL file dialog) ---- */
+    char *pending_obj_path = NULL;
 
-    /* ---- Mouse / interaction state ---- */
-    bool  running       = true;
-    bool  left_btn_down = false;    /* left button currently held */
-    bool  click_resolved = false;   /* drag threshold exceeded */
-    float click_start_x = 0, click_start_y = 0;
-    bool  dragging_l    = false;    /* orbiting */
-    bool  dragging_r    = false;
-    bool  wireframe     = false;
+    bool running = true;
     srand((unsigned)SDL_GetPerformanceCounter());
 
     Uint64 last = SDL_GetPerformanceCounter();
@@ -275,7 +207,7 @@ int main(int argc, char *argv[]) {
     printf("  Left-drag: orbit  |  Right-drag: pan  |  Scroll: zoom\n");
     printf("  Click: select  |  T: translate  |  G: rotate  |  E: scale\n");
     printf("  W: wireframe  |  Space: pause  |  R: reset  |  Esc: deselect/quit\n");
-    printf("  Arrow keys: move camera  |  S: spawn cube\n");
+    printf("  Arrow keys: move camera  |  S: spawn cube  |  I: import .obj\n");
 
     /* ---- Event loop ---- */
     while (running) {
@@ -283,6 +215,7 @@ int main(int argc, char *argv[]) {
         float dt = (float)(now - last) / (float)freq;
         last = now;
 
+        /* ---- SDL -> MOP input mapping ---- */
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
@@ -291,201 +224,155 @@ int main(int argc, char *argv[]) {
                 running = false;
                 break;
 
-            case SDL_EVENT_KEY_DOWN:
-                switch (ev.key.key) {
-                case SDLK_Q:
-                    running = false; break;
-                case SDLK_ESCAPE:
-                    if (selected_id) {
-                        mop_gizmo_hide(gizmo);
-                        selected_id = 0;
-                        dragging_gizmo = false;
-                        printf("Deselected\n");
-                    } else {
+            /* ----------------------------------------------------------
+             * Keyboard — config-driven dispatch
+             *
+             * 1. Convert SDL key name to lowercase config key name
+             * 2. Look up action in config keymap
+             * 3. If it's a known MOP action → mop_viewport_input
+             * 4. If it's an app action → handle locally
+             * 5. Fallback: hardcoded defaults (no config loaded)
+             * ---------------------------------------------------------- */
+            case SDL_EVENT_KEY_DOWN: {
+                char key_buf[32];
+                const char *key_name = sdl_key_to_config_name(
+                    ev.key.key, key_buf, sizeof(key_buf));
+                const char *action = key_name
+                    ? mop_config_get_action(cfg, key_name) : NULL;
+
+                if (action) {
+                    /* Try as MOP input first */
+                    int input = mop_config_resolve_input(action);
+                    if (input >= 0) {
+                        /* "deselect" has special app logic: quit if nothing selected */
+                        if (input == MOP_INPUT_DESELECT
+                            && !mop_viewport_get_selected(vp)) {
+                            running = false;
+                        } else {
+                            mop_viewport_input(vp,
+                                &(MopInputEvent){.type = input});
+                        }
+                    }
+                    /* App-specific actions */
+                    else if (strcmp(action, "quit") == 0) {
                         running = false;
                     }
-                    break;
-                case SDLK_W:
-                    wireframe = !wireframe;
-                    mop_viewport_set_render_mode(vp,
-                        wireframe ? MOP_RENDER_WIREFRAME : MOP_RENDER_SOLID);
-                    break;
-                case SDLK_SPACE:
-                    scene[cube_id-1].auto_rotates = !scene[cube_id-1].auto_rotates;
-                    break;
-                case SDLK_R:
-                    cam = (OrbitCamera){
-                        .target = { 0,.4f,0 }, .distance = 4.5f,
-                        .yaw = .6f, .pitch = .4f
-                    };
-                    mop_gizmo_hide(gizmo);
-                    selected_id = 0;
-                    dragging_gizmo = false;
-                    scene[cube_id-1].rotation = (MopVec3){0,0,0};
-                    scene[cube_id-1].auto_rotates = true;
-                    break;
-                case SDLK_T:
-                    if (selected_id
-                        && mop_gizmo_get_mode(gizmo) != MOP_GIZMO_TRANSLATE
-                        && scene[selected_id-1].gizmo_enabled) {
-                        mop_gizmo_set_mode(gizmo, MOP_GIZMO_TRANSLATE);
-                        printf("Gizmo: Translate\n");
+                    else if (strcmp(action, "toggle_auto_rotate") == 0) {
+                        scene[cube_id-1].auto_rotates =
+                            !scene[cube_id-1].auto_rotates;
                     }
-                    break;
-                case SDLK_G:
-                    if (selected_id
-                        && mop_gizmo_get_mode(gizmo) != MOP_GIZMO_ROTATE
-                        && scene[selected_id-1].gizmo_enabled) {
-                        mop_gizmo_set_mode(gizmo, MOP_GIZMO_ROTATE);
-                        printf("Gizmo: Rotate\n");
+                    else if (strcmp(action, "spawn_cube") == 0) {
+                        if (next_id <= MAX_SCENE_OBJECTS) {
+                            float rx = ((float)rand()/(float)RAND_MAX)*6.0f-3.0f;
+                            float rz = ((float)rand()/(float)RAND_MAX)*6.0f-3.0f;
+                            uint32_t sid = next_id++;
+                            scene_add(scene, vp, &(MopMeshDesc){
+                                .vertices=CUBE_VERTS, .vertex_count=CUBE_VERT_COUNT,
+                                .indices=CUBE_INDICES, .index_count=CUBE_INDEX_COUNT,
+                                .object_id=sid
+                            }, (MopVec3){rx, 0.5f, rz}, false);
+                            printf("Spawned cube #%u at (%.1f, %.1f)\n",
+                                   sid, rx, rz);
+                        }
                     }
-                    break;
-                case SDLK_E:
-                    if (selected_id
-                        && mop_gizmo_get_mode(gizmo) != MOP_GIZMO_SCALE
-                        && scene[selected_id-1].gizmo_enabled) {
-                        mop_gizmo_set_mode(gizmo, MOP_GIZMO_SCALE);
-                        printf("Gizmo: Scale\n");
+                    else if (strcmp(action, "import_obj") == 0) {
+                        static const SDL_DialogFileFilter obj_filter[] = {
+                            { "Wavefront OBJ", "obj" },
+                        };
+                        SDL_ShowOpenFileDialog(obj_dialog_callback,
+                            &pending_obj_path, window,
+                            obj_filter, 1, NULL, false);
                     }
-                    break;
-                case SDLK_S:
-                    if (next_id <= MAX_SCENE_OBJECTS) {
-                        float rx = ((float)rand()/(float)RAND_MAX)*6.0f - 3.0f;
-                        float rz = ((float)rand()/(float)RAND_MAX)*6.0f - 3.0f;
-                        uint32_t sid = next_id++;
-                        scene_add(scene, vp, &(MopMeshDesc){
-                            .vertices = CUBE_VERTS, .vertex_count = CUBE_VERT_COUNT,
-                            .indices  = CUBE_INDICES, .index_count = CUBE_INDEX_COUNT,
-                            .object_id = sid
-                        }, (MopVec3){rx, 0.5f, rz}, false);
-                        printf("Spawned cube #%u at (%.1f, %.1f)\n", sid, rx, rz);
+                } else {
+                    /* Fallback: hardcoded defaults when no config */
+                    switch (ev.key.key) {
+                    case SDLK_Q: running = false; break;
+                    case SDLK_ESCAPE:
+                        if (mop_viewport_get_selected(vp))
+                            mop_viewport_input(vp, &(MopInputEvent){
+                                .type = MOP_INPUT_DESELECT});
+                        else running = false;
+                        break;
+                    case SDLK_T:
+                        mop_viewport_input(vp, &(MopInputEvent){
+                            .type = MOP_INPUT_MODE_TRANSLATE}); break;
+                    case SDLK_G:
+                        mop_viewport_input(vp, &(MopInputEvent){
+                            .type = MOP_INPUT_MODE_ROTATE}); break;
+                    case SDLK_E:
+                        mop_viewport_input(vp, &(MopInputEvent){
+                            .type = MOP_INPUT_MODE_SCALE}); break;
+                    case SDLK_W:
+                        mop_viewport_input(vp, &(MopInputEvent){
+                            .type = MOP_INPUT_TOGGLE_WIREFRAME}); break;
+                    case SDLK_R:
+                        mop_viewport_input(vp, &(MopInputEvent){
+                            .type = MOP_INPUT_RESET_VIEW}); break;
+                    case SDLK_SPACE:
+                        scene[cube_id-1].auto_rotates =
+                            !scene[cube_id-1].auto_rotates;
+                        break;
+                    case SDLK_S:
+                        if (next_id <= MAX_SCENE_OBJECTS) {
+                            float rx = ((float)rand()/(float)RAND_MAX)*6.0f-3.0f;
+                            float rz = ((float)rand()/(float)RAND_MAX)*6.0f-3.0f;
+                            uint32_t sid = next_id++;
+                            scene_add(scene, vp, &(MopMeshDesc){
+                                .vertices=CUBE_VERTS, .vertex_count=CUBE_VERT_COUNT,
+                                .indices=CUBE_INDICES, .index_count=CUBE_INDEX_COUNT,
+                                .object_id=sid
+                            }, (MopVec3){rx, 0.5f, rz}, false);
+                            printf("Spawned cube #%u at (%.1f, %.1f)\n",
+                                   sid, rx, rz);
+                        }
+                        break;
+                    case SDLK_I: {
+                        static const SDL_DialogFileFilter obj_filter[] = {
+                            { "Wavefront OBJ", "obj" },
+                        };
+                        SDL_ShowOpenFileDialog(obj_dialog_callback,
+                            &pending_obj_path, window,
+                            obj_filter, 1, NULL, false);
+                        break;
                     }
-                    break;
-                default: break;
+                    default: break;
+                    }
                 }
                 break;
-
-            /* ----------------------------------------------------------
-             * Mouse interaction: click vs drag distinction
-             *
-             * Button-down: only start gizmo drags immediately.
-             * Motion:      if mouse moves past threshold, start orbit.
-             * Button-up:   if threshold was NOT exceeded, treat as click
-             *              (select / deselect).
-             * ---------------------------------------------------------- */
+            }
 
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (ev.button.button == SDL_BUTTON_LEFT) {
-                    left_btn_down  = true;
-                    click_resolved = false;
-                    click_start_x  = ev.button.x;
-                    click_start_y  = ev.button.y;
-
-                    /* Gizmo handle hit → start drag immediately */
-                    MopPickResult p = mop_viewport_pick(vp,
-                        (int)ev.button.x, (int)ev.button.y);
-                    MopGizmoAxis axis = mop_gizmo_test_pick(gizmo, p);
-                    if (axis != MOP_GIZMO_AXIS_NONE) {
-                        dragging_gizmo = true;
-                        click_resolved = true;
-                        drag_axis = axis;
-                    }
-                }
-                if (ev.button.button == SDL_BUTTON_RIGHT)
-                    dragging_r = true;
+                if (ev.button.button == SDL_BUTTON_LEFT)
+                    mop_viewport_input(vp, &(MopInputEvent){
+                        MOP_INPUT_POINTER_DOWN, ev.button.x, ev.button.y,
+                        0, 0, 0});
+                else if (ev.button.button == SDL_BUTTON_RIGHT)
+                    mop_viewport_input(vp, &(MopInputEvent){
+                        MOP_INPUT_SECONDARY_DOWN, ev.button.x, ev.button.y,
+                        0, 0, 0});
                 break;
 
             case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (ev.button.button == SDL_BUTTON_LEFT) {
-                    if (left_btn_down && !click_resolved) {
-                        /* Mouse barely moved — this is a click */
-                        MopPickResult p = mop_viewport_pick(vp,
-                            (int)ev.button.x, (int)ev.button.y);
-                        MopGizmoAxis axis = mop_gizmo_test_pick(gizmo, p);
-                        if (axis != MOP_GIZMO_AXIS_NONE) {
-                            /* Clicked gizmo (no drag) — ignore */
-                        } else if (p.hit && p.object_id >= 1
-                                   && p.object_id <= MAX_SCENE_OBJECTS
-                                   && scene[p.object_id-1].active) {
-                            /* Select scene object */
-                            if (selected_id != p.object_id) {
-                                selected_id = p.object_id;
-                                if (scene[selected_id-1].gizmo_enabled) {
-                                    mop_gizmo_show(gizmo,
-                                        scene[selected_id-1].position);
-                                    mop_gizmo_set_rotation(gizmo,
-                                        scene[selected_id-1].rotation);
-                                } else {
-                                    mop_gizmo_hide(gizmo);
-                                }
-                                printf("Selected object %u\n", selected_id);
-                            }
-                        } else {
-                            /* Clicked empty — deselect */
-                            if (selected_id) {
-                                mop_gizmo_hide(gizmo);
-                                selected_id = 0;
-                                printf("Deselected\n");
-                            }
-                        }
-                    }
-                    left_btn_down  = false;
-                    dragging_l     = false;
-                    dragging_gizmo = false;
-                    click_resolved = false;
-                }
-                if (ev.button.button == SDL_BUTTON_RIGHT)
-                    dragging_r = false;
+                if (ev.button.button == SDL_BUTTON_LEFT)
+                    mop_viewport_input(vp, &(MopInputEvent){
+                        MOP_INPUT_POINTER_UP, ev.button.x, ev.button.y,
+                        0, 0, 0});
+                else if (ev.button.button == SDL_BUTTON_RIGHT)
+                    mop_viewport_input(vp, &(MopInputEvent){
+                        .type = MOP_INPUT_SECONDARY_UP});
                 break;
 
             case SDL_EVENT_MOUSE_MOTION:
-                /* Promote pending left-click to orbit drag once threshold
-                 * is exceeded — selection is preserved. */
-                if (left_btn_down && !click_resolved && !dragging_gizmo) {
-                    float dx = ev.motion.x - click_start_x;
-                    float dy = ev.motion.y - click_start_y;
-                    if (dx*dx + dy*dy > CLICK_THRESHOLD*CLICK_THRESHOLD) {
-                        click_resolved = true;
-                        dragging_l = true;
-                    }
-                }
-
-                /* Gizmo drag */
-                if (dragging_gizmo && selected_id) {
-                    SceneObject *sel = &scene[selected_id-1];
-                    MopGizmoDelta d = mop_gizmo_drag(gizmo, drag_axis,
-                        ev.motion.xrel, ev.motion.yrel);
-
-                    sel->position = mop_vec3_add(sel->position, d.translate);
-                    sel->rotation = mop_vec3_add(sel->rotation, d.rotate);
-                    sel->scale_val = mop_vec3_add(sel->scale_val, d.scale);
-
-                    /* Clamp scale to minimum */
-                    if (sel->scale_val.x < 0.05f) sel->scale_val.x = 0.05f;
-                    if (sel->scale_val.y < 0.05f) sel->scale_val.y = 0.05f;
-                    if (sel->scale_val.z < 0.05f) sel->scale_val.z = 0.05f;
-
-                    mop_gizmo_set_position(gizmo, sel->position);
-                    mop_gizmo_set_rotation(gizmo, sel->rotation);
-                } else if (dragging_l) {
-                    cam.yaw   -= ev.motion.xrel * 0.005f;
-                    cam.pitch += ev.motion.yrel * 0.005f;
-                    if (cam.pitch >  1.5f) cam.pitch =  1.5f;
-                    if (cam.pitch < -1.5f) cam.pitch = -1.5f;
-                }
-                if (dragging_r) {
-                    MopVec3 right = { cosf(cam.yaw), 0, -sinf(cam.yaw) };
-                    float s = cam.distance * 0.003f;
-                    cam.target.x -= right.x * ev.motion.xrel * s;
-                    cam.target.z -= right.z * ev.motion.xrel * s;
-                    cam.target.y += ev.motion.yrel * s;
-                }
+                mop_viewport_input(vp, &(MopInputEvent){
+                    MOP_INPUT_POINTER_MOVE,
+                    ev.motion.x, ev.motion.y,
+                    ev.motion.xrel, ev.motion.yrel, 0});
                 break;
 
             case SDL_EVENT_MOUSE_WHEEL:
-                cam.distance -= ev.wheel.y * 0.3f;
-                if (cam.distance < 0.5f)  cam.distance = 0.5f;
-                if (cam.distance > 30.0f) cam.distance = 30.0f;
+                mop_viewport_input(vp, &(MopInputEvent){
+                    .type = MOP_INPUT_SCROLL,
+                    .scroll = ev.wheel.y});
                 break;
 
             case SDL_EVENT_WINDOW_RESIZED: {
@@ -505,34 +392,68 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* ---- Arrow key camera movement ---- */
+        /* ---- Continuous camera movement (arrow keys) ---- */
         {
             const bool *keys = SDL_GetKeyboardState(NULL);
             float speed = 3.0f * dt;
-            float fwd_x = -sinf(cam.yaw), fwd_z = -cosf(cam.yaw);
-            float rgt_x =  cosf(cam.yaw), rgt_z = -sinf(cam.yaw);
-            if (keys[SDL_SCANCODE_UP])    { cam.target.x += fwd_x*speed; cam.target.z += fwd_z*speed; }
-            if (keys[SDL_SCANCODE_DOWN])  { cam.target.x -= fwd_x*speed; cam.target.z -= fwd_z*speed; }
-            if (keys[SDL_SCANCODE_RIGHT]) { cam.target.x += rgt_x*speed; cam.target.z += rgt_z*speed; }
-            if (keys[SDL_SCANCODE_LEFT])  { cam.target.x -= rgt_x*speed; cam.target.z -= rgt_z*speed; }
+            float fwd = 0, rgt = 0;
+            if (keys[SDL_SCANCODE_UP])    fwd += speed;
+            if (keys[SDL_SCANCODE_DOWN])  fwd -= speed;
+            if (keys[SDL_SCANCODE_RIGHT]) rgt += speed;
+            if (keys[SDL_SCANCODE_LEFT])  rgt -= speed;
+            if (fwd != 0 || rgt != 0)
+                mop_viewport_input(vp, &(MopInputEvent){
+                    .type = MOP_INPUT_CAMERA_MOVE,
+                    .dx = rgt, .dy = fwd});
         }
 
-        /* ---- Update scene transforms ---- */
+        /* ---- Process pending OBJ import ---- */
+        if (pending_obj_path) {
+            MopObjMesh obj;
+            if (mop_obj_load(pending_obj_path, &obj)
+                && next_id <= MAX_SCENE_OBJECTS) {
+                uint32_t sid = next_id++;
+                /* Place model so its bottom sits on the ground plane.
+                 * The loader centers at origin, so bbox_min.y is negative.
+                 * Shift up by -bbox_min.y. */
+                float ground_y = -obj.bbox_min.y;
+                SceneObject *o = scene_add(scene, vp, &(MopMeshDesc){
+                    .vertices = obj.vertices,
+                    .vertex_count = obj.vertex_count,
+                    .indices  = obj.indices,
+                    .index_count = obj.index_count,
+                    .object_id = sid
+                }, (MopVec3){0, ground_y, 0}, false);
+                if (o) printf("Imported OBJ #%u (%u verts, %u tris) from %s\n",
+                    sid, obj.vertex_count, obj.index_count / 3,
+                    pending_obj_path);
+                mop_obj_free(&obj);
+            } else {
+                printf("Failed to load OBJ: %s\n", pending_obj_path);
+            }
+            free(pending_obj_path);
+            pending_obj_path = NULL;
+        }
+
+        /* ---- Poll MOP events — app reacts ---- */
+        MopEvent mev;
+        while (mop_viewport_poll_event(vp, &mev)) {
+            if (mev.type == MOP_EVENT_SELECTED)
+                printf("Selected object %u\n", mev.object_id);
+            if (mev.type == MOP_EVENT_DESELECTED)
+                printf("Deselected\n");
+        }
+
+        /* ---- App-specific: auto-rotate unselected cubes ---- */
+        uint32_t sel = mop_viewport_get_selected(vp);
         for (int i = 0; i < MAX_SCENE_OBJECTS; i++) {
-            SceneObject *obj = &scene[i];
-            if (!obj->active) continue;
-            if (obj->auto_rotates && obj->object_id != selected_id)
-                obj->rotation.y += dt * 0.8f;
-            MopMat4 xf = compose_trs(obj->position, obj->rotation,
-                                     obj->scale_val);
-            mop_mesh_set_transform(obj->mesh, &xf);
+            SceneObject *o = &scene[i];
+            if (!o->active || !o->auto_rotates) continue;
+            if (o->object_id == sel) continue;
+            MopVec3 r = mop_mesh_get_rotation(o->mesh);
+            r.y += dt * 0.8f;
+            mop_mesh_set_rotation(o->mesh, r);
         }
-        if (selected_id && scene[selected_id-1].gizmo_enabled) {
-            mop_gizmo_set_position(gizmo, scene[selected_id-1].position);
-            mop_gizmo_set_rotation(gizmo, scene[selected_id-1].rotation);
-        }
-
-        orbit_apply(&cam, vp);
 
         /* ---- Render ---- */
         mop_viewport_render(vp);
@@ -550,7 +471,8 @@ int main(int argc, char *argv[]) {
 
     /* ---- Cleanup ---- */
     printf("Shutting down...\n");
-    mop_gizmo_destroy(gizmo);
+    free(pending_obj_path);
+    mop_config_free(cfg);
     SDL_DestroyTexture(tex);
     mop_viewport_destroy(vp);
     SDL_DestroyRenderer(renderer);

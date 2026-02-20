@@ -18,6 +18,7 @@
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
+typedef struct MopMesh     MopMesh;
 typedef struct MopGizmo    MopGizmo;
 
 /* -------------------------------------------------------------------------
@@ -71,10 +72,14 @@ void mop_gizmo_destroy(MopGizmo *gizmo);
  * Visibility
  *
  * show  — creates handle meshes in the viewport at the given position.
- * hide  — removes handle meshes from the viewport.
+ *         If target is non-NULL, the gizmo makes it semi-transparent so
+ *         the center crosshair is visible through it.  Opacity is restored
+ *         automatically by hide or by a subsequent show with a different
+ *         target.  Pass NULL to skip auto-transparency.
+ * hide  — removes handle meshes and restores target opacity.
  * ------------------------------------------------------------------------- */
 
-void mop_gizmo_show(MopGizmo *gizmo, MopVec3 position);
+void mop_gizmo_show(MopGizmo *gizmo, MopVec3 position, MopMesh *target);
 void mop_gizmo_hide(MopGizmo *gizmo);
 
 /* -------------------------------------------------------------------------
@@ -85,6 +90,10 @@ void         mop_gizmo_set_mode(MopGizmo *gizmo, MopGizmoMode mode);
 MopGizmoMode mop_gizmo_get_mode(const MopGizmo *gizmo);
 void         mop_gizmo_set_position(MopGizmo *gizmo, MopVec3 position);
 void         mop_gizmo_set_rotation(MopGizmo *gizmo, MopVec3 rotation);
+
+/* Refresh handle transforms (call each frame to keep gizmo screen-size
+ * stable as the camera moves). */
+void         mop_gizmo_update(MopGizmo *gizmo);
 
 /* -------------------------------------------------------------------------
  * Picking

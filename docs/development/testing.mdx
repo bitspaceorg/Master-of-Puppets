@@ -1,0 +1,101 @@
+---
+title: "Testing"
+description: "Test framework, test organization, and running tests"
+slug: "development-testing"
+author: "rahulmnavneeth"
+date: "20 FEB 2026"
+tags: ["development", "testing"]
+---
+
+## Running Tests
+
+```bash
+make test
+```
+
+This builds all test binaries in `build/tests/` and runs them sequentially.  The exit code is non-zero if any test fails.
+
+## Test Framework
+
+MOP uses a custom minimal test harness with no external dependencies.  The harness is defined in `tests/test_harness.h`.
+
+### Writing a Test
+
+```c
+#include "test_harness.h"
+#include <mop/mop.h>
+
+static void test_example(void) {
+    TEST_BEGIN("example_name");
+
+    int result = 1 + 1;
+    TEST_ASSERT(result == 2);
+    TEST_ASSERT_FLOAT_EQ(3.14f, 3.14f);
+    TEST_ASSERT_VEC3_EQ(mop_vec3_add(
+        (MopVec3){1,0,0}, (MopVec3){0,1,0}),
+        1.0f, 1.0f, 0.0f);
+
+    TEST_END();
+}
+
+int main(void) {
+    TEST_SUITE_BEGIN("my_module");
+    TEST_RUN(test_example);
+    TEST_REPORT();
+    TEST_EXIT();
+}
+```
+
+### Available Assertions
+
+| Macro                                | Description                                  |
+|--------------------------------------|----------------------------------------------|
+| `TEST_ASSERT(expr)`                  | Fails if `expr` is false                     |
+| `TEST_ASSERT_MSG(expr, msg)`         | Fails with a custom message                  |
+| `TEST_ASSERT_FLOAT_EQ(a, b)`        | Fails if `|a - b| > 1e-4`                   |
+| `TEST_ASSERT_VEC3_EQ(v, x, y, z)`   | Fails if any component differs by > 1e-4     |
+
+### Test Structure
+
+| Macro                    | Purpose                                         |
+|--------------------------|------------------------------------------------|
+| `TEST_SUITE_BEGIN(name)` | Prints the suite name header                    |
+| `TEST_BEGIN(name)`       | Starts a test case                              |
+| `TEST_END()`             | Ends a test case, prints PASS/FAIL              |
+| `TEST_RUN(fn)`           | Calls a test function                           |
+| `TEST_REPORT()`          | Prints the summary (total, passed, failed)      |
+| `TEST_EXIT()`            | Returns 0 on success, 1 on any failure          |
+
+## Test Organization
+
+Each test file covers one module:
+
+```
+tests/
+  test_harness.h       — Framework (header-only)
+  test_math.c          — Vec3/Mat4 operations, column-major layout
+  test_rhi.c           — Backend resolution, device lifecycle
+  test_viewport.c      — Viewport lifecycle, mesh management, picking
+  test_camera.c        — Camera defaults, orbit, pan, zoom, bounds
+  test_loader.c        — OBJ loading, AABB verification, error handling
+  test_gizmo.c         — Gizmo lifecycle, mode switching, handle IDs
+  test_input.c         — Event queue, state transitions
+  fixtures/
+    cube.obj           — Minimal test OBJ (8 vertices, 12 triangles)
+```
+
+## Adding a New Test
+
+1. Create `tests/test_mymodule.c` following the pattern above
+2. The Makefile automatically discovers `tests/test_*.c` files via wildcard
+3. Run `make test` to build and execute
+
+## Build Integration
+
+Tests link against `build/lib/libmop.a` with flags `-lm -lpthread`.  Each test is a standalone binary — no shared test state between files.
+
+```makefile
+# From the root Makefile
+$(TEST_BIN)/%: $(TEST_DIR)/%.c $(LIB_OUT) | $(TEST_BIN)
+	$(CC) $(CFLAGS) -I$(TEST_DIR) $< -L$(LIB_DIR) -lmop $(TEST_LDFLAGS) -o $@
+```

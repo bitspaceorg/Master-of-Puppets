@@ -13,6 +13,7 @@
 #define MOP_SW_RASTERIZER_H
 
 #include <mop/types.h>
+#include <mop/light.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -50,6 +51,8 @@ typedef struct MopSwClipVertex {
     MopVec4  position;   /* clip-space (before perspective divide) */
     MopVec3  normal;     /* world-space normal */
     MopColor color;      /* vertex color */
+    float    u, v;       /* texture coordinates */
+    MopVec3  tangent;    /* world-space tangent (for normal mapping) */
 } MopSwClipVertex;
 
 /* -------------------------------------------------------------------------
@@ -66,13 +69,101 @@ typedef struct MopSwClipVertex {
  * fb         : target framebuffer
  * ------------------------------------------------------------------------- */
 
+/* Normal map texture data for the rasterizer (optional, NULL = disabled) */
+typedef struct MopSwNormalMap {
+    const uint8_t *data;   /* RGBA8 normal map pixels */
+    int            width;
+    int            height;
+} MopSwNormalMap;
+
 void mop_sw_rasterize_triangle(const MopSwClipVertex vertices[3],
                                 uint32_t object_id,
                                 bool wireframe,
                                 bool depth_test,
                                 bool cull_back,
                                 MopVec3 light_dir,
+                                float ambient,
+                                float opacity,
+                                bool smooth_shading,
+                                MopBlendMode blend_mode,
                                 MopSwFramebuffer *fb);
+
+/* -------------------------------------------------------------------------
+ * Screen-space vertex — output of perspective division + viewport transform
+ * ------------------------------------------------------------------------- */
+
+typedef struct MopSwScreenVertex {
+    float    sx, sy, sz;    /* screen-space position */
+    MopVec3  normal;        /* world-space normal */
+    MopColor color;         /* vertex color */
+    float    u, v;          /* texture coordinates */
+    MopVec3  tangent;       /* world-space tangent (for normal mapping) */
+} MopSwScreenVertex;
+
+/* -------------------------------------------------------------------------
+ * Smooth-shaded triangle rasterization (Gouraud)
+ *
+ * Interpolates per-vertex normals across the triangle using barycentric
+ * coordinates.  Computes per-pixel N.L for smooth lighting.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
+                                       uint32_t object_id,
+                                       bool depth_test,
+                                       MopVec3 light_dir,
+                                       float ambient,
+                                       float opacity,
+                                       MopBlendMode blend_mode,
+                                       MopSwFramebuffer *fb);
+
+/* Smooth-shaded triangle rasterization with multi-light support.
+ * If lights is non-NULL and light_count > 0, accumulates contribution
+ * from all active lights (directional, point, spot).
+ * If lights is NULL, falls back to single-light (light_dir + ambient). */
+void mop_sw_rasterize_triangle_smooth_ml(const MopSwScreenVertex verts[3],
+                                          uint32_t object_id,
+                                          bool depth_test,
+                                          MopVec3 light_dir,
+                                          float ambient,
+                                          float opacity,
+                                          MopBlendMode blend_mode,
+                                          const MopLight *lights,
+                                          uint32_t light_count,
+                                          MopVec3 cam_eye,
+                                          MopSwFramebuffer *fb);
+
+/* Smooth-shaded triangle rasterization with normal mapping.
+ * If normal_map is non-NULL, tangent-space normals are sampled from the
+ * normal map and transformed to world space using the TBN matrix. */
+void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
+                                          uint32_t object_id,
+                                          bool depth_test,
+                                          MopVec3 light_dir,
+                                          float ambient,
+                                          float opacity,
+                                          MopBlendMode blend_mode,
+                                          const MopSwNormalMap *normal_map,
+                                          MopSwFramebuffer *fb);
+
+/* -------------------------------------------------------------------------
+ * Full triangle rasterization with multi-light support
+ *
+ * Same as mop_sw_rasterize_triangle but routes to the multi-light
+ * smooth/flat shading paths when lights are available.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_rasterize_triangle_full(const MopSwClipVertex vertices[3],
+                                     uint32_t object_id,
+                                     bool wireframe, bool depth_test,
+                                     bool cull_back,
+                                     MopVec3 light_dir, float ambient,
+                                     float opacity,
+                                     bool smooth_shading,
+                                     MopBlendMode blend_mode,
+                                     const MopLight *lights,
+                                     uint32_t light_count,
+                                     MopVec3 cam_eye,
+                                     MopSwFramebuffer *fb);
 
 /* -------------------------------------------------------------------------
  * Sutherland-Hodgman clipping

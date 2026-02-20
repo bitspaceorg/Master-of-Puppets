@@ -13,6 +13,8 @@
 
 #include <mop/types.h>
 #include <mop/backend.h>
+#include <mop/light.h>
+#include <mop/vertex_format.h>
 
 /* -------------------------------------------------------------------------
  * Opaque RHI handles — each backend defines the concrete structs
@@ -21,6 +23,7 @@
 typedef struct MopRhiDevice      MopRhiDevice;
 typedef struct MopRhiBuffer      MopRhiBuffer;
 typedef struct MopRhiFramebuffer MopRhiFramebuffer;
+typedef struct MopRhiTexture     MopRhiTexture;
 
 /* -------------------------------------------------------------------------
  * Buffer descriptor
@@ -55,9 +58,34 @@ typedef struct MopRhiDrawCall {
     MopMat4       projection;
     MopMat4       mvp;
     MopColor      base_color;
+    float         opacity;
+    MopVec3       light_dir;
+    float         ambient;
+    MopShadingMode shading_mode;
     bool          wireframe;
     bool          depth_test;
     bool          backface_cull;
+
+    /* Texture (Phase 2C) — NULL = no texture */
+    MopRhiTexture *texture;
+
+    /* Blend mode (Phase 6A) */
+    MopBlendMode   blend_mode;
+
+    /* Material properties (Phase 2D) */
+    float          metallic;
+    float          roughness;
+    MopVec3        emissive;
+
+    /* Multi-light system — NULL = single legacy light (light_dir + ambient) */
+    const MopLight *lights;
+    uint32_t        light_count;
+
+    /* Camera eye position (for specular / multi-light world-space calcs) */
+    MopVec3         cam_eye;
+
+    /* Flexible vertex format — NULL = standard MopVertex layout */
+    const MopVertexFormat *vertex_format;
 } MopRhiDrawCall;
 
 /* -------------------------------------------------------------------------
@@ -106,6 +134,26 @@ typedef struct MopRhiBackend {
     const uint8_t *(*framebuffer_read_color)(MopRhiDevice *device,
                                              MopRhiFramebuffer *fb,
                                              int *out_width, int *out_height);
+
+    /* Texture management */
+    MopRhiTexture *(*texture_create)(MopRhiDevice *device, int width,
+                                     int height, const uint8_t *rgba_data);
+    void           (*texture_destroy)(MopRhiDevice *device,
+                                      MopRhiTexture *texture);
+
+    /* Instanced drawing (Phase 6B) */
+    void (*draw_instanced)(MopRhiDevice *device, MopRhiFramebuffer *fb,
+                           const MopRhiDrawCall *call,
+                           const MopMat4 *instance_transforms,
+                           uint32_t instance_count);
+
+    /* Dynamic buffer update (Phase 8A) */
+    void (*buffer_update)(MopRhiDevice *device, MopRhiBuffer *buffer,
+                          const void *data, size_t offset, size_t size);
+
+    /* Read raw vertex data from a buffer (overlay safety).
+     * CPU returns buf->data, Vulkan returns buf->shadow. */
+    const void *(*buffer_read)(MopRhiBuffer *buffer);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------

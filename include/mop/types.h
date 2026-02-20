@@ -55,6 +55,7 @@ typedef struct MopVertex {
     MopVec3 position;
     MopVec3 normal;
     MopColor color;
+    float u, v;     /* texture coordinates */
 } MopVertex;
 
 /* -------------------------------------------------------------------------
@@ -65,6 +66,26 @@ typedef enum MopRenderMode {
     MOP_RENDER_SOLID     = 0,
     MOP_RENDER_WIREFRAME = 1
 } MopRenderMode;
+
+/* -------------------------------------------------------------------------
+ * Blend mode
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopBlendMode {
+    MOP_BLEND_OPAQUE   = 0,
+    MOP_BLEND_ALPHA    = 1,
+    MOP_BLEND_ADDITIVE = 2,
+    MOP_BLEND_MULTIPLY = 3
+} MopBlendMode;
+
+/* -------------------------------------------------------------------------
+ * Shading mode
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopShadingMode {
+    MOP_SHADING_FLAT   = 0,
+    MOP_SHADING_SMOOTH = 1
+} MopShadingMode;
 
 /* -------------------------------------------------------------------------
  * Math utilities
@@ -84,6 +105,11 @@ MopMat4 mop_mat4_translate(MopVec3 offset);
 MopMat4 mop_mat4_scale(MopVec3 s);
 MopMat4 mop_mat4_multiply(MopMat4 a, MopMat4 b);
 MopVec4 mop_mat4_mul_vec4(MopMat4 m, MopVec4 v);
+
+/* Compose a TRS matrix: T * Rz * Ry * Rx * S.
+ * rotation components are euler angles in radians. */
+MopMat4 mop_mat4_compose_trs(MopVec3 position, MopVec3 rotation, MopVec3 scale);
+MopMat4 mop_mat4_inverse(MopMat4 m);
 
 MopVec3 mop_vec3_add(MopVec3 a, MopVec3 b);
 MopVec3 mop_vec3_sub(MopVec3 a, MopVec3 b);

@@ -19,6 +19,10 @@
 
           buildInputs = [
             pkgs.sdl3
+            pkgs.lua5_4
+            pkgs.vulkan-loader
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.moltenvk
           ];
 
           shellHook = ''
@@ -30,6 +34,11 @@
               echo "  SDL3:         $(pkg-config --modversion sdl3)"
             else
               echo "  SDL3:         NOT FOUND — check your nixpkgs version"
+            fi
+            if pkg-config --exists lua5.4 2>/dev/null; then
+              echo "  Lua:          $(pkg-config --modversion lua5.4)"
+            else
+              echo "  Lua:          NOT FOUND"
             fi
           '';
         };

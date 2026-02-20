@@ -53,6 +53,17 @@ void mop_viewport_set_clear_color(MopViewport *viewport, MopColor color);
 /* Set solid or wireframe rendering. */
 void mop_viewport_set_render_mode(MopViewport *viewport, MopRenderMode mode);
 
+/* Set the directional light direction (world-space, will be normalized).
+ * Default: (0.3, 1.0, 0.5). */
+void mop_viewport_set_light_dir(MopViewport *viewport, MopVec3 dir);
+
+/* Set the ambient lighting factor [0, 1].  Default: 0.2. */
+void mop_viewport_set_ambient(MopViewport *viewport, float ambient);
+
+/* Set the shading mode.  Default: MOP_SHADING_FLAT.
+ * MOP_SHADING_SMOOTH interpolates per-vertex normals (Gouraud). */
+void mop_viewport_set_shading(MopViewport *viewport, MopShadingMode mode);
+
 /* -------------------------------------------------------------------------
  * Camera
  *
@@ -94,5 +105,20 @@ const uint8_t *mop_viewport_read_color(MopViewport *viewport,
 
 /* Return the active backend type. */
 MopBackendType mop_viewport_get_backend(MopViewport *viewport);
+
+/* Return the current camera eye position (world-space). */
+MopVec3 mop_viewport_get_camera_eye(const MopViewport *viewport);
+
+/* Return the current camera target position (world-space). */
+MopVec3 mop_viewport_get_camera_target(const MopViewport *viewport);
+
+/* -------------------------------------------------------------------------
+ * Time control
+ *
+ * Set the current simulation time for deterministic updates of water
+ * surfaces and particle emitters.
+ * ------------------------------------------------------------------------- */
+
+void mop_viewport_set_time(MopViewport *viewport, float t);
 
 #endif /* MOP_VIEWPORT_H */

@@ -1,0 +1,126 @@
+---
+title: ".mop Binary Mesh Format"
+description: "Specification for the .mop binary mesh file format"
+slug: "reference-binary-format"
+author: "rahulmnavneeth"
+date: "20 FEB 2026"
+tags: ["reference", "format", "loader"]
+---
+
+## Location
+
+```
+include/mop/loader.h       — Public API (MopBinaryMesh, mop_binary_load/free)
+src/loader/mop_loader.c    — Loader implementation
+tools/mop_convert.c        — OBJ-to-.mop converter CLI
+```
+
+## Overview
+
+The `.mop` format is a compact binary mesh format designed for fast loading.  On POSIX platforms (Linux, macOS) the file is memory-mapped for zero-copy access — vertex and index pointers point directly into the mapped region.  On other platforms a `malloc` + `fread` fallback is used.
+
+## File Layout
+
+```
+Offset   Size          Content
+───────────────────────────────────────────────────
+0        128           Header (MopBinaryHeader)
+128      V * stride    Vertex data (MopVertex[])
+128+V*s  I * 4         Index data (uint32_t[])
+```
+
+Where `V` = vertex count, `I` = index count, `stride` = `sizeof(MopVertex)`.
+
+## Header (128 bytes)
+
+```
+Offset  Size  Type       Field           Description
+──────────────────────────────────────────────────────────
+0       4     uint32_t   magic           0x4D4F5001 ('M','O','P',0x01)
+4       4     uint32_t   version         1
+8       4     uint32_t   flags           Reserved (0)
+12      4     uint32_t   vertex_count    Total vertices
+16      4     uint32_t   index_count     Total indices (multiple of 3)
+20      4     uint32_t   submesh_count   >= 1
+24      4     uint32_t   vertex_offset   Byte offset to vertex data
+28      4     uint32_t   index_offset    Byte offset to index data
+32      12    float[3]   bbox_min        AABB minimum (x, y, z)
+44      12    float[3]   bbox_max        AABB maximum (x, y, z)
+56      72    uint8_t[]  _reserved       Zero-padded to 128 bytes
+```
+
+All values are little-endian.  The header is exactly 128 bytes for cache-line alignment.
+
+## Vertex Layout
+
+Vertex data uses the `MopVertex` struct layout directly:
+
+```c
+typedef struct MopVertex {
+    MopVec3  position;    /* 12 bytes */
+    MopVec3  normal;      /* 12 bytes */
+    MopColor color;       /* 16 bytes (4 floats) */
+    float    u, v;        /*  8 bytes */
+} MopVertex;              /* 48 bytes total */
+```
+
+On little-endian platforms the vertex data is used in-place from the mmap'd region — no parsing or byte-swapping required.
+
+## Index Data
+
+Pre-triangulated `uint32_t` indices.  The count is always a multiple of 3.
+
+## API
+
+### mop_binary_load
+
+```c
+bool mop_binary_load(const char *path, MopBinaryMesh *out);
+```
+
+Opens and validates the file.  On POSIX, uses `mmap(MAP_PRIVATE)`.  Sets `out->is_mmapped = true` on success.  On non-POSIX platforms, allocates memory and reads the file.
+
+Returns `false` on:
+- NULL path
+- File not found or too small
+- Invalid magic number
+- Unsupported version
+- Data offsets exceeding file size
+
+### mop_binary_free
+
+```c
+void mop_binary_free(MopBinaryMesh *mesh);
+```
+
+Unmaps or frees the mesh data.  Zeroes the struct.  Safe to call on a zeroed struct (no-op).
+
+### MopBinaryMesh
+
+```c
+typedef struct MopBinaryMesh {
+    MopVertex  *vertices;
+    uint32_t    vertex_count;
+    uint32_t   *indices;
+    uint32_t    index_count;
+    MopVec3     bbox_min, bbox_max;
+    uint32_t    submesh_count;
+    bool        is_mmapped;
+    void       *_mmap_base;    /* internal */
+    size_t      _mmap_size;    /* internal */
+} MopBinaryMesh;
+```
+
+The `vertices` and `indices` pointers can be passed directly to `MopMeshDesc` for use with `mop_viewport_add_mesh`.
+
+## Converter Tool
+
+```bash
+# Build
+make tools
+
+# Convert OBJ to .mop
+tools/build/mop_convert input.obj output.mop
+```
+
+The converter loads an OBJ file using `mop_obj_load`, writes the header, then writes vertex and index data contiguously.

@@ -1,0 +1,47 @@
+stages:
+  - build
+  - test
+
+variables:
+  GIT_DEPTH: 1
+
+.build_template: &build_template
+  stage: build
+  script:
+    - make
+    - make RELEASE=1
+
+.test_template: &test_template
+  stage: test
+  script:
+    - make
+    - make test
+
+# --- Linux (GCC) ---
+build:linux-gcc:
+  <<: *build_template
+  image: gcc:latest
+
+test:linux-gcc:
+  <<: *test_template
+  image: gcc:latest
+
+# --- Linux (Clang) ---
+build:linux-clang:
+  <<: *build_template
+  image: silkeh/clang:latest
+
+test:linux-clang:
+  <<: *test_template
+  image: silkeh/clang:latest
+
+# --- macOS (Clang) ---
+build:macos-clang:
+  <<: *build_template
+  tags:
+    - macos
+
+test:macos-clang:
+  <<: *test_template
+  tags:
+    - macos

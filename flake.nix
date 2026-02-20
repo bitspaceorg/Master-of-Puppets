@@ -37,16 +37,33 @@
           nativeBuildInputs = with pkgs; [
             gnumake
             clang-tools
+            pkg-config
           ] ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             valgrind
             gdb
           ];
 
+          buildInputs = with pkgs; [
+            lua5_4
+            vulkan-loader
+            vulkan-headers
+            vulkan-validation-layers
+            shaderc
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            moltenvk
+          ];
+
           shellHook = ''
             echo "Master of Puppets — development shell"
-            echo "  Build:    make"
-            echo "  Clean:    make clean"
-            echo "  Examples: cd examples && nix develop"
+            echo "  Build:          make"
+            echo "  Build (+ Lua):  make MOP_ENABLE_LUA=1"
+            echo "  Clean:          make clean"
+            echo "  Examples:       cd examples && nix develop"
+            if pkg-config --exists lua5.4 2>/dev/null; then
+              echo "  Lua:            $(pkg-config --modversion lua5.4)"
+            else
+              echo "  Lua:            NOT FOUND"
+            fi
           '';
         };
       });
