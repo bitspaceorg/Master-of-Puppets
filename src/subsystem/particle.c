@@ -7,6 +7,7 @@
 
 #include <mop/particle.h>
 #include <mop/log.h>
+#include "core/viewport_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -38,11 +39,27 @@ static float rand_range(uint32_t *state, float lo, float hi) {
     return lo + rand_float(state) * (hi - lo);
 }
 
+#define MOP_MAX_PARTICLES 100000
+
+/* Forward declarations for subsystem vtable */
+static void particle_subsys_update(MopSubsystem *self, MopViewport *vp, float dt, float t);
+static void particle_subsys_destroy(MopSubsystem *self, MopViewport *vp);
+
+static const MopSubsystemVTable particle_vtable = {
+    .name    = "particle",
+    .phase   = MOP_SUBSYS_PHASE_SIMULATE,
+    .update  = particle_subsys_update,
+    .destroy = particle_subsys_destroy,
+};
+
 /* -------------------------------------------------------------------------
  * Emitter structure
  * ------------------------------------------------------------------------- */
 
 struct MopParticleEmitter {
+    MopSubsystem base;       /* must be first — enables (MopSubsystem*)em cast */
+    MopViewport *viewport;   /* owning viewport — needed for camera vectors */
+
     MopParticleEmitterDesc desc;
 
     /* Particle pool */
@@ -71,15 +88,23 @@ struct MopParticleEmitter {
 
 MopParticleEmitter *mop_viewport_add_emitter(MopViewport *viewport,
                                               const MopParticleEmitterDesc *desc) {
-    (void)viewport;  /* emitter is standalone; viewport integration is in viewport.c */
-
-    if (!desc || desc->max_particles == 0) {
+    if (!viewport || !desc || desc->max_particles == 0) {
         MOP_ERROR("invalid particle emitter descriptor");
+        return NULL;
+    }
+    if (desc->max_particles > MOP_MAX_PARTICLES) {
+        MOP_ERROR("max_particles %u exceeds limit %u",
+                  desc->max_particles, MOP_MAX_PARTICLES);
         return NULL;
     }
 
     MopParticleEmitter *em = calloc(1, sizeof(MopParticleEmitter));
     if (!em) return NULL;
+
+    /* Initialize subsystem base */
+    em->base.vtable  = &particle_vtable;
+    em->base.enabled = true;
+    em->viewport     = viewport;
 
     em->desc = *desc;
     em->max_particles = desc->max_particles;
@@ -111,13 +136,19 @@ MopParticleEmitter *mop_viewport_add_emitter(MopViewport *viewport,
     em->vert_count = 0;
     em->idx_count  = 0;
 
+    /* Register in the generic subsystem registry for phase-based dispatch */
+    mop_subsystem_register(&viewport->subsystems, &em->base);
+
     return em;
 }
 
 void mop_viewport_remove_emitter(MopViewport *viewport,
                                   MopParticleEmitter *emitter) {
-    (void)viewport;
     if (!emitter) return;
+
+    /* Unregister from subsystem registry */
+    if (viewport)
+        mop_subsystem_unregister(&viewport->subsystems, &emitter->base);
 
     free(emitter->particles);
     free(emitter->verts);
@@ -298,6 +329,39 @@ void mop_emitter_get_mesh_data(const MopParticleEmitter *emitter,
     if (vertex_count) *vertex_count = emitter->vert_count;
     if (indices)      *indices = emitter->idxs;
     if (index_count)  *index_count = emitter->idx_count;
+}
+
+/* -------------------------------------------------------------------------
+ * Subsystem vtable adapters
+ *
+ * These are called by the viewport's subsystem dispatch loop each frame.
+ * This is what FIXES the broken particle integration — previously
+ * mop_emitter_update was never called from the viewport render loop.
+ * ------------------------------------------------------------------------- */
+
+static void particle_subsys_update(MopSubsystem *self, MopViewport *vp, float dt, float t) {
+    (void)t;
+    MopParticleEmitter *em = (MopParticleEmitter *)self;
+
+    /* Use a fixed dt if the dispatch doesn't provide one (fallback) */
+    if (dt <= 0.0f) dt = 1.0f / 60.0f;
+
+    /* Extract camera right and up vectors from the view matrix for billboarding.
+     * In a column-major view matrix, the first 3 elements of columns 0 and 1
+     * are the world-space right and up vectors of the camera. */
+    MopVec3 cam_right = { vp->view_matrix.d[0], vp->view_matrix.d[4], vp->view_matrix.d[8] };
+    MopVec3 cam_up    = { vp->view_matrix.d[1], vp->view_matrix.d[5], vp->view_matrix.d[9] };
+
+    mop_emitter_update(em, dt, cam_right, cam_up);
+}
+
+static void particle_subsys_destroy(MopSubsystem *self, MopViewport *vp) {
+    (void)vp;
+    MopParticleEmitter *em = (MopParticleEmitter *)self;
+    free(em->particles);
+    free(em->verts);
+    free(em->idxs);
+    free(em);
 }
 
 /* -------------------------------------------------------------------------

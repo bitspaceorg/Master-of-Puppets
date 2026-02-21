@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 #include <stdint.h>
 #include <string.h>
 

@@ -10,7 +10,7 @@
  */
 
 #include <mop/mop.h>
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -328,7 +328,8 @@ static void gen_rotate_handle(MopVertex *v, uint32_t *idx, int axis,
 static MopVec3 world_to_screen(MopVec3 p, const MopViewport *vp) {
     MopMat4 vpm = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
     MopVec4 clip = mop_mat4_mul_vec4(vpm, (MopVec4){p.x, p.y, p.z, 1.0f});
-    if (fabsf(clip.w) < 1e-6f) clip.w = 1e-6f;
+    if (clip.w <= 0.0f) return (MopVec3){-1.0f, -1.0f, -1.0f}; /* behind camera */
+    if (clip.w < 1e-6f) clip.w = 1e-6f;
     float nx = clip.x / clip.w, ny = clip.y / clip.w;
     return (MopVec3){
         (nx * 0.5f + 0.5f) * vp->width,

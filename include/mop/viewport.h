@@ -121,4 +121,14 @@ MopVec3 mop_viewport_get_camera_target(const MopViewport *viewport);
 
 void mop_viewport_set_time(MopViewport *viewport, float t);
 
+/* -------------------------------------------------------------------------
+ * Chrome visibility
+ *
+ * Controls whether editor chrome (grid, axis indicator, background
+ * gradient, gizmo) is drawn.  Enabled by default.
+ * Disable for clean game/presentation rendering.
+ * ------------------------------------------------------------------------- */
+
+void mop_viewport_set_chrome(MopViewport *viewport, bool visible);
+
 #endif /* MOP_VIEWPORT_H */

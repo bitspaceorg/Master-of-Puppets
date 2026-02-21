@@ -9,7 +9,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 #include "rhi/rhi.h"
 
 #include <stdlib.h>
@@ -17,6 +17,17 @@
 #include <math.h>
 
 /* MopWaterSurface struct is defined in viewport_internal.h */
+
+/* Forward declarations for vtable */
+static void water_subsys_update(MopSubsystem *self, MopViewport *vp, float dt, float t);
+static void water_subsys_destroy(MopSubsystem *self, MopViewport *vp);
+
+static const MopSubsystemVTable water_vtable = {
+    .name    = "water",
+    .phase   = MOP_SUBSYS_PHASE_SIMULATE,
+    .update  = water_subsys_update,
+    .destroy = water_subsys_destroy,
+};
 
 /* -------------------------------------------------------------------------
  * Grid generation helpers
@@ -82,6 +93,7 @@ static float water_height(float x, float z, float t,
 
 void mop_water_update(MopWaterSurface *ws, float t) {
     if (!ws || !ws->vertices) return;
+    if (ws->resolution < 2) return;
 
     int res = ws->resolution;
     float spd = ws->wave_speed;
@@ -148,20 +160,58 @@ void mop_water_update(MopWaterSurface *ws, float t) {
 }
 
 /* -------------------------------------------------------------------------
+ * Subsystem vtable adapters
+ * ------------------------------------------------------------------------- */
+
+static void water_subsys_update(MopSubsystem *self, MopViewport *vp, float dt, float t) {
+    (void)dt;
+    MopWaterSurface *ws = (MopWaterSurface *)self;
+    mop_water_update(ws, t);
+}
+
+static void water_subsys_destroy(MopSubsystem *self, MopViewport *vp) {
+    (void)vp;
+    MopWaterSurface *ws = (MopWaterSurface *)self;
+    /* Free water-specific data; mesh is cleaned up by viewport's mesh loop */
+    ws->vertex_buffer = NULL;
+    ws->index_buffer  = NULL;
+    ws->mesh = NULL;
+    free(ws->vertices);
+    free(ws->indices);
+    free(ws);
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
+
+#define MOP_MAX_WATER_RESOLUTION 1024
 
 MopWaterSurface *mop_viewport_add_water(MopViewport *viewport,
                                          const MopWaterDesc *desc) {
     if (!viewport || !desc) return NULL;
-    if (desc->resolution < 2) return NULL;
+
+    int resolution = desc->resolution;
+    if (resolution < 2) {
+        MOP_ERROR("water resolution must be >= 2");
+        return NULL;
+    }
+    if (resolution > MOP_MAX_WATER_RESOLUTION) {
+        MOP_WARN("water resolution %d capped to %d",
+                 resolution, MOP_MAX_WATER_RESOLUTION);
+        resolution = MOP_MAX_WATER_RESOLUTION;
+    }
 
     MopWaterSurface *ws = calloc(1, sizeof(MopWaterSurface));
     if (!ws) return NULL;
 
+    /* Initialize subsystem base */
+    ws->base.vtable  = &water_vtable;
+    ws->base.enabled = true;
+
     ws->viewport       = viewport;
     ws->extent         = desc->extent;
-    ws->resolution     = desc->resolution;
+    ws->resolution     = resolution;
     ws->wave_speed     = desc->wave_speed;
     ws->wave_amplitude = desc->wave_amplitude;
     ws->wave_frequency = desc->wave_frequency;
@@ -221,12 +271,18 @@ MopWaterSurface *mop_viewport_add_water(MopViewport *viewport,
     }
     viewport->water_surfaces[viewport->water_count++] = ws;
 
+    /* Register in the generic subsystem registry for phase-based dispatch */
+    mop_subsystem_register(&viewport->subsystems, &ws->base);
+
     return ws;
 }
 
 void mop_viewport_remove_water(MopViewport *viewport,
                                 MopWaterSurface *water) {
     if (!viewport || !water) return;
+
+    /* Unregister from subsystem registry */
+    mop_subsystem_unregister(&viewport->subsystems, &water->base);
 
     /* Remove from viewport's water array */
     for (uint32_t i = 0; i < viewport->water_count; i++) {

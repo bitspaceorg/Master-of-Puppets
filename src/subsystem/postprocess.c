@@ -8,10 +8,51 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 #include "rasterizer/rasterizer.h"
 
 #include <math.h>
+#include <stdlib.h>
+
+/* -------------------------------------------------------------------------
+ * Subsystem vtable — postprocess runs in POST_RENDER phase
+ * ------------------------------------------------------------------------- */
+
+static void postprocess_subsys_update(MopSubsystem *self, MopViewport *vp, float dt, float t);
+static void postprocess_subsys_destroy(MopSubsystem *self, MopViewport *vp);
+
+static const MopSubsystemVTable postprocess_vtable = {
+    .name    = "postprocess",
+    .phase   = MOP_SUBSYS_PHASE_POST_RENDER,
+    .update  = postprocess_subsys_update,
+    .destroy = postprocess_subsys_destroy,
+};
+
+/* Thin wrapper — postprocess is stateless, only the base is needed */
+typedef struct MopPostProcessSubsystem {
+    MopSubsystem base;
+} MopPostProcessSubsystem;
+
+static void postprocess_subsys_update(MopSubsystem *self, MopViewport *vp, float dt, float t) {
+    (void)self; (void)dt; (void)t;
+    if (vp->post_effects == 0 || vp->backend_type != MOP_BACKEND_CPU) return;
+    MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)vp->framebuffer;
+    mop_postprocess_apply(sw_fb, vp->post_effects, &vp->fog_params);
+}
+
+static void postprocess_subsys_destroy(MopSubsystem *self, MopViewport *vp) {
+    (void)vp;
+    free(self);
+}
+
+/* Called from viewport_create to auto-register postprocess subsystem */
+void mop_postprocess_register(MopViewport *vp) {
+    MopPostProcessSubsystem *pp = calloc(1, sizeof(MopPostProcessSubsystem));
+    if (!pp) return;
+    pp->base.vtable  = &postprocess_vtable;
+    pp->base.enabled = true;
+    mop_subsystem_register(&vp->subsystems, &pp->base);
+}
 
 /* -------------------------------------------------------------------------
  * Post-processing application

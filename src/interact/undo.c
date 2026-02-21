@@ -10,7 +10,7 @@
  */
 
 #include <mop/mop.h>
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 
 /* -------------------------------------------------------------------------
  * Push undo — record current TRS of the given mesh

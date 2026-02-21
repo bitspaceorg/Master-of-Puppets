@@ -16,6 +16,7 @@
  */
 
 #include "rasterizer.h"
+#include <mop/log.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -25,6 +26,11 @@
  * ------------------------------------------------------------------------- */
 
 bool mop_sw_framebuffer_alloc(MopSwFramebuffer *fb, int width, int height) {
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+        MOP_ERROR("framebuffer dimensions out of range: %dx%d", width, height);
+        return false;
+    }
+
     size_t pixel_count = (size_t)width * (size_t)height;
 
     fb->width  = width;

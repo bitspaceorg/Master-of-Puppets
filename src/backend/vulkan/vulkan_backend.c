@@ -276,7 +276,8 @@ static MopRhiDevice *vk_device_create(void) {
         .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = dev->queue_family,
     };
-    vkCreateCommandPool(dev->device, &pool_ci, NULL, &dev->cmd_pool);
+    r = vkCreateCommandPool(dev->device, &pool_ci, NULL, &dev->cmd_pool);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkCreateCommandPool failed: %d", r); goto fail; }
 
     VkCommandBufferAllocateInfo cb_ai = {
         .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -284,13 +285,15 @@ static MopRhiDevice *vk_device_create(void) {
         .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    vkAllocateCommandBuffers(dev->device, &cb_ai, &dev->cmd_buf);
+    r = vkAllocateCommandBuffers(dev->device, &cb_ai, &dev->cmd_buf);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkAllocateCommandBuffers failed: %d", r); goto fail; }
 
     VkFenceCreateInfo fence_ci = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
-    vkCreateFence(dev->device, &fence_ci, NULL, &dev->fence);
+    r = vkCreateFence(dev->device, &fence_ci, NULL, &dev->fence);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkCreateFence failed: %d", r); goto fail; }
 
     /* ---- Shader modules ---- */
     dev->solid_vert = create_shader_module(dev->device,
@@ -341,7 +344,8 @@ static MopRhiDevice *vk_device_create(void) {
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
         .maxLod       = 1.0f,
     };
-    vkCreateSampler(dev->device, &samp_ci, NULL, &dev->default_sampler);
+    r = vkCreateSampler(dev->device, &samp_ci, NULL, &dev->default_sampler);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkCreateSampler failed: %d", r); goto fail; }
 
     /* ---- Staging buffer (4 MB host-visible) ---- */
     r = mop_vk_create_buffer(dev->device, &dev->mem_props,
@@ -351,8 +355,9 @@ static MopRhiDevice *vk_device_create(void) {
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &dev->staging_buf, &dev->staging_mem);
     if (r != VK_SUCCESS) { MOP_ERROR("[VK] staging buffer: %d", r); goto fail; }
-    vkMapMemory(dev->device, dev->staging_mem, 0, MOP_VK_STAGING_SIZE, 0,
-                &dev->staging_mapped);
+    r = vkMapMemory(dev->device, dev->staging_mem, 0, MOP_VK_STAGING_SIZE, 0,
+                    &dev->staging_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkMapMemory staging failed: %d", r); goto fail; }
 
     /* ---- 1x1 white fallback texture ---- */
     r = mop_vk_create_image(dev->device, &dev->mem_props, 1, 1,
@@ -567,6 +572,26 @@ static void vk_buffer_update(MopRhiDevice *dev, MopRhiBuffer *buf,
     VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
     VkBufferCopy region = { .srcOffset = 0, .dstOffset = offset, .size = size };
     vkCmdCopyBuffer(cb, dev->staging_buf, buf->buffer, 1, &region);
+
+    /* Memory barrier: ensure the transfer write is visible to subsequent
+     * vertex attribute reads.  Required on MoltenVK where implicit
+     * synchronization between submissions may not flush GPU caches. */
+    VkBufferMemoryBarrier barrier = {
+        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask       = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                               VK_ACCESS_INDEX_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer              = buf->buffer,
+        .offset              = offset,
+        .size                = size,
+    };
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        0, 0, NULL, 1, &barrier, 0, NULL);
+
     mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
 }
 
@@ -583,15 +608,16 @@ static void vk_fb_create_attachments(MopRhiDevice *dev,
 
     VkResult r;
 
-    /* ---- Color (R8G8B8A8_SRGB — linear→sRGB conversion on write) ---- */
+    /* ---- Color (R8G8B8A8_SRGB — hardware linear→sRGB on write) ---- */
     r = mop_vk_create_image(dev->device, &dev->mem_props,
         (uint32_t)width, (uint32_t)height, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         &fb->color_image, &fb->color_memory);
     if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb color image: %d", r); return; }
 
-    mop_vk_create_image_view(dev->device, fb->color_image,
+    r = mop_vk_create_image_view(dev->device, fb->color_image,
         VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, &fb->color_view);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb color view: %d", r); return; }
 
     /* ---- Picking (R32_UINT) ---- */
     r = mop_vk_create_image(dev->device, &dev->mem_props,
@@ -600,8 +626,9 @@ static void vk_fb_create_attachments(MopRhiDevice *dev,
         &fb->pick_image, &fb->pick_memory);
     if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb pick image: %d", r); return; }
 
-    mop_vk_create_image_view(dev->device, fb->pick_image,
+    r = mop_vk_create_image_view(dev->device, fb->pick_image,
         VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT, &fb->pick_view);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb pick view: %d", r); return; }
 
     /* ---- Depth (D32_SFLOAT) ---- */
     r = mop_vk_create_image(dev->device, &dev->mem_props,
@@ -611,8 +638,9 @@ static void vk_fb_create_attachments(MopRhiDevice *dev,
         &fb->depth_image, &fb->depth_memory);
     if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb depth image: %d", r); return; }
 
-    mop_vk_create_image_view(dev->device, fb->depth_image,
+    r = mop_vk_create_image_view(dev->device, fb->depth_image,
         VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT, &fb->depth_view);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb depth view: %d", r); return; }
 
     /* ---- VkFramebuffer ---- */
     VkImageView views[3] = { fb->color_view, fb->pick_view, fb->depth_view };
@@ -625,50 +653,62 @@ static void vk_fb_create_attachments(MopRhiDevice *dev,
         .height          = (uint32_t)height,
         .layers          = 1,
     };
-    vkCreateFramebuffer(dev->device, &fb_ci, NULL, &fb->framebuffer);
+    r = vkCreateFramebuffer(dev->device, &fb_ci, NULL, &fb->framebuffer);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkCreateFramebuffer failed: %d", r); return; }
 
     /* ---- Readback staging buffers (host-visible, persistently mapped) ---- */
     size_t color_size = npixels * 4;
     size_t pick_size  = npixels * sizeof(uint32_t);
     size_t depth_size = npixels * sizeof(float);
 
-    mop_vk_create_buffer(dev->device, &dev->mem_props, color_size,
+    r = mop_vk_create_buffer(dev->device, &dev->mem_props, color_size,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &fb->readback_color_buf, &fb->readback_color_mem);
-    vkMapMemory(dev->device, fb->readback_color_mem, 0, color_size, 0,
-                &fb->readback_color_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb readback color buffer: %d", r); return; }
+    r = vkMapMemory(dev->device, fb->readback_color_mem, 0, color_size, 0,
+                    &fb->readback_color_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkMapMemory readback color failed: %d", r); return; }
 
-    mop_vk_create_buffer(dev->device, &dev->mem_props, pick_size,
+    r = mop_vk_create_buffer(dev->device, &dev->mem_props, pick_size,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &fb->readback_pick_buf, &fb->readback_pick_mem);
-    vkMapMemory(dev->device, fb->readback_pick_mem, 0, pick_size, 0,
-                &fb->readback_pick_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb readback pick buffer: %d", r); return; }
+    r = vkMapMemory(dev->device, fb->readback_pick_mem, 0, pick_size, 0,
+                    &fb->readback_pick_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkMapMemory readback pick failed: %d", r); return; }
 
-    mop_vk_create_buffer(dev->device, &dev->mem_props, depth_size,
+    r = mop_vk_create_buffer(dev->device, &dev->mem_props, depth_size,
         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &fb->readback_depth_buf, &fb->readback_depth_mem);
-    vkMapMemory(dev->device, fb->readback_depth_mem, 0, depth_size, 0,
-                &fb->readback_depth_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb readback depth buffer: %d", r); return; }
+    r = vkMapMemory(dev->device, fb->readback_depth_mem, 0, depth_size, 0,
+                    &fb->readback_depth_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkMapMemory readback depth failed: %d", r); return; }
 
     /* ---- CPU readback arrays ---- */
     fb->readback_color = malloc(color_size);
+    if (!fb->readback_color) { MOP_ERROR("[VK] malloc readback_color failed"); return; }
     fb->readback_pick  = malloc(pick_size);
+    if (!fb->readback_pick) { MOP_ERROR("[VK] malloc readback_pick failed"); return; }
     fb->readback_depth = malloc(depth_size);
+    if (!fb->readback_depth) { MOP_ERROR("[VK] malloc readback_depth failed"); return; }
 
     /* ---- Per-frame dynamic UBO ---- */
-    mop_vk_create_buffer(dev->device, &dev->mem_props, MOP_VK_UBO_SIZE,
+    r = mop_vk_create_buffer(dev->device, &dev->mem_props, MOP_VK_UBO_SIZE,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &fb->ubo_buf, &fb->ubo_mem);
-    vkMapMemory(dev->device, fb->ubo_mem, 0, MOP_VK_UBO_SIZE, 0,
-                &fb->ubo_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] fb UBO buffer: %d", r); return; }
+    r = vkMapMemory(dev->device, fb->ubo_mem, 0, MOP_VK_UBO_SIZE, 0,
+                    &fb->ubo_mapped);
+    if (r != VK_SUCCESS) { MOP_ERROR("[VK] vkMapMemory UBO failed: %d", r); return; }
     fb->ubo_offset = 0;
 }
 
@@ -835,10 +875,16 @@ static void vk_frame_begin(MopRhiDevice *dev, MopRhiFramebuffer *fb,
 
 static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
                       const MopRhiDrawCall *call) {
+    /* Determine vertex stride from format (or default to MopVertex) */
+    uint32_t vertex_stride = call->vertex_format
+        ? (uint32_t)call->vertex_format->stride
+        : (uint32_t)sizeof(MopVertex);
+
     /* Select pipeline */
     uint32_t key = mop_vk_pipeline_key(call->wireframe, call->depth_test,
-                                        call->backface_cull, call->blend_mode);
-    VkPipeline pipeline = mop_vk_get_pipeline(dev, key);
+                                        call->backface_cull, call->blend_mode,
+                                        vertex_stride);
+    VkPipeline pipeline = mop_vk_get_pipeline(dev, key, vertex_stride);
     if (!pipeline) return;
 
     vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

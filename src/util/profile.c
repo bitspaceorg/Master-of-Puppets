@@ -8,7 +8,7 @@
  */
 
 #include <mop/mop.h>
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 
 #ifdef MOP_PLATFORM_MACOS
 #include <mach/mach_time.h>

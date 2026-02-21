@@ -322,7 +322,7 @@ int main(void) {
 
     /* --- Vulkan --- */
     uint8_t *vk_px = NULL;
-    int vw = 0, vh = 0;
+    int vw __attribute__((unused)) = 0, vh __attribute__((unused)) = 0;
 #if defined(MOP_HAS_VULKAN)
     vk_px = render_scene(MOP_BACKEND_VULKAN, w, h, &vw, &vh);
     if (vk_px) {

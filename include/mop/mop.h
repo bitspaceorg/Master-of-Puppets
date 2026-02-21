@@ -31,5 +31,10 @@
 #include "particle.h"
 #include "water.h"
 #include "postprocess.h"
+#include "query.h"
+#include "camera_query.h"
+#include "snapshot.h"
+#include "pipeline.h"
+#include "spatial.h"
 
 #endif /* MOP_H */

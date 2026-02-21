@@ -10,7 +10,7 @@
 #if defined(MOP_HAS_LUA)
 
 #include <mop/mop.h>
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 
 #include <lua.h>
 #include <lauxlib.h>

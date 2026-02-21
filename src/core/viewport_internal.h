@@ -12,8 +12,10 @@
 #include <mop/light.h>
 #include <mop/overlay.h>
 #include <mop/display.h>
+#include <mop/pipeline.h>
 #include "rhi/rhi.h"
 #include "rasterizer/rasterizer.h"
+#include "core/subsystem.h"
 
 /* -------------------------------------------------------------------------
  * Opaque texture wrapper — maps public MopTexture to RHI texture
@@ -107,6 +109,8 @@ struct MopInstancedMesh {
  * ------------------------------------------------------------------------- */
 
 struct MopWaterSurface {
+    MopSubsystem base;   /* must be first — enables (MopSubsystem*)ws cast */
+
     /* Owning viewport */
     MopViewport *viewport;
 
@@ -285,21 +289,44 @@ struct MopViewport {
 
     /* Display settings */
     MopDisplaySettings display;
+
+    /* Pipeline hooks (Phase D) */
+    #define MOP_MAX_HOOKS 56  /* 7 stages * 8 per stage */
+    struct {
+        MopPipelineHookFn fn;
+        void             *data;
+        MopPipelineStage  stage;
+        bool              active;
+    } hooks[MOP_MAX_HOOKS];
+    uint32_t hook_count;
+
+    /* Frame callback */
+    MopFrameCallbackFn frame_cb;
+    void              *frame_cb_data;
+
+    /* Light indicators (visual representations of lights) */
+    MopMesh *light_indicators[MOP_MAX_LIGHTS];
+
+    /* Chrome visibility (grid, axis indicator, background, gizmo) */
+    bool show_chrome;   /* true by default */
+
+    /* Subsystem registry — generic dispatch for water, particles, postprocess, etc. */
+    MopSubsystemRegistry subsystems;
 };
 
 /* -------------------------------------------------------------------------
- * Internal water/postprocess functions — called from viewport render loop
+ * Internal subsystem functions
  * ------------------------------------------------------------------------- */
 
-/* Update water surface vertex animation (defined in water/water.c) */
-void mop_water_update(MopWaterSurface *ws, float t);
+/* Register the postprocess subsystem (called from viewport_create) */
+void mop_postprocess_register(MopViewport *vp);
 
-/* Free water surface internal data without removing the viewport mesh
- * (for use during viewport destroy when meshes are freed separately) */
-void mop_water_destroy_internal(MopWaterSurface *ws);
-
-/* Apply post-processing effects to the framebuffer (defined in postprocess/postprocess.c) */
+/* Apply post-processing effects to the framebuffer (also called via vtable) */
 void mop_postprocess_apply(MopSwFramebuffer *fb, uint32_t effects,
                             const MopFogParams *fog);
+
+/* Light indicator management — create/destroy/update visual indicators */
+void mop_light_update_indicators(MopViewport *vp);
+void mop_light_destroy_indicators(MopViewport *vp);
 
 #endif /* MOP_VIEWPORT_INTERNAL_H */

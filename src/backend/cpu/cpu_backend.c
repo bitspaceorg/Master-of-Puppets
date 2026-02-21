@@ -15,6 +15,7 @@
 #include "rasterizer/rasterizer.h"
 #include "rasterizer/rasterizer_mt.h"
 
+#include <mop/log.h>
 #include <mop/vertex_format.h>
 
 #include <stdlib.h>
@@ -212,7 +213,7 @@ static bool cpu_prepare_triangle(const MopRhiDrawCall *call,
     out->vertices[2].u = v2->u; out->vertices[2].v = v2->v;
 
     /* Nearest-neighbor texture sampling — modulate vertex color */
-    if (call->texture) {
+    if (call->texture && call->texture->width >= 1 && call->texture->height >= 1) {
         MopRhiTexture *tex = call->texture;
         for (int t = 0; t < 3; t++) {
             float tu = out->vertices[t].u - floorf(out->vertices[t].u);
@@ -365,7 +366,7 @@ static bool cpu_prepare_triangle_ex(const MopRhiDrawCall *call,
     }
 
     /* Texture sampling (same as standard path) */
-    if (call->texture) {
+    if (call->texture && call->texture->width >= 1 && call->texture->height >= 1) {
         MopRhiTexture *tex = call->texture;
         for (int t = 0; t < 3; t++) {
             float tu = out->vertices[t].u - floorf(out->vertices[t].u);
@@ -450,6 +451,7 @@ static void cpu_draw(MopRhiDevice *device, MopRhiFramebuffer *fb,
             return;
         }
         /* malloc failed — fall through to single-threaded path */
+        MOP_WARN("tiled rasterizer allocation failed, falling back to single-threaded");
     }
 
     /* Single-threaded fallback */

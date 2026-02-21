@@ -8,6 +8,7 @@
  */
 
 #include <mop/types.h>
+#include <mop/log.h>
 #include <math.h>
 
 /* -------------------------------------------------------------------------
@@ -235,7 +236,8 @@ MopMat4 mop_mat4_inverse(MopMat4 m) {
            + a[4]*a[2]*a[9]   + a[8]*a[1]*a[6]    - a[8]*a[2]*a[5];
 
     float det = a[0]*o[0] + a[1]*o[4] + a[2]*o[8] + a[3]*o[12];
-    if (det > -1e-8f && det < 1e-8f) {
+    if (fabsf(det) < 1e-8f) {
+        MOP_WARN("singular matrix in inverse (det=%.2e)", det);
         return mop_mat4_identity();
     }
 

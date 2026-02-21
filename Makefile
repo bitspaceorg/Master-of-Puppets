@@ -16,6 +16,7 @@ CC       ?= cc
 AR       ?= ar
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-unused-parameter -Wno-missing-field-initializers \
+            -fno-common \
             -Iinclude -Isrc
 
 # Optimization
@@ -23,6 +24,18 @@ ifdef RELEASE
   CFLAGS += -O2 -DNDEBUG
 else
   CFLAGS += -O0 -g
+endif
+
+# Sanitizer support: make SANITIZE=asan  or  make SANITIZE=ubsan
+ifdef SANITIZE
+ifeq ($(SANITIZE),asan)
+CFLAGS += -fsanitize=address -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=address
+endif
+ifeq ($(SANITIZE),ubsan)
+CFLAGS += -fsanitize=undefined -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=undefined
+endif
 endif
 
 # -----------------------------------------------------------------------------
@@ -43,35 +56,46 @@ endif
 CORE_SRCS := \
   src/math/math.c \
   src/rhi/rhi.c \
-  src/viewport/viewport.c \
-  src/viewport/vertex_format.c \
-  src/viewport/light.c \
-  src/viewport/display.c \
-  src/viewport/overlay.c \
-  src/viewport/overlay_builtin.c \
+  src/core/viewport.c \
+  src/core/vertex_format.c \
+  src/core/light.c \
+  src/core/display.c \
+  src/core/overlay.c \
+  src/core/overlay_builtin.c \
+  src/core/subsystem.c \
   src/rasterizer/rasterizer.c \
   src/rasterizer/rasterizer_mt.c \
-  src/gizmo/gizmo.c \
-  src/camera/camera.c \
-  src/input/input.c \
+  src/interact/gizmo.c \
+  src/interact/camera.c \
+  src/interact/input.c \
+  src/interact/undo.c \
   src/loader/obj_loader.c \
   src/loader/mop_loader.c \
-  src/log/log.c \
-  src/profile/profile.c \
-  src/undo/undo.c \
-  src/particle/particle.c \
-  src/water/water.c \
-  src/postprocess/postprocess.c \
+  src/loader/loader.c \
+  src/util/log.c \
+  src/util/profile.c \
+  src/subsystem/particle.c \
+  src/subsystem/water.c \
+  src/subsystem/postprocess.c \
+  src/query/query.c \
+  src/query/camera_query.c \
+  src/query/snapshot.c \
+  src/query/spatial.c \
   src/backend/cpu/cpu_backend.c
 
-# Optional: Lua config support (requires lua5.4 or luajit via pkg-config)
-ifdef MOP_ENABLE_LUA
-  CORE_SRCS += src/config/config.c
-  CFLAGS    += -DMOP_HAS_LUA=1
+# Lua config support — auto-detected via pkg-config, disable with MOP_DISABLE_LUA=1
+ifndef MOP_DISABLE_LUA
   LUA_CFLAGS  := $(shell pkg-config --cflags lua5.4 2>/dev/null || \
                           pkg-config --cflags luajit 2>/dev/null || \
                           pkg-config --cflags lua 2>/dev/null)
-  CFLAGS    += $(LUA_CFLAGS)
+  LUA_LDFLAGS := $(shell pkg-config --libs lua5.4 2>/dev/null || \
+                          pkg-config --libs luajit 2>/dev/null || \
+                          pkg-config --libs lua 2>/dev/null)
+  HAS_LUA     := $(if $(LUA_LDFLAGS),1,)
+  ifeq ($(HAS_LUA),1)
+    CORE_SRCS += src/config/config.c
+    CFLAGS    += -DMOP_HAS_LUA=1 $(LUA_CFLAGS)
+  endif
 endif
 
 # Optional: OpenGL 3.3 backend (requires GL headers and libraries)
@@ -128,19 +152,14 @@ $(OBJ_DIR)/%.o: src/%.c | obj_dirs
 obj_dirs:
 	@mkdir -p $(OBJ_DIR)/math
 	@mkdir -p $(OBJ_DIR)/rhi
-	@mkdir -p $(OBJ_DIR)/viewport
+	@mkdir -p $(OBJ_DIR)/core
 	@mkdir -p $(OBJ_DIR)/rasterizer
-	@mkdir -p $(OBJ_DIR)/gizmo
-	@mkdir -p $(OBJ_DIR)/camera
-	@mkdir -p $(OBJ_DIR)/input
+	@mkdir -p $(OBJ_DIR)/interact
 	@mkdir -p $(OBJ_DIR)/config
-	@mkdir -p $(OBJ_DIR)/log
 	@mkdir -p $(OBJ_DIR)/loader
-	@mkdir -p $(OBJ_DIR)/profile
-	@mkdir -p $(OBJ_DIR)/undo
-	@mkdir -p $(OBJ_DIR)/particle
-	@mkdir -p $(OBJ_DIR)/water
-	@mkdir -p $(OBJ_DIR)/postprocess
+	@mkdir -p $(OBJ_DIR)/util
+	@mkdir -p $(OBJ_DIR)/subsystem
+	@mkdir -p $(OBJ_DIR)/query
 	@mkdir -p $(OBJ_DIR)/backend/cpu
 	@mkdir -p $(OBJ_DIR)/backend/opengl
 	@mkdir -p $(OBJ_DIR)/backend/vulkan

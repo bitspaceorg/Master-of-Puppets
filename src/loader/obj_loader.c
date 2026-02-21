@@ -116,6 +116,8 @@ bool mop_obj_load(const char *path, MopObjMesh *out) {
         return false;
     }
 
+    bool result = false;
+
     /* Raw position, texcoord, and normal arrays */
     FloatArray positions = {0};
     FloatArray texcoords = {0};    /* 2 floats per vt entry */
@@ -125,6 +127,7 @@ bool mop_obj_load(const char *path, MopObjMesh *out) {
     MopVertex *verts = NULL;
     uint32_t vert_count = 0, vert_cap = 0;
     UintArray indices = {0};
+    MopVec3 *tangents = NULL;
 
     /* Default vertex color: light gray */
     MopColor default_color = { 0.7f, 0.7f, 0.7f, 1.0f };
@@ -234,14 +237,10 @@ bool mop_obj_load(const char *path, MopObjMesh *out) {
     }
 
     fclose(fp);
-    free(positions.d);
-    free(texcoords.d);
-    free(normals.d);
+    fp = NULL;
 
     if (vert_count == 0 || indices.n == 0) {
-        free(verts);
-        free(indices.d);
-        return false;
+        goto cleanup;
     }
 
     /* Compute AABB */
@@ -288,7 +287,7 @@ bool mop_obj_load(const char *path, MopObjMesh *out) {
     /* Compute per-vertex tangents from UV derivatives (for normal mapping).
      * For each triangle, compute the tangent vector from the UV edge
      * derivatives, then accumulate to vertices and normalize. */
-    MopVec3 *tangents = calloc(vert_count, sizeof(MopVec3));
+    tangents = calloc(vert_count, sizeof(MopVec3));
     if (tangents) {
         for (uint32_t i = 0; i + 2 < indices.n; i += 3) {
             uint32_t idx0 = indices.d[i + 0];
@@ -345,7 +344,22 @@ bool mop_obj_load(const char *path, MopObjMesh *out) {
     out->bbox_min     = bmin;
     out->bbox_max     = bmax;
     out->tangents     = tangents;
-    return true;
+    result = true;
+
+    /* On success, ownership transfers to out — don't free verts/indices/tangents */
+    verts    = NULL;
+    indices.d = NULL;
+    tangents = NULL;
+
+cleanup:
+    if (fp) fclose(fp);
+    free(positions.d);
+    free(texcoords.d);
+    free(normals.d);
+    free(verts);
+    free(indices.d);
+    free(tangents);
+    return result;
 }
 
 void mop_obj_free(MopObjMesh *mesh) {

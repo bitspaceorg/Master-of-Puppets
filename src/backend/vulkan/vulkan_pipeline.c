@@ -11,7 +11,7 @@
 #include "vulkan_shaders.h"
 
 /* -------------------------------------------------------------------------
- * Render pass: color (R8G8B8A8_SRGB) + picking (R32_UINT) + depth (D32_SFLOAT)
+ * Render pass: color (R8G8B8A8_UNORM) + picking (R32_UINT) + depth (D32_SFLOAT)
  *
  * Final layouts are TRANSFER_SRC_OPTIMAL so we can readback at frame_end.
  * ------------------------------------------------------------------------- */
@@ -153,7 +153,8 @@ VkResult mop_vk_create_pipeline_layout(VkDevice device,
  * Pipeline creation for a given state key
  * ------------------------------------------------------------------------- */
 
-static VkPipeline create_pipeline(struct MopRhiDevice *dev, uint32_t key) {
+static VkPipeline create_pipeline(struct MopRhiDevice *dev, uint32_t key,
+                                   uint32_t vertex_stride) {
     bool wireframe     = (key & 1) != 0;
     bool depth_test    = (key & 2) != 0;
     bool backface_cull = (key & 4) != 0;
@@ -175,10 +176,11 @@ static VkPipeline create_pipeline(struct MopRhiDevice *dev, uint32_t key) {
         },
     };
 
-    /* Vertex input: matches MopVertex layout (stride=48) */
+    /* Vertex input — stride comes from the draw call's vertex format.
+     * Standard MopVertex is 48 bytes; flex vertex formats may be wider. */
     VkVertexInputBindingDescription binding = {
         .binding   = 0,
-        .stride    = sizeof(MopVertex),
+        .stride    = vertex_stride,
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
     };
 
@@ -328,14 +330,23 @@ static VkPipeline create_pipeline(struct MopRhiDevice *dev, uint32_t key) {
  * Get or lazily create a pipeline
  * ------------------------------------------------------------------------- */
 
-VkPipeline mop_vk_get_pipeline(struct MopRhiDevice *dev, uint32_t key) {
+VkPipeline mop_vk_get_pipeline(struct MopRhiDevice *dev, uint32_t key,
+                               uint32_t vertex_stride) {
     if (key >= MOP_VK_MAX_PIPELINES) {
         MOP_ERROR("[VK] pipeline key %u out of range", key);
         return VK_NULL_HANDLE;
     }
 
+    /* Recreate if stride changed (non-standard stride slot reused) */
+    if (dev->pipelines[key] != VK_NULL_HANDLE &&
+        dev->pipeline_strides[key] != vertex_stride) {
+        vkDestroyPipeline(dev->device, dev->pipelines[key], NULL);
+        dev->pipelines[key] = VK_NULL_HANDLE;
+    }
+
     if (dev->pipelines[key] == VK_NULL_HANDLE) {
-        dev->pipelines[key] = create_pipeline(dev, key);
+        dev->pipelines[key] = create_pipeline(dev, key, vertex_stride);
+        dev->pipeline_strides[key] = vertex_stride;
     }
 
     return dev->pipelines[key];

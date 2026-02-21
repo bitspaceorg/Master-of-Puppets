@@ -61,4 +61,39 @@ typedef struct MopBinaryMesh {
 bool mop_binary_load(const char *path, MopBinaryMesh *out);
 void mop_binary_free(MopBinaryMesh *mesh);
 
+/* -------------------------------------------------------------------------
+ * Unified loader factory
+ *
+ * Dispatches by file extension:  .obj → OBJ loader,  .mop → binary loader.
+ * Returns a common struct that can be passed to MopMeshDesc and freed with
+ * mop_load_free regardless of the source format.
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopMeshFormat {
+    MOP_FORMAT_UNKNOWN = 0,
+    MOP_FORMAT_OBJ,
+    MOP_FORMAT_MOP_BINARY,
+} MopMeshFormat;
+
+typedef struct MopLoadedMesh {
+    MopVertex     *vertices;
+    uint32_t       vertex_count;
+    uint32_t      *indices;
+    uint32_t       index_count;
+    MopVec3        bbox_min, bbox_max;
+    MopVec3       *tangents;        /* NULL if format doesn't provide them */
+    /* internal — used by mop_load_free for correct cleanup */
+    MopMeshFormat  _format;
+    bool           _mmapped;
+    void          *_mmap_base;
+    size_t         _mmap_size;
+} MopLoadedMesh;
+
+/* Load a mesh file, dispatching by extension (.obj, .mop).
+ * Returns true on success; on failure the out struct is zeroed. */
+bool mop_load(const char *path, MopLoadedMesh *out);
+
+/* Free memory allocated by mop_load. */
+void mop_load_free(MopLoadedMesh *mesh);
+
 #endif /* MOP_LOADER_H */

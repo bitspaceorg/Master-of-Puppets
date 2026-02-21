@@ -86,6 +86,7 @@ typedef enum MopEventType {
     MOP_EVENT_RENDER_MODE_CHANGED,   /* object_id = MopRenderMode      */
     MOP_EVENT_SHADING_CHANGED,       /* object_id = MopShadingMode     */
     MOP_EVENT_POST_EFFECTS_CHANGED,  /* object_id = post effect mask   */
+    MOP_EVENT_LIGHT_CHANGED,         /* object_id = 0xFFFE0000 + idx   */
 } MopEventType;
 
 /* -------------------------------------------------------------------------

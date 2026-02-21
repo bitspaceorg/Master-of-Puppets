@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 
 /* -------------------------------------------------------------------------
  * Internal filter: a mesh is a "scene mesh" if it's active, has a non-zero

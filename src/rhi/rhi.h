@@ -95,6 +95,9 @@ typedef struct MopRhiDrawCall {
  * invalid and will cause the viewport to reject the backend at creation.
  * ------------------------------------------------------------------------- */
 
+/* All function pointers in this table MUST be non-NULL.  The viewport
+ * core calls them unconditionally.  Backends must provide complete
+ * implementations for all functions. */
 typedef struct MopRhiBackend {
     const char *name;
 

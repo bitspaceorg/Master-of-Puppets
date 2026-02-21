@@ -68,17 +68,21 @@ typedef struct MopVkFragUniforms {
 /* -------------------------------------------------------------------------
  * Pipeline cache key
  *
- * Bits: wireframe(1) + depth_test(1) + backface_cull(1) + blend_mode(2) = 5 bits
- * Max 32 unique combos, stored in a flat 64-slot array.
+ * Bits: wireframe(1) + depth_test(1) + backface_cull(1) + blend_mode(2)
+ *       + non_standard_stride(1) = 6 bits
+ * Max 64 unique combos, stored in a flat 64-slot array.
  * ------------------------------------------------------------------------- */
 
 static inline uint32_t mop_vk_pipeline_key(bool wireframe, bool depth_test,
                                             bool backface_cull,
-                                            MopBlendMode blend_mode) {
+                                            MopBlendMode blend_mode,
+                                            uint32_t vertex_stride) {
+    uint32_t non_standard = (vertex_stride != sizeof(MopVertex)) ? 1u : 0u;
     return ((uint32_t)wireframe)
          | ((uint32_t)depth_test     << 1)
          | ((uint32_t)backface_cull  << 2)
-         | ((uint32_t)blend_mode     << 3);
+         | ((uint32_t)blend_mode     << 3)
+         | (non_standard             << 5);
 }
 
 /* -------------------------------------------------------------------------
@@ -112,6 +116,7 @@ struct MopRhiDevice {
 
     /* Pipeline cache: flat array indexed by pipeline key */
     VkPipeline pipelines[MOP_VK_MAX_PIPELINES];
+    uint32_t   pipeline_strides[MOP_VK_MAX_PIPELINES]; /* stride used when created */
 
     /* Descriptor pool (reset per frame) */
     VkDescriptorPool desc_pool;
@@ -261,7 +266,8 @@ VkResult mop_vk_create_pipeline_layout(VkDevice device,
                                         VkPipelineLayout *out);
 
 /* Get or lazily create a pipeline for the given state key. */
-VkPipeline mop_vk_get_pipeline(struct MopRhiDevice *dev, uint32_t key);
+VkPipeline mop_vk_get_pipeline(struct MopRhiDevice *dev, uint32_t key,
+                               uint32_t vertex_stride);
 
 /* -------------------------------------------------------------------------
  * Utility: one-shot command buffer for upload/transition

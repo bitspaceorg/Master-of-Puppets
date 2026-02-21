@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "viewport/viewport_internal.h"
+#include "core/viewport_internal.h"
 #include "rhi/rhi.h"
 
 #include <mop/log.h>
@@ -15,6 +15,57 @@
 
 /* Profiling helper — defined in profile.c */
 double mop_profile_now_ms(void);
+
+/* -------------------------------------------------------------------------
+ * Pipeline hooks — dispatch helper
+ * ------------------------------------------------------------------------- */
+
+static void dispatch_hooks(MopViewport *vp, MopPipelineStage stage) {
+    for (uint32_t i = 0; i < vp->hook_count; i++) {
+        if (vp->hooks[i].active && vp->hooks[i].stage == stage &&
+            vp->hooks[i].fn) {
+            vp->hooks[i].fn(vp, vp->hooks[i].data);
+        }
+    }
+}
+
+uint32_t mop_viewport_add_hook(MopViewport *vp,
+                                MopPipelineStage stage,
+                                MopPipelineHookFn fn,
+                                void *user_data) {
+    if (!vp || !fn || (int)stage < 0 || stage >= MOP_STAGE_COUNT)
+        return UINT32_MAX;
+
+    /* Find an inactive slot or use a new one */
+    uint32_t slot = UINT32_MAX;
+    for (uint32_t i = 0; i < vp->hook_count; i++) {
+        if (!vp->hooks[i].active) { slot = i; break; }
+    }
+    if (slot == UINT32_MAX) {
+        if (vp->hook_count >= MOP_MAX_HOOKS) return UINT32_MAX;
+        slot = vp->hook_count++;
+    }
+
+    vp->hooks[slot].fn     = fn;
+    vp->hooks[slot].data   = user_data;
+    vp->hooks[slot].stage  = stage;
+    vp->hooks[slot].active = true;
+    return slot;
+}
+
+void mop_viewport_remove_hook(MopViewport *vp, uint32_t handle) {
+    if (!vp || handle >= vp->hook_count) return;
+    vp->hooks[handle].active = false;
+    vp->hooks[handle].fn     = NULL;
+}
+
+void mop_viewport_set_frame_callback(MopViewport *vp,
+                                      MopFrameCallbackFn fn,
+                                      void *user_data) {
+    if (!vp) return;
+    vp->frame_cb      = fn;
+    vp->frame_cb_data = user_data;
+}
 
 #define MOP_INITIAL_MESH_CAPACITY 64
 
@@ -347,6 +398,12 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
     vp->grid   = create_grid(vp);
     create_axis_indicator(vp);
 
+    /* Chrome defaults to visible */
+    vp->show_chrome = true;
+
+    /* Register built-in subsystems */
+    mop_postprocess_register(vp);
+
     /* Interaction state */
     vp->selected_id    = 0;
     vp->interact_state = MOP_INTERACT_IDLE;
@@ -365,23 +422,24 @@ void mop_viewport_destroy(MopViewport *viewport) {
         return;
     }
 
+    /* Destroy light indicators */
+    mop_light_destroy_indicators(viewport);
+
     /* Destroy owned gizmo */
     if (viewport->gizmo) {
         mop_gizmo_destroy(viewport->gizmo);
         viewport->gizmo = NULL;
     }
 
-    /* Destroy water surfaces (Phase 8D/8E) — must happen before meshes
-     * since water surfaces own internal meshes.  The underlying mesh is
-     * freed in the mesh loop below, so we only free water-specific data. */
-    for (uint32_t i = 0; i < viewport->water_count; i++) {
-        mop_water_destroy_internal(viewport->water_surfaces[i]);
-    }
+    /* Destroy all registered subsystems (water, particles, postprocess, etc.)
+     * Must happen before meshes since subsystems may own internal meshes. */
+    mop_subsystem_destroy_all(&viewport->subsystems, viewport);
+
+    /* Free the legacy tracking arrays (kept for backward-compat API) */
     free(viewport->water_surfaces);
     viewport->water_surfaces = NULL;
     viewport->water_count    = 0;
 
-    /* Destroy emitters (Phase 8B/8E) — placeholder for future emitter cleanup */
     free(viewport->emitters);
     viewport->emitters     = NULL;
     viewport->emitter_count = 0;
@@ -559,6 +617,10 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport,
     if (slot == viewport->mesh_count) {
         /* Need a new slot — grow if at capacity */
         if (viewport->mesh_count >= viewport->mesh_capacity) {
+            if (viewport->mesh_capacity > UINT32_MAX / 2) {
+                MOP_ERROR("mesh array capacity overflow");
+                return NULL;
+            }
             uint32_t new_cap = viewport->mesh_capacity * 2;
             struct MopMesh *new_arr = realloc(viewport->meshes,
                                               new_cap * sizeof(struct MopMesh));
@@ -659,6 +721,10 @@ MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport,
     }
     if (slot == viewport->mesh_count) {
         if (viewport->mesh_count >= viewport->mesh_capacity) {
+            if (viewport->mesh_capacity > UINT32_MAX / 2) {
+                MOP_ERROR("mesh array capacity overflow");
+                return NULL;
+            }
             uint32_t new_cap = viewport->mesh_capacity * 2;
             struct MopMesh *new_arr = realloc(viewport->meshes,
                                               new_cap * sizeof(struct MopMesh));
@@ -765,6 +831,10 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
                               const uint32_t *indices, uint32_t index_count) {
     if (!mesh || !viewport || !vertices || !indices) return;
     if (vertex_count == 0 || index_count == 0) return;
+    if (vertex_count > 16 * 1024 * 1024) {  /* 16M vertex limit */
+        MOP_ERROR("vertex count exceeds maximum (%u)", vertex_count);
+        return;
+    }
 
     /* --- Vertex buffer --- */
     if (vertex_count <= mesh->vertex_capacity) {
@@ -961,8 +1031,9 @@ static uint32_t s_triangle_count;
         .shading_mode  = (vp)->shading_mode, \
         .wireframe     = ((vp)->render_mode == MOP_RENDER_WIREFRAME) \
                           && m_->object_id != 0, \
-        .depth_test    = (m_->object_id < 0xFFFF0000u), \
-        .backface_cull = (m_->object_id != 0), \
+        .depth_test    = (m_->object_id < 0xFFFE0000u), \
+        .backface_cull = (m_->object_id != 0 \
+                          && m_->object_id < 0xFFFE0000u), \
         .texture       = m_->texture \
                          ? m_->texture->rhi_texture : NULL, \
         .blend_mode    = m_->blend_mode, \
@@ -1043,6 +1114,14 @@ static void pass_scene_transparent(MopViewport *vp) {
     if (!trans_idx || !trans_dist) {
         free(trans_idx);
         free(trans_dist);
+        MOP_WARN("transparent sort allocation failed, rendering unsorted");
+        /* Fall through to render unsorted */
+        for (uint32_t i = 0; i < vp->mesh_count; i++) {
+            struct MopMesh *mesh = &vp->meshes[i];
+            if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE) continue;
+            if (mesh->object_id >= 0xFFFF0000u) continue;
+            EMIT_DRAW(vp, mesh);
+        }
         return;
     }
 
@@ -1082,12 +1161,12 @@ static void pass_scene_transparent(MopViewport *vp) {
     free(trans_dist);
 }
 
-/* ---- Pass: gizmo overlays ---- */
+/* ---- Pass: gizmo overlays + light indicators ---- */
 static void pass_gizmo(MopViewport *vp) {
     for (uint32_t i = 0; i < vp->mesh_count; i++) {
         struct MopMesh *mesh = &vp->meshes[i];
         if (!mesh->active) continue;
-        if (mesh->object_id < 0xFFFF0000u) continue;
+        if (mesh->object_id < 0xFFFE0000u) continue; /* light indicators + gizmo handles */
         EMIT_DRAW(vp, mesh);
     }
 }
@@ -1227,14 +1306,6 @@ static void pass_instanced(MopViewport *vp) {
     }
 }
 
-/* ---- Pass: post-processing (CPU backend only) ---- */
-static void pass_postprocess(MopViewport *vp) {
-    if (vp->post_effects != 0 && vp->backend_type == MOP_BACKEND_CPU) {
-        MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)vp->framebuffer;
-        mop_postprocess_apply(sw_fb, vp->post_effects, &vp->fog_params);
-    }
-}
-
 #undef EMIT_DRAW
 
 /* -------------------------------------------------------------------------
@@ -1246,20 +1317,19 @@ void mop_viewport_render(MopViewport *viewport) {
 
     double t_frame_start = mop_profile_now_ms();
 
+    /* --- PRE_RENDER hooks + frame callback --- */
+    dispatch_hooks(viewport, MOP_STAGE_PRE_RENDER);
+    if (viewport->frame_cb)
+        viewport->frame_cb(viewport, true, viewport->frame_cb_data);
+
     /* Apply owned camera each frame */
     mop_orbit_camera_apply(&viewport->camera, viewport);
 
+    /* Update light indicator meshes (create/destroy/reposition) */
+    mop_light_update_indicators(viewport);
+
     /* Refresh gizmo scale for current camera distance */
     mop_gizmo_update(viewport->gizmo);
-
-    /* --- Clear phase --- */
-    double t_clear_start = mop_profile_now_ms();
-    viewport->rhi->frame_begin(viewport->device, viewport->framebuffer,
-                               viewport->clear_color);
-    double t_clear_end = mop_profile_now_ms();
-
-    /* --- Background --- */
-    pass_background(viewport);
 
     /* --- Transform phase (TRS + hierarchical world transforms) --- */
     double t_transform_start = mop_profile_now_ms();
@@ -1304,27 +1374,66 @@ void mop_viewport_render(MopViewport *viewport) {
 
     double t_transform_end = mop_profile_now_ms();
 
-    /* --- Simulation update (water surfaces) --- */
-    for (uint32_t i = 0; i < viewport->water_count; i++) {
-        MopWaterSurface *ws = viewport->water_surfaces[i];
-        if (ws) mop_water_update(ws, viewport->last_frame_time);
-    }
+    /* --- Simulation update (water, particles, etc. via subsystem dispatch) ---
+     * Must run BEFORE frame_begin so that Vulkan buffer updates (one-shot
+     * command buffers) complete before the main render command buffer reads
+     * the vertex data inside the render pass. */
+    mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_SIMULATE,
+                            viewport, 0.0f, viewport->last_frame_time);
+
+    /* --- Clear phase --- */
+    double t_clear_start = mop_profile_now_ms();
+    viewport->rhi->frame_begin(viewport->device, viewport->framebuffer,
+                               viewport->clear_color);
+    double t_clear_end = mop_profile_now_ms();
+
+    /* --- POST_CLEAR hooks --- */
+    dispatch_hooks(viewport, MOP_STAGE_POST_CLEAR);
+
+    /* --- Background --- */
+    if (viewport->show_chrome)
+        pass_background(viewport);
+
+    /* --- PRE_SCENE hooks --- */
+    dispatch_hooks(viewport, MOP_STAGE_PRE_SCENE);
 
     /* --- Rasterize phase --- */
     double t_rasterize_start = mop_profile_now_ms();
 
     pass_scene_opaque(viewport);
+
+    /* --- POST_OPAQUE hooks --- */
+    dispatch_hooks(viewport, MOP_STAGE_POST_OPAQUE);
+
     pass_scene_transparent(viewport);
-    pass_overlays(viewport);
-    pass_gizmo(viewport);
-    pass_hud(viewport);
     pass_instanced(viewport);
+
+    /* --- POST_SCENE hooks --- */
+    dispatch_hooks(viewport, MOP_STAGE_POST_SCENE);
+
+    pass_overlays(viewport);
+    if (viewport->show_chrome)
+        pass_gizmo(viewport);
+
+    /* --- POST_OVERLAY hooks --- */
+    dispatch_hooks(viewport, MOP_STAGE_POST_OVERLAY);
+
+    if (viewport->show_chrome)
+        pass_hud(viewport);
 
     viewport->rhi->frame_end(viewport->device, viewport->framebuffer);
 
-    pass_postprocess(viewport);
+    /* Post-render subsystems (postprocess effects, etc.) */
+    mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_POST_RENDER,
+                            viewport, 0.0f, viewport->last_frame_time);
 
     double t_rasterize_end = mop_profile_now_ms();
+
+    /* --- POST_RENDER hooks + frame callback --- */
+    dispatch_hooks(viewport, MOP_STAGE_POST_RENDER);
+    if (viewport->frame_cb)
+        viewport->frame_cb(viewport, false, viewport->frame_cb_data);
+
     double t_frame_end = mop_profile_now_ms();
 
     /* Store profiling stats */
@@ -1550,4 +1659,17 @@ void mop_viewport_remove_instanced_mesh(MopViewport *viewport,
 void mop_viewport_set_time(MopViewport *viewport, float t) {
     if (!viewport) return;
     viewport->last_frame_time = t;
+}
+
+/* -------------------------------------------------------------------------
+ * Chrome visibility
+ * ------------------------------------------------------------------------- */
+
+void mop_viewport_set_chrome(MopViewport *viewport, bool visible) {
+    if (!viewport) return;
+    viewport->show_chrome = visible;
+
+    /* Hide/show the grid mesh */
+    if (viewport->grid)
+        mop_mesh_set_opacity(viewport->grid, visible ? 1.0f : 0.0f);
 }

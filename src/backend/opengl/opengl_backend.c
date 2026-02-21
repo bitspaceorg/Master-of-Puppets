@@ -598,15 +598,17 @@ static const uint8_t *gl_framebuffer_read_color(MopRhiDevice *device,
     int w = fb->width;
     int h = fb->height;
     uint8_t *row = malloc((size_t)w * 4);
-    if (row) {
-        for (int y = 0; y < h; y++) {
-            int gl_y = h - 1 - y;
-            glReadPixels(0, gl_y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
-            memcpy(fb->readback_color + (size_t)y * (size_t)w * 4,
-                   row, (size_t)w * 4);
-        }
-        free(row);
+    if (!row) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        return NULL;
     }
+    for (int y = 0; y < h; y++) {
+        int gl_y = h - 1 - y;
+        glReadPixels(0, gl_y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
+        memcpy(fb->readback_color + (size_t)y * (size_t)w * 4,
+               row, (size_t)w * 4);
+    }
+    free(row);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     return fb->readback_color;

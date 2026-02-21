@@ -406,6 +406,8 @@ int main(int argc, char *argv[]) {
     float  time_accum = 0.0f;
 
     bool running = true;
+    bool animate_pt_a = true;   /* stop animation when user drags a light */
+    bool animate_pt_b = true;
 
     printf("MOP — Phase 1 Showcase Demo\n");
     printf("  3 meshes  |  4 lights  |  all overlays  |  flex vertex format\n");
@@ -504,6 +506,14 @@ int main(int argc, char *argv[]) {
                 printf("Selected object %u\n", mev.object_id);
             if (mev.type == MOP_EVENT_DESELECTED)
                 printf("Deselected\n");
+            if (mev.type == MOP_EVENT_LIGHT_CHANGED) {
+                /* Stop animating lights that the user has moved.
+                 * Light indices: 0=directional, 1=pt_a, 2=pt_b, 3=spot */
+                uint32_t li = mev.object_id - 0xFFFE0000u;
+                if (li == 1) animate_pt_a = false;
+                if (li == 2) animate_pt_b = false;
+                printf("Light %u changed\n", li);
+            }
         }
 
         /* ---- Sync toolbar → lights ---- */
@@ -541,19 +551,23 @@ int main(int argc, char *argv[]) {
         {
             float t = time_accum;
 
-            /* Point A: CW orbit */
-            mop_light_set_position(light_pt_a, (MopVec3){
-                3.0f * cosf(t),
-                2.0f,
-                3.0f * sinf(t)
-            });
+            /* Point A: CW orbit (stops when user drags the light) */
+            if (animate_pt_a) {
+                mop_light_set_position(light_pt_a, (MopVec3){
+                    3.0f * cosf(t),
+                    2.0f,
+                    3.0f * sinf(t)
+                });
+            }
 
             /* Point B: CCW orbit, different speed */
-            mop_light_set_position(light_pt_b, (MopVec3){
-                3.0f * cosf(-t * 0.7f),
-                2.0f,
-                3.0f * sinf(-t * 0.7f)
-            });
+            if (animate_pt_b) {
+                mop_light_set_position(light_pt_b, (MopVec3){
+                    3.0f * cosf(-t * 0.7f),
+                    2.0f,
+                    3.0f * sinf(-t * 0.7f)
+                });
+            }
         }
 
         /* ---- Auto-rotate cube ---- */

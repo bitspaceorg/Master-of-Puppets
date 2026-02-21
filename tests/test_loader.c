@@ -72,6 +72,32 @@ static void test_free_zeroes_mesh(void) {
     TEST_END();
 }
 
+/* -------------------------------------------------------------------------
+ * Factory (mop_load / mop_load_free)
+ * ------------------------------------------------------------------------- */
+
+static void test_factory_obj(void) {
+    TEST_BEGIN("factory_load_obj");
+    MopLoadedMesh mesh;
+    bool ok = mop_load("tests/fixtures/cube.obj", &mesh);
+    TEST_ASSERT(ok);
+    TEST_ASSERT(mesh.vertex_count > 0);
+    TEST_ASSERT(mesh.index_count == 36);
+    TEST_ASSERT(mesh._format == MOP_FORMAT_OBJ);
+    mop_load_free(&mesh);
+    TEST_ASSERT(mesh.vertices == NULL);
+    TEST_END();
+}
+
+static void test_factory_unknown_ext(void) {
+    TEST_BEGIN("factory_unknown_extension");
+    MopLoadedMesh mesh;
+    bool ok = mop_load("tests/fixtures/cube.fbx", &mesh);
+    TEST_ASSERT(!ok);
+    TEST_ASSERT(mesh.vertices == NULL);
+    TEST_END();
+}
+
 int main(void) {
     TEST_SUITE_BEGIN("loader");
 
@@ -80,6 +106,8 @@ int main(void) {
     TEST_RUN(test_cube_normals_nonzero);
     TEST_RUN(test_missing_file);
     TEST_RUN(test_free_zeroes_mesh);
+    TEST_RUN(test_factory_obj);
+    TEST_RUN(test_factory_unknown_ext);
 
     TEST_REPORT();
     TEST_EXIT();

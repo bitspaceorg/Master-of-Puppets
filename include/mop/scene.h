@@ -49,7 +49,12 @@ typedef struct MopMeshDesc {
  * destroyed.  Explicit removal is optional.
  * ------------------------------------------------------------------------- */
 
-/* Add a mesh to the viewport.  Returns NULL on failure. */
+/* Add a mesh to the viewport.  Returns NULL on failure.
+ *
+ * NOTE: The returned MopMesh pointer may be invalidated if the internal
+ * mesh array is reallocated (when adding more meshes beyond the current
+ * capacity).  Do not cache this pointer across calls to mop_viewport_add_mesh.
+ * Instead, re-query using mop_viewport_mesh_at or mop_viewport_mesh_by_id. */
 MopMesh *mop_viewport_add_mesh(MopViewport *viewport,
                                const MopMeshDesc *desc);
 
