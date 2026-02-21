@@ -3,31 +3,45 @@ title: "Backend Capabilities"
 description: "Feature matrix for each rendering backend"
 slug: "development-capabilities"
 author: "rahulmnavneeth"
-date: "19 FEB 2026"
+date: "21 FEB 2026"
 tags: ["development", "backends"]
 ---
 
 ## Feature Matrix
 
-| Feature                  | CPU | OpenGL | Vulkan |
-| ------------------------ | --- | ------ | ------ |
-| Solid rendering          | Yes | Yes    | Yes    |
-| Wireframe rendering      | Yes | Yes    | Yes    |
-| Depth buffering          | Yes | Yes    | Yes    |
-| Backface culling         | Yes | Yes    | Yes    |
-| Flat shading             | Yes | Yes    | Yes    |
-| Object ID picking        | Yes | Yes    | Yes    |
-| Framebuffer readback     | Yes | Yes    | Yes    |
-| Offscreen (no window)    | Yes | Yes    | Yes    |
-| Platform dependency      | None| GL 3.3 | Vk 1.0 |
-| GPU acceleration         | No  | Yes    | Yes    |
+| Feature                | CPU  | OpenGL   | Vulkan |
+| ---------------------- | ---- | -------- | ------ |
+| Solid rendering        | Yes  | Yes      | Yes    |
+| Wireframe rendering    | Yes  | Yes      | Yes    |
+| Depth buffering        | Yes  | Yes      | Yes    |
+| Backface culling       | Yes  | Yes      | Yes    |
+| Flat shading           | Yes  | Yes      | Yes    |
+| Smooth shading         | Yes  | Yes      | Yes    |
+| Multi-light (8 lights) | Yes  | Yes      | Yes    |
+| Object ID picking      | Yes  | Yes      | Yes    |
+| Framebuffer readback   | Yes  | Yes      | Yes    |
+| Offscreen (no window)  | Yes  | Yes      | Yes    |
+| Gizmo overlay          | Yes  | Yes      | Yes    |
+| Light indicators       | Yes  | Yes      | Yes    |
+| Wireframe overlay      | Yes  | Yes      | Yes    |
+| Normal visualization   | Yes  | Yes      | Yes    |
+| Bounding box overlay   | Yes  | Yes      | Yes    |
+| Selection highlight    | Yes  | Yes      | Yes    |
+| Flex vertex format     | Yes  | Yes      | Yes    |
+| Undo/redo              | Yes  | Yes      | Yes    |
+| Particles              | Yes  | Yes      | Yes    |
+| Water surface          | Yes  | Yes      | Yes    |
+| Post-processing        | Yes  | Yes      | Yes    |
+| Platform dependency    | None | GL 3.3   | Vk 1.0 |
+| GPU acceleration       | No   | Yes      | Yes    |
+| Implementation status  | Full | Contract | Full   |
 
 ## Performance Characteristics
 
-| Backend | Geometry throughput | Pixel fill rate | Readback cost |
-| ------- | ------------------- | --------------- | ------------- |
-| CPU     | Low                 | Low             | Zero (direct memory) |
-| OpenGL  | High                | High            | `glReadPixels` (moderate) |
+| Backend | Geometry throughput | Pixel fill rate | Readback cost                  |
+| ------- | ------------------- | --------------- | ------------------------------ |
+| CPU     | Low                 | Low             | Zero (direct memory)           |
+| OpenGL  | High                | High            | `glReadPixels` (moderate)      |
 | Vulkan  | High                | High            | Staging buffer copy (moderate) |
 
 ## Selection Guidance

@@ -1,0 +1,135 @@
+---
+title: "Water Surface"
+description: "Configurable water plane with procedural sine-wave vertex animation"
+slug: "reference-water"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "water", "simulation"]
+---
+
+## Location
+
+```
+include/mop/water.h       — Public API, MopWaterDesc
+src/subsystem/water.c      — Grid generation, sine-wave animation, subsystem vtable
+```
+
+## Overview
+
+The water module creates a configurable planar grid mesh and animates it per-frame with sine-wave vertex displacement. It integrates with the viewport as both a renderable mesh (alpha-blended) and a subsystem (updated during the simulate phase). Normals are recomputed each frame via finite differences to maintain correct lighting on the deformed surface.
+
+## Types
+
+### MopWaterDesc
+
+```c
+typedef struct MopWaterDesc {
+    float    extent;
+    int      resolution;
+    float    wave_speed;
+    float    wave_amplitude;
+    float    wave_frequency;
+    MopColor color;
+    float    opacity;
+} MopWaterDesc;
+```
+
+| Field            | Description                                                                             |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `extent`         | Half-size of the water plane (spans `[-extent, +extent]` on X and Z)                    |
+| `resolution`     | Vertices per edge (e.g. 64 produces a 64x64 vertex grid). Must be >= 2, capped at 1024. |
+| `wave_speed`     | Speed multiplier for wave propagation over time                                         |
+| `wave_amplitude` | Peak height of wave displacement on the Y axis                                          |
+| `wave_frequency` | Spatial frequency of the sine waves                                                     |
+| `color`          | Vertex color applied to all grid vertices                                               |
+| `opacity`        | Blend opacity for the water surface (0.0 = fully transparent, 1.0 = opaque)             |
+
+### MopWaterSurface (opaque)
+
+```c
+typedef struct MopWaterSurface MopWaterSurface;
+```
+
+Opaque handle returned by `mop_viewport_add_water`. Internally holds the generated grid geometry, wave parameters, RHI buffer handles, and a reference to its parent viewport. The struct also embeds a `MopSubsystem` base for phase-based dispatch in the subsystem registry.
+
+## Functions
+
+### mop_viewport_add_water
+
+```c
+MopWaterSurface *mop_viewport_add_water(MopViewport *viewport,
+                                         const MopWaterDesc *desc);
+```
+
+Creates a water surface and adds it to the viewport. This function:
+
+1. Generates a `resolution x resolution` vertex grid on the XZ plane, spanning `[-extent, +extent]`.
+2. Triangulates the grid as `(resolution - 1)^2 * 2` triangles.
+3. Creates a viewport mesh with alpha blending enabled at the specified `opacity`.
+4. Registers the water surface as a subsystem in the `MOP_SUBSYS_PHASE_SIMULATE` phase for automatic per-frame updates.
+
+Returns a `MopWaterSurface` pointer on success, or `NULL` on failure (invalid parameters, allocation failure). The water mesh is not pickable (`object_id = 0`).
+
+### mop_viewport_remove_water
+
+```c
+void mop_viewport_remove_water(MopViewport *viewport,
+                                MopWaterSurface *water);
+```
+
+Removes a water surface from the viewport. Unregisters the subsystem, removes the associated mesh, frees the grid vertex and index arrays, and deallocates the `MopWaterSurface` struct. The pointer is invalid after this call.
+
+### mop_water_set_time
+
+```c
+void mop_water_set_time(MopWaterSurface *water, float t);
+```
+
+Explicitly sets the simulation time and updates the water surface. This triggers vertex displacement and normal recomputation. In typical usage this is called automatically by the subsystem update loop, but it can be called manually to synchronize the water animation with an external clock or to freeze the surface at a specific moment.
+
+## Procedural Sine-Wave Animation
+
+Each frame, every vertex in the water grid has its Y coordinate displaced by a product of two sine waves:
+
+```
+y = amplitude * sin(frequency * (x + t * speed))
+              * sin(frequency * (z + t * speed * 0.7))
+```
+
+The two sine waves operate along X and Z with a `0.7` speed ratio on the Z axis to avoid uniform, tiling-like patterns and produce a more organic surface.
+
+After displacement, vertex normals are recomputed via central finite differences:
+
+```
+nx = (h(x - eps) - h(x + eps)) / (2 * eps)
+ny = 1.0
+nz = (h(z - eps) - h(z + eps)) / (2 * eps)
+normal = normalize(nx, ny, nz)
+```
+
+where `eps = 0.5 * grid_spacing` and `h()` is the height function. The resulting normals ensure correct lighting on the animated surface without requiring per-triangle normal computation.
+
+The updated vertex data is pushed to the RHI via `buffer_update` when available, or by destroying and recreating the vertex buffer as a fallback.
+
+## Usage
+
+```c
+MopWaterDesc desc = {
+    .extent         = 5.0f,
+    .resolution     = 64,
+    .wave_speed     = 1.2f,
+    .wave_amplitude = 0.15f,
+    .wave_frequency = 3.0f,
+    .color          = { 0.2f, 0.4f, 0.8f, 1.0f },
+    .opacity        = 0.6f
+};
+
+MopWaterSurface *water = mop_viewport_add_water(viewport, &desc);
+
+/* Water animates automatically during mop_viewport_render.
+ * To manually set the time: */
+mop_water_set_time(water, 2.5f);
+
+/* Cleanup */
+mop_viewport_remove_water(viewport, water);
+```

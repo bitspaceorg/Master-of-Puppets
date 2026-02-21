@@ -18,11 +18,11 @@
  * ------------------------------------------------------------------------- */
 
 typedef enum MopVertexMapDisplay {
-    MOP_VTXMAP_NONE    = 0,
-    MOP_VTXMAP_UV      = 1,   /* UV coords as color */
-    MOP_VTXMAP_WEIGHTS = 2,   /* bone weights heatmap */
-    MOP_VTXMAP_NORMALS = 3,   /* normal direction as RGB */
-    MOP_VTXMAP_CUSTOM  = 4,   /* custom attrib channel */
+  MOP_VTXMAP_NONE = 0,
+  MOP_VTXMAP_UV = 1,      /* UV coords as color */
+  MOP_VTXMAP_WEIGHTS = 2, /* bone weights heatmap */
+  MOP_VTXMAP_NORMALS = 3, /* normal direction as RGB */
+  MOP_VTXMAP_CUSTOM = 4,  /* custom attrib channel */
 } MopVertexMapDisplay;
 
 /* -------------------------------------------------------------------------
@@ -32,21 +32,21 @@ typedef enum MopVertexMapDisplay {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopDisplaySettings {
-    /* Wireframe overlay */
-    bool     wireframe_overlay;
-    MopColor wireframe_color;        /* default: (1, 0.6, 0.2, 1) — orange */
-    float    wireframe_opacity;      /* 0..1, default: 0.15 */
+  /* Wireframe overlay */
+  bool wireframe_overlay;
+  MopColor wireframe_color; /* default: (1, 0.6, 0.2, 1) — orange */
+  float wireframe_opacity;  /* 0..1, default: 0.15 */
 
-    /* Vertex visualization */
-    bool     show_normals;
-    float    normal_display_length;  /* world units, default: 0.1 */
-    bool     show_bounds;
-    bool     show_vertices;
-    float    vertex_display_size;    /* pixels, default: 3.0 */
+  /* Vertex visualization */
+  bool show_normals;
+  float normal_display_length; /* world units, default: 0.1 */
+  bool show_bounds;
+  bool show_vertices;
+  float vertex_display_size; /* pixels, default: 3.0 */
 
-    /* Vertex map coloring */
-    MopVertexMapDisplay vertex_map_mode;
-    uint32_t            vertex_map_channel;  /* which CUSTOM attrib */
+  /* Vertex map coloring */
+  MopVertexMapDisplay vertex_map_mode;
+  uint32_t vertex_map_channel; /* which CUSTOM attrib */
 } MopDisplaySettings;
 
 /* -------------------------------------------------------------------------

@@ -21,7 +21,7 @@
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
-typedef struct MopConfig   MopConfig;
+typedef struct MopConfig MopConfig;
 
 #if defined(MOP_HAS_LUA)
 
@@ -77,13 +77,25 @@ int mop_config_resolve_input(const char *action);
 #else /* !MOP_HAS_LUA */
 
 /* Stubs — config not available without Lua */
-static inline MopConfig   *mop_config_load(const char *p) { (void)p; return 0; }
-static inline void          mop_config_free(MopConfig *c)  { (void)c; }
-static inline void          mop_config_apply(const MopConfig *c, MopViewport *v)
-                                { (void)c; (void)v; }
-static inline const char   *mop_config_get_action(const MopConfig *c, const char *k)
-                                { (void)c; (void)k; return 0; }
-static inline int           mop_config_resolve_input(const char *a) { (void)a; return -1; }
+static inline MopConfig *mop_config_load(const char *p) {
+  (void)p;
+  return 0;
+}
+static inline void mop_config_free(MopConfig *c) { (void)c; }
+static inline void mop_config_apply(const MopConfig *c, MopViewport *v) {
+  (void)c;
+  (void)v;
+}
+static inline const char *mop_config_get_action(const MopConfig *c,
+                                                const char *k) {
+  (void)c;
+  (void)k;
+  return 0;
+}
+static inline int mop_config_resolve_input(const char *a) {
+  (void)a;
+  return -1;
+}
 
 #endif /* MOP_HAS_LUA */
 

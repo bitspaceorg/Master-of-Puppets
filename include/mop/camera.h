@@ -21,14 +21,14 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopOrbitCamera {
-    MopVec3 target;       /* look-at point */
-    float   distance;     /* distance from target */
-    float   yaw;          /* horizontal angle (radians) */
-    float   pitch;        /* vertical angle (radians), clamped to ±max_pitch */
-    float   fov_degrees;  /* vertical field of view */
-    float   near_plane;
-    float   far_plane;
-    float   max_pitch;    /* pitch clamp (default 1.5 rad ≈ 86°) */
+  MopVec3 target;    /* look-at point */
+  float distance;    /* distance from target */
+  float yaw;         /* horizontal angle (radians) */
+  float pitch;       /* vertical angle (radians), clamped to ±max_pitch */
+  float fov_degrees; /* vertical field of view */
+  float near_plane;
+  float far_plane;
+  float max_pitch; /* pitch clamp (default 1.5 rad ≈ 86°) */
 } MopOrbitCamera;
 
 /* Return sensible defaults: distance 4.5, yaw 0.6, pitch 0.4, fov 60,
@@ -44,7 +44,7 @@ void mop_orbit_camera_apply(const MopOrbitCamera *cam, MopViewport *vp);
 /* Orbit: rotate around the target.  dx/dy are mouse deltas in pixels.
  * Typical sensitivity: 0.005 per pixel. */
 void mop_orbit_camera_orbit(MopOrbitCamera *cam, float dx, float dy,
-                             float sensitivity);
+                            float sensitivity);
 
 /* Pan: translate the target in the camera's local right/up plane.
  * dx/dy are mouse deltas in pixels.  Scales with distance automatically. */

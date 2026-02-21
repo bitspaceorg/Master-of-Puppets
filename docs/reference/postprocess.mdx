@@ -16,7 +16,7 @@ src/postprocess/postprocess.c  — Per-pixel effect loops
 
 ## Overview
 
-Post-processing effects are applied to the framebuffer after all geometry has been rendered.  Effects are controlled by a bitmask and applied in a fixed order: fog, tonemapping, gamma correction, vignette.
+Post-processing effects are applied to the framebuffer after all geometry has been rendered. Effects are controlled by a bitmask and applied in a fixed order: fog, tonemapping, gamma correction, vignette.
 
 ## Effects
 
@@ -40,12 +40,12 @@ mop_viewport_set_post_effects(vp, MOP_POST_GAMMA | MOP_POST_TONEMAP);
 
 ### Effect Details
 
-| Effect          | Algorithm                              | Notes                                          |
-|-----------------|----------------------------------------|------------------------------------------------|
-| `MOP_POST_FOG`  | Linear depth fog: `mix(color, fog_color, t)` where `t = (depth - near) / (far - near)` | Requires `mop_viewport_set_fog()` to set color and distance range |
-| `MOP_POST_TONEMAP` | Reinhard: `c / (c + 1)`            | Applied per-channel in linear space            |
-| `MOP_POST_GAMMA` | `pow(c, 1/2.2)`                      | sRGB gamma correction                         |
-| `MOP_POST_VIGNETTE` | Darkens edges based on distance from center | Quadratic falloff, 20% darkening at corners |
+| Effect              | Algorithm                                                                              | Notes                                                             |
+| ------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `MOP_POST_FOG`      | Linear depth fog: `mix(color, fog_color, t)` where `t = (depth - near) / (far - near)` | Requires `mop_viewport_set_fog()` to set color and distance range |
+| `MOP_POST_TONEMAP`  | Reinhard: `c / (c + 1)`                                                                | Applied per-channel in linear space                               |
+| `MOP_POST_GAMMA`    | `pow(c, 1/2.2)`                                                                        | sRGB gamma correction                                             |
+| `MOP_POST_VIGNETTE` | Darkens edges based on distance from center                                            | Quadratic falloff, 20% darkening at corners                       |
 
 ### Application Order
 
@@ -64,7 +64,7 @@ When multiple effects are enabled, they are applied in this order:
 void mop_viewport_set_post_effects(MopViewport *viewport, uint32_t effects);
 ```
 
-Sets the active post-processing effects.  Pass `MOP_POST_NONE` (0) to disable all.  Effects take effect on the next `mop_viewport_render` call.
+Sets the active post-processing effects. Pass `MOP_POST_NONE` (0) to disable all. Effects take effect on the next `mop_viewport_render` call.
 
 ### mop_viewport_set_fog
 
@@ -72,7 +72,7 @@ Sets the active post-processing effects.  Pass `MOP_POST_NONE` (0) to disable al
 void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog);
 ```
 
-Configures fog parameters.  Only used when `MOP_POST_FOG` is enabled.
+Configures fog parameters. Only used when `MOP_POST_FOG` is enabled.
 
 ### MopFogParams
 

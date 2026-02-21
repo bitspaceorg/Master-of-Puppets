@@ -9,14 +9,14 @@ tags: ["development", "build"]
 
 ## Build Tools
 
-| Tool  | Role                            |
-| ----- | ------------------------------- |
-| Make  | Build orchestration             |
-| Nix   | Reproducible toolchain and deps |
-| cc    | C11 compiler (clang or gcc)     |
-| ar    | Static archive creation         |
+| Tool | Role                            |
+| ---- | ------------------------------- |
+| Make | Build orchestration             |
+| Nix  | Reproducible toolchain and deps |
+| cc   | C11 compiler (clang or gcc)     |
+| ar   | Static archive creation         |
 
-Nix is the canonical build method.  Make is the build driver.  No CMake, no autotools.
+Nix is the canonical build method. Make is the build driver. No CMake, no autotools.
 
 ## Quick Start
 
@@ -44,12 +44,28 @@ make CC=clang        # Or CC=gcc
 
 ## Make Targets
 
-| Target         | Effect                                    |
-| -------------- | ----------------------------------------- |
-| `make`         | Build the static library (`libmop.a`)     |
-| `make lib`     | Same as `make`                            |
-| `make clean`   | Remove `build/` directory                 |
-| `make install` | Install to `PREFIX` (default `/usr/local`)|
+| Target         | Effect                                     |
+| -------------- | ------------------------------------------ |
+| `make`         | Build the static library (`libmop.a`)      |
+| `make lib`     | Same as `make`                             |
+| `make test`    | Build and run all tests                    |
+| `make clean`   | Remove `build/` directory                  |
+| `make install` | Install to `PREFIX` (default `/usr/local`) |
+
+## Optional Features
+
+| Flag                  | Effect                                          |
+| --------------------- | ----------------------------------------------- |
+| `MOP_ENABLE_VULKAN=1` | Compile Vulkan backend (`src/backend/vulkan/`)  |
+| `MOP_ENABLE_OPENGL=1` | Compile OpenGL backend (`src/backend/opengl/`)  |
+| `MOP_ENABLE_LUA=1`    | Enable Lua configuration system (`src/config/`) |
+
+```bash
+make MOP_ENABLE_VULKAN=1              # Build with Vulkan
+make test                             # Run tests (rebuild lib without Vulkan first)
+```
+
+Note: tests link against `libmop.a` without `-lvulkan`, so build the library without `MOP_ENABLE_VULKAN=1` when running tests. The Vulkan backend is tested via the examples.
 
 ## Build Outputs
 

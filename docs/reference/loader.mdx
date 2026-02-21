@@ -1,0 +1,222 @@
+---
+title: "Mesh Loader"
+description: "Unified mesh loading with OBJ and binary format support"
+slug: "reference-loader"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "loader", "io"]
+---
+
+## Location
+
+```
+include/mop/loader.h       — Public API, struct definitions
+src/loader/obj_loader.c     — Wavefront OBJ parser
+src/loader/mop_loader.c     — .mop binary format loader
+src/loader/loader.c         — Unified factory (extension dispatch)
+```
+
+## Overview
+
+The loader module provides three levels of mesh loading: format-specific loaders (`mop_obj_load`, `mop_binary_load`) and a unified factory (`mop_load`) that dispatches by file extension. All loaders return vertex and index arrays compatible with `MopMeshDesc` for direct use with `mop_viewport_add_mesh`. The caller owns all returned memory and must free it with the matching free function.
+
+## Types
+
+### MopObjMesh
+
+```c
+typedef struct MopObjMesh {
+    MopVertex *vertices;
+    uint32_t   vertex_count;
+    uint32_t  *indices;
+    uint32_t   index_count;
+    MopVec3    bbox_min;
+    MopVec3    bbox_max;
+    MopVec3   *tangents;
+} MopObjMesh;
+```
+
+| Field          | Description                                                    |
+| -------------- | -------------------------------------------------------------- |
+| `vertices`     | Heap-allocated vertex array with position, normal, color, UVs  |
+| `vertex_count` | Number of vertices                                             |
+| `indices`      | Heap-allocated triangle index array                            |
+| `index_count`  | Number of indices (always a multiple of 3)                     |
+| `bbox_min`     | Axis-aligned bounding box minimum (post-normalization)         |
+| `bbox_max`     | Axis-aligned bounding box maximum (post-normalization)         |
+| `tangents`     | Per-vertex tangent vectors for normal mapping (parallel array) |
+
+### MopBinaryMesh
+
+```c
+typedef struct MopBinaryMesh {
+    MopVertex  *vertices;
+    uint32_t    vertex_count;
+    uint32_t   *indices;
+    uint32_t    index_count;
+    MopVec3     bbox_min, bbox_max;
+    uint32_t    submesh_count;
+    bool        is_mmapped;
+    void       *_mmap_base;
+    size_t      _mmap_size;
+} MopBinaryMesh;
+```
+
+| Field           | Description                                            |
+| --------------- | ------------------------------------------------------ |
+| `vertices`      | Vertex data (may point into mmap region)               |
+| `vertex_count`  | Number of vertices                                     |
+| `indices`       | Index data (may point into mmap region)                |
+| `index_count`   | Number of indices                                      |
+| `bbox_min`      | Axis-aligned bounding box minimum                      |
+| `bbox_max`      | Axis-aligned bounding box maximum                      |
+| `submesh_count` | Number of submeshes stored in the file                 |
+| `is_mmapped`    | `true` when loaded via mmap (POSIX), `false` otherwise |
+| `_mmap_base`    | Internal: base address of memory mapping               |
+| `_mmap_size`    | Internal: size of memory mapping in bytes              |
+
+### MopMeshFormat
+
+```c
+typedef enum MopMeshFormat {
+    MOP_FORMAT_UNKNOWN = 0,
+    MOP_FORMAT_OBJ,
+    MOP_FORMAT_MOP_BINARY,
+} MopMeshFormat;
+```
+
+Used internally by the unified loader to track which format was loaded, so `mop_load_free` can perform the correct cleanup.
+
+### MopLoadedMesh
+
+```c
+typedef struct MopLoadedMesh {
+    MopVertex     *vertices;
+    uint32_t       vertex_count;
+    uint32_t      *indices;
+    uint32_t       index_count;
+    MopVec3        bbox_min, bbox_max;
+    MopVec3       *tangents;
+    MopMeshFormat  _format;
+    bool           _mmapped;
+    void          *_mmap_base;
+    size_t         _mmap_size;
+} MopLoadedMesh;
+```
+
+| Field          | Description                                                    |
+| -------------- | -------------------------------------------------------------- |
+| `vertices`     | Vertex array (owned by loader, may be mmapped)                 |
+| `vertex_count` | Number of vertices                                             |
+| `indices`      | Index array (owned by loader, may be mmapped)                  |
+| `index_count`  | Number of indices                                              |
+| `bbox_min`     | Axis-aligned bounding box minimum                              |
+| `bbox_max`     | Axis-aligned bounding box maximum                              |
+| `tangents`     | Per-vertex tangent vectors, or `NULL` if the format lacks them |
+| `_format`      | Internal: source format for correct cleanup                    |
+| `_mmapped`     | Internal: whether vertex/index data live in an mmap region     |
+| `_mmap_base`   | Internal: mmap base pointer                                    |
+| `_mmap_size`   | Internal: mmap region size                                     |
+
+## Functions
+
+### mop_obj_load
+
+```c
+bool mop_obj_load(const char *path, MopObjMesh *out);
+```
+
+Loads a Wavefront `.obj` file. Supports `v` (positions), `vt` (texture coordinates), `vn` (normals), and `f` (faces). Quads are automatically triangulated into two triangles. Vertices without normals receive a computed face normal. All vertices are assigned a default light-gray color (`{0.7, 0.7, 0.7, 1.0}`). After parsing, the mesh is centered at the origin and scaled to fit within a 2-unit cube. Per-vertex tangent vectors are computed from UV derivatives when texture coordinates are present.
+
+Returns `true` on success. On failure, `out` is zeroed and the function returns `false`.
+
+### mop_obj_free
+
+```c
+void mop_obj_free(MopObjMesh *mesh);
+```
+
+Frees all memory allocated by `mop_obj_load` (`vertices`, `indices`, and `tangents`) and zeroes the struct. Safe to call with `NULL`.
+
+### mop_binary_load
+
+```c
+bool mop_binary_load(const char *path, MopBinaryMesh *out);
+```
+
+Loads a `.mop` binary mesh file. The file has a 128-byte header (`MopBinaryHeader`) followed by raw vertex and index data. On POSIX platforms (macOS, Linux), the file is memory-mapped with `MAP_PRIVATE` for zero-copy loading. On other platforms, the data is loaded via `malloc` + `fread`. The header is validated for correct magic (`0x4D4F5001`) and version (`1`).
+
+Returns `true` on success. On failure, `out` is zeroed.
+
+### mop_binary_free
+
+```c
+void mop_binary_free(MopBinaryMesh *mesh);
+```
+
+Frees resources allocated by `mop_binary_load`. If the mesh was memory-mapped, the mapping is released via `munmap`. Otherwise, the `vertices` and `indices` arrays are freed with `free`. The struct is zeroed after cleanup.
+
+### mop_load
+
+```c
+bool mop_load(const char *path, MopLoadedMesh *out);
+```
+
+Unified loader factory. Dispatches to the appropriate format-specific loader based on the file extension. Returns a `MopLoadedMesh` that can be freed with `mop_load_free` regardless of the source format.
+
+Returns `true` on success. On failure, `out` is zeroed.
+
+### mop_load_free
+
+```c
+void mop_load_free(MopLoadedMesh *mesh);
+```
+
+Frees resources allocated by `mop_load`. Handles both mmapped (binary) and heap-allocated (OBJ) data transparently based on the internal `_format` and `_mmapped` fields. Zeroes the struct after cleanup.
+
+## Format Dispatch
+
+The unified loader inspects the file extension to select a format:
+
+| Extension | Format                  | Loader                  |
+| --------- | ----------------------- | ----------------------- |
+| `.obj`    | `MOP_FORMAT_OBJ`        | `mop_obj_load`          |
+| `.mop`    | `MOP_FORMAT_MOP_BINARY` | `mop_binary_load`       |
+| Other     | `MOP_FORMAT_UNKNOWN`    | Error (returns `false`) |
+
+Extension matching is case-sensitive and performed by `strrchr(path, '.')`.
+
+## Memory Ownership
+
+The loader module follows strict ownership semantics:
+
+- **Format-specific loaders** (`mop_obj_load`, `mop_binary_load`) return data that the caller owns. The caller must call the matching free function (`mop_obj_free`, `mop_binary_free`).
+- **Unified loader** (`mop_load`) transfers ownership to `MopLoadedMesh`. Always free with `mop_load_free`, never with the format-specific free functions.
+- Vertex and index arrays from any loader can be passed directly to `MopMeshDesc` for `mop_viewport_add_mesh`. The viewport copies mesh data into RHI buffers, so the loaded mesh can be freed after the mesh is added.
+- The `tangents` array is only populated by the OBJ loader. Binary-loaded meshes set `tangents` to `NULL`.
+- Memory-mapped binary meshes point directly into the mapped file region. Do not modify vertex or index data in-place on a binary-loaded mesh.
+
+## Usage
+
+```c
+/* Unified loader — recommended approach */
+MopLoadedMesh mesh;
+if (mop_load("model.obj", &mesh)) {
+    MopMeshDesc desc = {
+        .vertices     = mesh.vertices,
+        .vertex_count = mesh.vertex_count,
+        .indices      = mesh.indices,
+        .index_count  = mesh.index_count,
+        .object_id    = 1
+    };
+    mop_viewport_add_mesh(viewport, &desc);
+    mop_load_free(&mesh);
+}
+
+/* Format-specific loader */
+MopObjMesh obj;
+if (mop_obj_load("model.obj", &obj)) {
+    /* use obj.vertices, obj.indices ... */
+    mop_obj_free(&obj);
+}
+```

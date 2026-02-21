@@ -1,0 +1,236 @@
+---
+title: "Scene Snapshot API"
+description: "Zero-copy scene iterator for raytracers, exporters, and external consumers"
+slug: "reference-snapshot"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "snapshot", "query"]
+---
+
+## Location
+
+```
+include/mop/snapshot.h   — Public API
+src/query/snapshot.c     — Implementation
+```
+
+## Overview
+
+The snapshot API provides a zero-copy, allocation-free iterator over the viewport's scene data. It bundles camera state, lights, and framebuffer dimensions into a single `MopSceneSnapshot` struct, then lets consumers walk meshes and triangles without touching the query API directly. All pointers reference MOP-owned memory and are valid until the next `mop_viewport_render` call.
+
+## Types
+
+### MopMeshView
+
+```c
+typedef struct MopMeshView {
+    uint32_t         object_id;
+    uint32_t         vertex_count;
+    uint32_t         index_count;
+    const MopVertex *vertices;
+    const uint32_t  *indices;
+    MopMat4          world_transform;
+    MopMaterial      material;
+    float            opacity;
+    MopBlendMode     blend_mode;
+} MopMeshView;
+```
+
+A read-only view into one mesh's data, populated by `mop_snapshot_next_mesh`. The `vertices` and `indices` pointers are zero-copy references into RHI buffer memory.
+
+| Field             | Type               | Description                                                   |
+| ----------------- | ------------------ | ------------------------------------------------------------- |
+| `object_id`       | `uint32_t`         | Application-assigned object ID                                |
+| `vertex_count`    | `uint32_t`         | Number of vertices                                            |
+| `index_count`     | `uint32_t`         | Number of indices                                             |
+| `vertices`        | `const MopVertex*` | Zero-copy pointer into vertex buffer (`NULL` for flex-format) |
+| `indices`         | `const uint32_t*`  | Zero-copy pointer into index buffer                           |
+| `world_transform` | `MopMat4`          | Fully resolved hierarchical world transform                   |
+| `material`        | `MopMaterial`      | Mesh material (default material if none explicitly assigned)  |
+| `opacity`         | `float`            | Opacity in `[0, 1]`                                           |
+| `blend_mode`      | `MopBlendMode`     | Blend mode (`MOP_BLEND_OPAQUE`, etc.)                         |
+
+### MopSceneSnapshot
+
+```c
+typedef struct MopSceneSnapshot {
+    MopCameraState   camera;
+    int              width;
+    int              height;
+    const MopLight  *lights;
+    uint32_t         light_count;
+
+    /* Iteration state (opaque -- do not access directly) */
+    const MopViewport *_vp;
+    uint32_t           _mesh_idx;
+} MopSceneSnapshot;
+```
+
+A complete read-only view of the scene at the time `mop_viewport_snapshot` was called.
+
+| Field         | Type              | Description                                     |
+| ------------- | ----------------- | ----------------------------------------------- |
+| `camera`      | `MopCameraState`  | Full camera state (eye, target, matrices, etc.) |
+| `width`       | `int`             | Framebuffer width in pixels                     |
+| `height`      | `int`             | Framebuffer height in pixels                    |
+| `lights`      | `const MopLight*` | Pointer to the viewport's light array           |
+| `light_count` | `uint32_t`        | Number of lights                                |
+| `_vp`         | (opaque)          | Internal pointer to viewport -- do not access   |
+| `_mesh_idx`   | (opaque)          | Internal iteration cursor -- do not access      |
+
+### MopTriangle
+
+```c
+typedef struct MopTriangle {
+    MopVec3     p[3];          /* world-space positions */
+    MopVec3     n[3];          /* world-space normals */
+    MopColor    c[3];          /* vertex colors */
+    float       uv[3][2];     /* texture coordinates */
+    MopMaterial material;
+    uint32_t    object_id;
+} MopTriangle;
+```
+
+A single triangle with all vertex attributes already transformed into world space. Produced by the triangle iterator.
+
+| Field       | Type          | Description                                |
+| ----------- | ------------- | ------------------------------------------ |
+| `p[3]`      | `MopVec3[3]`  | World-space vertex positions               |
+| `n[3]`      | `MopVec3[3]`  | World-space vertex normals (re-normalized) |
+| `c[3]`      | `MopColor[3]` | Per-vertex colors (linear RGBA)            |
+| `uv[3][2]`  | `float[3][2]` | Per-vertex texture coordinates (u, v)      |
+| `material`  | `MopMaterial` | Material of the owning mesh                |
+| `object_id` | `uint32_t`    | Object ID of the owning mesh               |
+
+### MopTriangleIter
+
+```c
+typedef struct MopTriangleIter {
+    MopSceneSnapshot _snap;
+    MopMeshView      _current_mesh;
+    uint32_t         _tri_idx;
+    bool             _has_mesh;
+    MopMat4          _normal_matrix;
+} MopTriangleIter;
+```
+
+Opaque iterator state for the triangle iterator. All fields are internal. The `_normal_matrix` is the transpose of the inverse of the upper-left 3x3 of the current mesh's world transform, used to correctly transform normals under non-uniform scaling.
+
+## Functions
+
+### mop_viewport_snapshot
+
+```c
+MopSceneSnapshot mop_viewport_snapshot(const MopViewport *vp);
+```
+
+Takes a snapshot of the current scene state. The snapshot captures the camera state (via `mop_viewport_get_camera_state`), framebuffer dimensions, and light array. The internal iteration cursor is initialized to the first mesh. Call this after `mop_viewport_render` to get consistent transforms. Returns a zero-initialized snapshot if `vp` is `NULL`.
+
+### mop_snapshot_next_mesh
+
+```c
+bool mop_snapshot_next_mesh(MopSceneSnapshot *snap, MopMeshView *out);
+```
+
+Advances the iterator to the next scene mesh and populates `out` with its data. Scene meshes are filtered identically to the query API: active, non-zero `object_id`, and `object_id < 0xFFFF0000` (excludes gizmos). Returns `true` if a mesh was written to `out`, `false` when iteration is exhausted. Returns `false` if either argument is `NULL`.
+
+The `vertices` field in the output is `NULL` for meshes using a flexible vertex format (they have a non-`NULL` `vertex_format`). Only standard-layout meshes expose vertex data through this view.
+
+### mop_snapshot_reset
+
+```c
+void mop_snapshot_reset(MopSceneSnapshot *snap);
+```
+
+Resets the iteration cursor to the beginning, allowing a second pass over all meshes without creating a new snapshot. Safe to call at any point during iteration.
+
+### mop_snapshot_mesh_count
+
+```c
+uint32_t mop_snapshot_mesh_count(const MopSceneSnapshot *snap);
+```
+
+Returns the total number of scene meshes (identical to `mop_viewport_mesh_count`). Useful for pre-allocating arrays for acceleration structures before iterating. Returns `0` if `snap` is `NULL` or the viewport pointer is invalid.
+
+### mop_triangle_iter_begin
+
+```c
+MopTriangleIter mop_triangle_iter_begin(const MopViewport *vp);
+```
+
+Creates a triangle iterator that walks every triangle in the scene with all attributes transformed into world space. Internally creates a snapshot and advances to the first mesh. The normal matrix (transpose of the inverse of the world transform's upper-left 3x3) is computed per mesh for correct normal transformation under non-uniform scaling.
+
+### mop_triangle_iter_next
+
+```c
+bool mop_triangle_iter_next(MopTriangleIter *iter, MopTriangle *out);
+```
+
+Advances to the next triangle and populates `out` with world-space positions, normals, vertex colors, texture coordinates, the mesh material, and the owning mesh's object ID. Automatically crosses mesh boundaries -- when one mesh's triangles are exhausted, the iterator advances to the next scene mesh and recomputes the normal matrix. Performs bounds checking on indices and skips degenerate references. Returns `false` when all triangles have been consumed.
+
+### mop_snapshot_triangle_count
+
+```c
+uint32_t mop_snapshot_triangle_count(const MopSceneSnapshot *snap);
+```
+
+Returns the total triangle count across all scene meshes, computed as the sum of `index_count / 3` for each scene mesh. Useful for pre-allocating BVH nodes or triangle arrays before iterating. Returns `0` if `snap` is `NULL`.
+
+## Zero-Copy Design
+
+The snapshot and mesh view never allocate memory or copy geometry data. The `MopMeshView.vertices` and `MopMeshView.indices` pointers reference the RHI buffer memory directly via `buffer_read`. This means:
+
+- **No allocation overhead.** Creating a snapshot and iterating all meshes is O(n) in mesh count with zero heap allocations.
+- **Pointer lifetime.** All pointers become invalid after `mop_viewport_render`, `mop_viewport_resize`, or `mop_viewport_destroy`. Complete your read pass between two render calls.
+- **Triangle iteration does transform.** Unlike the mesh iterator, `mop_triangle_iter_next` does per-vertex work: it multiplies positions by the world matrix and normals by the normal matrix, then normalizes. This is computed on the fly, not cached.
+
+## Usage
+
+### Custom raytracer
+
+```c
+MopSceneSnapshot snap = mop_viewport_snapshot(vp);
+
+/* Pre-allocate BVH */
+uint32_t tri_total = mop_snapshot_triangle_count(&snap);
+MyBVHNode *nodes = malloc(sizeof(MyBVHNode) * tri_total * 2);
+
+/* Build triangle soup */
+MopTriangleIter iter = mop_triangle_iter_begin(vp);
+MopTriangle tri;
+uint32_t idx = 0;
+while (mop_triangle_iter_next(&iter, &tri)) {
+    my_bvh_insert(nodes, idx++, tri.p[0], tri.p[1], tri.p[2]);
+}
+
+/* Trace rays using snap.camera */
+for (int y = 0; y < snap.height; y++) {
+    for (int x = 0; x < snap.width; x++) {
+        MopRay ray = mop_viewport_pixel_to_ray(vp, x + 0.5f, y + 0.5f);
+        output[y * snap.width + x] = my_bvh_trace(nodes, ray);
+    }
+}
+```
+
+### Scene exporter
+
+```c
+MopSceneSnapshot snap = mop_viewport_snapshot(vp);
+MopMeshView mesh;
+
+export_begin(snap.width, snap.height);
+export_camera(snap.camera.eye, snap.camera.target, snap.camera.fov_radians);
+
+while (mop_snapshot_next_mesh(&snap, &mesh)) {
+    export_mesh(mesh.object_id, mesh.vertices, mesh.vertex_count,
+                mesh.indices, mesh.index_count, mesh.world_transform);
+}
+
+/* Re-iterate for a second pass if needed */
+mop_snapshot_reset(&snap);
+while (mop_snapshot_next_mesh(&snap, &mesh)) {
+    export_materials(mesh.object_id, mesh.material);
+}
+
+export_end();
+```

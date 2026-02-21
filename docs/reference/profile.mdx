@@ -1,0 +1,97 @@
+---
+title: "Frame Profiling"
+description: "Per-frame timing statistics and performance counters"
+slug: "reference-profile"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "profile", "utility"]
+---
+
+## Location
+
+```
+include/mop/profile.h   — Public API, MopFrameStats struct
+src/util/profile.c       — High-resolution timer, stats retrieval
+```
+
+## Overview
+
+The profile module exposes per-frame timing data and counters collected during `mop_viewport_render`. After each render call, the viewport stores a `MopFrameStats` struct that can be retrieved to display or log performance information. Timing uses platform-native high-resolution clocks: `mach_absolute_time` on macOS and `clock_gettime(CLOCK_MONOTONIC)` on Linux.
+
+## Types
+
+### MopFrameStats
+
+```c
+typedef struct MopFrameStats {
+    double   frame_time_ms;
+    double   clear_ms;
+    double   transform_ms;
+    double   rasterize_ms;
+    uint32_t triangle_count;
+    uint32_t pixel_count;
+} MopFrameStats;
+```
+
+| Field            | Type       | Description                                                                                             |
+| ---------------- | ---------- | ------------------------------------------------------------------------------------------------------- |
+| `frame_time_ms`  | `double`   | Total wall-clock time for the entire render call, in milliseconds                                       |
+| `clear_ms`       | `double`   | Time spent clearing the framebuffer (color, depth, object-ID), in milliseconds                          |
+| `transform_ms`   | `double`   | Time spent on vertex transformation (model-view-projection matrix multiply, clipping), in milliseconds  |
+| `rasterize_ms`   | `double`   | Time spent on triangle rasterization (edge functions, fragment shading, depth testing), in milliseconds |
+| `triangle_count` | `uint32_t` | Total number of triangles submitted across all meshes (`index_count / 3` per mesh)                      |
+| `pixel_count`    | `uint32_t` | Total framebuffer pixels (`width * height`)                                                             |
+
+All time values are in milliseconds as `double` for sub-millisecond precision.
+
+## Functions
+
+### mop_viewport_get_stats
+
+```c
+MopFrameStats mop_viewport_get_stats(const MopViewport *viewport);
+```
+
+Retrieves the statistics from the most recent `mop_viewport_render` call. The struct is returned by value. If `viewport` is `NULL`, a zeroed `MopFrameStats` is returned.
+
+This function reads the stats stored during the last render pass. It does not trigger a new render. Call it after `mop_viewport_render` to get meaningful data.
+
+## Timing Fields
+
+The three timing fields partition the render pipeline into distinct phases:
+
+```
+frame_time_ms
+|-- clear_ms        Framebuffer clear (color, depth, object-ID)
+|-- transform_ms    Vertex shader: MVP multiply, viewport transform, clipping
+|-- rasterize_ms    Fragment processing: edge function, shading, depth test, blending
+```
+
+Note that `clear_ms + transform_ms + rasterize_ms` may not exactly equal `frame_time_ms` due to overhead from setup, subsystem updates, and profiling instrumentation itself.
+
+### What Each Field Measures
+
+- **`frame_time_ms`** -- End-to-end time from the start of `mop_viewport_render` to its return. This is the primary metric for overall frame budget. At 60 FPS the budget is approximately 16.7 ms.
+
+- **`clear_ms`** -- Time to zero out the color buffer, reset the depth buffer to maximum depth, and clear the object-ID buffer. On the CPU backend this is proportional to `pixel_count`.
+
+- **`transform_ms`** -- Time to multiply each vertex by the model-view-projection matrix, perform perspective division, and apply the viewport transform. Scales with total vertex count across all visible meshes.
+
+- **`rasterize_ms`** -- Time to iterate over triangles, evaluate edge functions, interpolate vertex attributes, perform depth testing, and write fragments to the framebuffer. This is typically the dominant cost on the CPU backend and scales with both triangle count and covered pixel area.
+
+- **`triangle_count`** -- The sum of `index_count / 3` for every active mesh. Useful for correlating render time with scene complexity.
+
+- **`pixel_count`** -- Total framebuffer resolution (`width * height`). Useful for computing per-pixel costs (e.g. `clear_ms / pixel_count` gives the cost per pixel of the clear pass).
+
+## Usage
+
+```c
+mop_viewport_render(viewport);
+
+MopFrameStats stats = mop_viewport_get_stats(viewport);
+printf("Frame: %.2f ms (clear=%.2f, xform=%.2f, raster=%.2f)\n",
+       stats.frame_time_ms, stats.clear_ms,
+       stats.transform_ms, stats.rasterize_ms);
+printf("Triangles: %u, Pixels: %u\n",
+       stats.triangle_count, stats.pixel_count);
+```

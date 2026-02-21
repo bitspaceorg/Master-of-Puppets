@@ -31,14 +31,14 @@ typedef struct MopMaterial {
 
 Default values (from `mop_material_default()`):
 
-| Field        | Default                    |
-|-------------|----------------------------|
-| `base_color` | `{1, 1, 1, 1}` (white)    |
-| `metallic`   | `0.0`                      |
-| `roughness`  | `0.5`                      |
-| `emissive`   | `{0, 0, 0}`               |
-| `albedo_map` | `NULL`                     |
-| `normal_map` | `NULL`                     |
+| Field        | Default                |
+| ------------ | ---------------------- |
+| `base_color` | `{1, 1, 1, 1}` (white) |
+| `metallic`   | `0.0`                  |
+| `roughness`  | `0.5`                  |
+| `emissive`   | `{0, 0, 0}`            |
+| `albedo_map` | `NULL`                 |
+| `normal_map` | `NULL`                 |
 
 ## Functions
 
@@ -48,7 +48,7 @@ Default values (from `mop_material_default()`):
 MopMaterial mop_material_default(void);
 ```
 
-Returns a material with sensible defaults.  Use this as a starting point and override individual fields.
+Returns a material with sensible defaults. Use this as a starting point and override individual fields.
 
 ### mop_mesh_set_material
 
@@ -56,13 +56,13 @@ Returns a material with sensible defaults.  Use this as a starting point and ove
 void mop_mesh_set_material(MopMesh *mesh, const MopMaterial *material);
 ```
 
-Assigns a material to a mesh.  The material struct is copied — the application may free or modify its copy after the call.
+Assigns a material to a mesh. The material struct is copied — the application may free or modify its copy after the call.
 
-Texture pointers (`albedo_map`, `normal_map`) are retained by reference.  The textures must remain alive as long as the mesh uses them.
+Texture pointers (`albedo_map`, `normal_map`) are retained by reference. The textures must remain alive as long as the mesh uses them.
 
 ## Interaction with Other Systems
 
 - **Textures:** Create with `mop_viewport_create_texture()`, assign via `material.albedo_map` or `material.normal_map`.
 - **Normal mapping:** Requires tangent data in the mesh (computed automatically by `mop_obj_load` when UVs are present).
-- **Blend modes:** Materials do not control blending.  Use `mop_mesh_set_blend_mode()` and `mop_mesh_set_opacity()` separately.
+- **Blend modes:** Materials do not control blending. Use `mop_mesh_set_blend_mode()` and `mop_mesh_set_opacity()` separately.
 - **Shading mode:** `base_color` is multiplied with vertex color and modulated by lighting in both flat and smooth shading modes.

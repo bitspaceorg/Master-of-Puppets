@@ -11,27 +11,27 @@
 #ifndef MOP_RHI_H
 #define MOP_RHI_H
 
-#include <mop/types.h>
 #include <mop/backend.h>
 #include <mop/light.h>
+#include <mop/types.h>
 #include <mop/vertex_format.h>
 
 /* -------------------------------------------------------------------------
  * Opaque RHI handles — each backend defines the concrete structs
  * ------------------------------------------------------------------------- */
 
-typedef struct MopRhiDevice      MopRhiDevice;
-typedef struct MopRhiBuffer      MopRhiBuffer;
+typedef struct MopRhiDevice MopRhiDevice;
+typedef struct MopRhiBuffer MopRhiBuffer;
 typedef struct MopRhiFramebuffer MopRhiFramebuffer;
-typedef struct MopRhiTexture     MopRhiTexture;
+typedef struct MopRhiTexture MopRhiTexture;
 
 /* -------------------------------------------------------------------------
  * Buffer descriptor
  * ------------------------------------------------------------------------- */
 
 typedef struct MopRhiBufferDesc {
-    const void *data;
-    size_t      size;
+  const void *data;
+  size_t size;
 } MopRhiBufferDesc;
 
 /* -------------------------------------------------------------------------
@@ -39,8 +39,8 @@ typedef struct MopRhiBufferDesc {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopRhiFramebufferDesc {
-    int width;
-    int height;
+  int width;
+  int height;
 } MopRhiFramebufferDesc;
 
 /* -------------------------------------------------------------------------
@@ -48,44 +48,44 @@ typedef struct MopRhiFramebufferDesc {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopRhiDrawCall {
-    MopRhiBuffer *vertex_buffer;
-    MopRhiBuffer *index_buffer;
-    uint32_t      vertex_count;
-    uint32_t      index_count;
-    uint32_t      object_id;
-    MopMat4       model;
-    MopMat4       view;
-    MopMat4       projection;
-    MopMat4       mvp;
-    MopColor      base_color;
-    float         opacity;
-    MopVec3       light_dir;
-    float         ambient;
-    MopShadingMode shading_mode;
-    bool          wireframe;
-    bool          depth_test;
-    bool          backface_cull;
+  MopRhiBuffer *vertex_buffer;
+  MopRhiBuffer *index_buffer;
+  uint32_t vertex_count;
+  uint32_t index_count;
+  uint32_t object_id;
+  MopMat4 model;
+  MopMat4 view;
+  MopMat4 projection;
+  MopMat4 mvp;
+  MopColor base_color;
+  float opacity;
+  MopVec3 light_dir;
+  float ambient;
+  MopShadingMode shading_mode;
+  bool wireframe;
+  bool depth_test;
+  bool backface_cull;
 
-    /* Texture (Phase 2C) — NULL = no texture */
-    MopRhiTexture *texture;
+  /* Texture (Phase 2C) — NULL = no texture */
+  MopRhiTexture *texture;
 
-    /* Blend mode (Phase 6A) */
-    MopBlendMode   blend_mode;
+  /* Blend mode (Phase 6A) */
+  MopBlendMode blend_mode;
 
-    /* Material properties (Phase 2D) */
-    float          metallic;
-    float          roughness;
-    MopVec3        emissive;
+  /* Material properties (Phase 2D) */
+  float metallic;
+  float roughness;
+  MopVec3 emissive;
 
-    /* Multi-light system — NULL = single legacy light (light_dir + ambient) */
-    const MopLight *lights;
-    uint32_t        light_count;
+  /* Multi-light system — NULL = single legacy light (light_dir + ambient) */
+  const MopLight *lights;
+  uint32_t light_count;
 
-    /* Camera eye position (for specular / multi-light world-space calcs) */
-    MopVec3         cam_eye;
+  /* Camera eye position (for specular / multi-light world-space calcs) */
+  MopVec3 cam_eye;
 
-    /* Flexible vertex format — NULL = standard MopVertex layout */
-    const MopVertexFormat *vertex_format;
+  /* Flexible vertex format — NULL = standard MopVertex layout */
+  const MopVertexFormat *vertex_format;
 } MopRhiDrawCall;
 
 /* -------------------------------------------------------------------------
@@ -99,64 +99,60 @@ typedef struct MopRhiDrawCall {
  * core calls them unconditionally.  Backends must provide complete
  * implementations for all functions. */
 typedef struct MopRhiBackend {
-    const char *name;
+  const char *name;
 
-    /* Device lifecycle */
-    MopRhiDevice *(*device_create)(void);
-    void          (*device_destroy)(MopRhiDevice *device);
+  /* Device lifecycle */
+  MopRhiDevice *(*device_create)(void);
+  void (*device_destroy)(MopRhiDevice *device);
 
-    /* Buffer management */
-    MopRhiBuffer *(*buffer_create)(MopRhiDevice *device,
-                                   const MopRhiBufferDesc *desc);
-    void          (*buffer_destroy)(MopRhiDevice *device,
-                                    MopRhiBuffer *buffer);
+  /* Buffer management */
+  MopRhiBuffer *(*buffer_create)(MopRhiDevice *device,
+                                 const MopRhiBufferDesc *desc);
+  void (*buffer_destroy)(MopRhiDevice *device, MopRhiBuffer *buffer);
 
-    /* Framebuffer management */
-    MopRhiFramebuffer *(*framebuffer_create)(MopRhiDevice *device,
-                                             const MopRhiFramebufferDesc *desc);
-    void               (*framebuffer_destroy)(MopRhiDevice *device,
-                                              MopRhiFramebuffer *fb);
-    void               (*framebuffer_resize)(MopRhiDevice *device,
-                                             MopRhiFramebuffer *fb,
-                                             int width, int height);
+  /* Framebuffer management */
+  MopRhiFramebuffer *(*framebuffer_create)(MopRhiDevice *device,
+                                           const MopRhiFramebufferDesc *desc);
+  void (*framebuffer_destroy)(MopRhiDevice *device, MopRhiFramebuffer *fb);
+  void (*framebuffer_resize)(MopRhiDevice *device, MopRhiFramebuffer *fb,
+                             int width, int height);
 
-    /* Frame commands */
-    void (*frame_begin)(MopRhiDevice *device, MopRhiFramebuffer *fb,
-                        MopColor clear_color);
-    void (*frame_end)(MopRhiDevice *device, MopRhiFramebuffer *fb);
-    void (*draw)(MopRhiDevice *device, MopRhiFramebuffer *fb,
-                 const MopRhiDrawCall *call);
+  /* Frame commands */
+  void (*frame_begin)(MopRhiDevice *device, MopRhiFramebuffer *fb,
+                      MopColor clear_color);
+  void (*frame_end)(MopRhiDevice *device, MopRhiFramebuffer *fb);
+  void (*draw)(MopRhiDevice *device, MopRhiFramebuffer *fb,
+               const MopRhiDrawCall *call);
 
-    /* Picking readback */
-    uint32_t (*pick_read_id)(MopRhiDevice *device, MopRhiFramebuffer *fb,
-                             int x, int y);
-    float    (*pick_read_depth)(MopRhiDevice *device, MopRhiFramebuffer *fb,
-                                int x, int y);
+  /* Picking readback */
+  uint32_t (*pick_read_id)(MopRhiDevice *device, MopRhiFramebuffer *fb, int x,
+                           int y);
+  float (*pick_read_depth)(MopRhiDevice *device, MopRhiFramebuffer *fb, int x,
+                           int y);
 
-    /* Color buffer readback — returns RGBA8, row-major, top-left origin */
-    const uint8_t *(*framebuffer_read_color)(MopRhiDevice *device,
-                                             MopRhiFramebuffer *fb,
-                                             int *out_width, int *out_height);
+  /* Color buffer readback — returns RGBA8, row-major, top-left origin */
+  const uint8_t *(*framebuffer_read_color)(MopRhiDevice *device,
+                                           MopRhiFramebuffer *fb,
+                                           int *out_width, int *out_height);
 
-    /* Texture management */
-    MopRhiTexture *(*texture_create)(MopRhiDevice *device, int width,
-                                     int height, const uint8_t *rgba_data);
-    void           (*texture_destroy)(MopRhiDevice *device,
-                                      MopRhiTexture *texture);
+  /* Texture management */
+  MopRhiTexture *(*texture_create)(MopRhiDevice *device, int width, int height,
+                                   const uint8_t *rgba_data);
+  void (*texture_destroy)(MopRhiDevice *device, MopRhiTexture *texture);
 
-    /* Instanced drawing (Phase 6B) */
-    void (*draw_instanced)(MopRhiDevice *device, MopRhiFramebuffer *fb,
-                           const MopRhiDrawCall *call,
-                           const MopMat4 *instance_transforms,
-                           uint32_t instance_count);
+  /* Instanced drawing (Phase 6B) */
+  void (*draw_instanced)(MopRhiDevice *device, MopRhiFramebuffer *fb,
+                         const MopRhiDrawCall *call,
+                         const MopMat4 *instance_transforms,
+                         uint32_t instance_count);
 
-    /* Dynamic buffer update (Phase 8A) */
-    void (*buffer_update)(MopRhiDevice *device, MopRhiBuffer *buffer,
-                          const void *data, size_t offset, size_t size);
+  /* Dynamic buffer update (Phase 8A) */
+  void (*buffer_update)(MopRhiDevice *device, MopRhiBuffer *buffer,
+                        const void *data, size_t offset, size_t size);
 
-    /* Read raw vertex data from a buffer (overlay safety).
-     * CPU returns buf->data, Vulkan returns buf->shadow. */
-    const void *(*buffer_read)(MopRhiBuffer *buffer);
+  /* Read raw vertex data from a buffer (overlay safety).
+   * CPU returns buf->data, Vulkan returns buf->shadow. */
+  const void *(*buffer_read)(MopRhiBuffer *buffer);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------

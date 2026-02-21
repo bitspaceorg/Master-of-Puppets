@@ -16,19 +16,19 @@ tags: ["architecture", "memory"]
 
 ## Ownership Table
 
-| Resource               | Owner            | Created by                  | Freed by                     |
-| ---------------------- | ---------------- | --------------------------- | ---------------------------- |
-| `MopViewport`          | Application      | `mop_viewport_create`       | `mop_viewport_destroy`       |
-| `MopMesh` (handle)     | Viewport         | `mop_viewport_add_mesh`     | `mop_viewport_remove_mesh` or viewport destroy |
-| RHI Device             | Viewport         | `rhi->device_create`        | `rhi->device_destroy`        |
-| RHI Framebuffer        | Viewport         | `rhi->framebuffer_create`   | `rhi->framebuffer_destroy`   |
-| RHI Buffer             | Viewport         | `rhi->buffer_create`        | `rhi->buffer_destroy`        |
-| Vertex/index arrays    | Application      | Application code            | Application code             |
-| Color buffer pointer   | Backend          | Backend internal             | Backend internal              |
+| Resource             | Owner       | Created by                | Freed by                                       |
+| -------------------- | ----------- | ------------------------- | ---------------------------------------------- |
+| `MopViewport`        | Application | `mop_viewport_create`     | `mop_viewport_destroy`                         |
+| `MopMesh` (handle)   | Viewport    | `mop_viewport_add_mesh`   | `mop_viewport_remove_mesh` or viewport destroy |
+| RHI Device           | Viewport    | `rhi->device_create`      | `rhi->device_destroy`                          |
+| RHI Framebuffer      | Viewport    | `rhi->framebuffer_create` | `rhi->framebuffer_destroy`                     |
+| RHI Buffer           | Viewport    | `rhi->buffer_create`      | `rhi->buffer_destroy`                          |
+| Vertex/index arrays  | Application | Application code          | Application code                               |
+| Color buffer pointer | Backend     | Backend internal          | Backend internal                               |
 
 ## Copy Semantics
 
-When the application calls `mop_viewport_add_mesh`, the engine **copies** vertex and index data into RHI buffers.  The application may free its arrays immediately.
+When the application calls `mop_viewport_add_mesh`, the engine **copies** vertex and index data into RHI buffers. The application may free its arrays immediately.
 
 ```
 Application                    Engine
@@ -45,7 +45,7 @@ Application                    Engine
 
 ## Readback Pointers
 
-`mop_viewport_read_color` returns a **borrowed** pointer.  The application must not free it.  Invalidated by:
+`mop_viewport_read_color` returns a **borrowed** pointer. The application must not free it. Invalidated by:
 
 - `mop_viewport_render` (next frame overwrites)
 - `mop_viewport_resize` (framebuffer reallocated)
@@ -53,4 +53,4 @@ Application                    Engine
 
 ## Leak Prevention
 
-`mop_viewport_destroy` walks the mesh array and destroys every active mesh's buffers before destroying the framebuffer and device.  No leaks even if the application skips `mop_viewport_remove_mesh`.
+`mop_viewport_destroy` walks the mesh array and destroys every active mesh's buffers before destroying the framebuffer and device. No leaks even if the application skips `mop_viewport_remove_mesh`.

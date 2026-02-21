@@ -33,7 +33,7 @@ The CPU backend is a thin RHI adapter that delegates all rasterization to the sh
 | Framebuffer readback | Yes       |
 | Platform dependency  | None      |
 
-The CPU backend is always available.  It requires no GPU, no drivers, and no platform-specific code.
+The CPU backend is always available. It requires no GPU, no drivers, and no platform-specific code.
 
 ## Internal Types
 
@@ -50,11 +50,11 @@ typedef struct MopSwFramebuffer {
 
 ### RHI Handle Mapping
 
-| RHI Handle           | CPU Concrete Type         | Contents                  |
-| -------------------- | ------------------------- | ------------------------- |
-| `MopRhiDevice`       | `struct { int; }`         | Placeholder (no state)    |
-| `MopRhiBuffer`       | `struct { void*, size }`  | `memcpy` of vertex/index data |
-| `MopRhiFramebuffer`  | `struct { MopSwFramebuffer, readback* }` | Color+depth+ID arrays |
+| RHI Handle          | CPU Concrete Type                        | Contents                      |
+| ------------------- | ---------------------------------------- | ----------------------------- |
+| `MopRhiDevice`      | `struct { int; }`                        | Placeholder (no state)        |
+| `MopRhiBuffer`      | `struct { void*, size }`                 | `memcpy` of vertex/index data |
+| `MopRhiFramebuffer` | `struct { MopSwFramebuffer, readback* }` | Color+depth+ID arrays         |
 
 ## Rasterization Pipeline
 
@@ -67,16 +67,16 @@ For each `draw` call:
    c. **Frustum clipping:** Sutherland-Hodgman against 6 planes
    d. **Triangle fan:** Clipped polygon → fan of sub-triangles
    e. For each sub-triangle:
-      - **Perspective divide:** `xyz / w` → NDC `[-1, 1]`
-      - **Viewport transform:** NDC → screen pixels (Y flipped for top-left origin)
-      - **Backface cull:** Screen-space signed area test
-      - **Flat shading:** Average face normal · directional light
-      - **Rasterize:** Half-space edge functions (solid) or Bresenham (wireframe)
-      - **Per-pixel:** Depth test → write color, depth, object_id
+    - **Perspective divide:** `xyz / w` → NDC `[-1, 1]`
+    - **Viewport transform:** NDC → screen pixels (Y flipped for top-left origin)
+    - **Backface cull:** Screen-space signed area test
+    - **Flat shading:** Average face normal · directional light
+    - **Rasterize:** Half-space edge functions (solid) or Bresenham (wireframe)
+    - **Per-pixel:** Depth test → write color, depth, object_id
 
 ## Clipping
 
-Uses Sutherland-Hodgman algorithm.  The triangle is clipped sequentially against 6 frustum planes in clip space:
+Uses Sutherland-Hodgman algorithm. The triangle is clipped sequentially against 6 frustum planes in clip space:
 
 ```
 +X: w + x ≥ 0
@@ -91,7 +91,7 @@ Maximum output vertices after clipping a single triangle: 24 (each plane can add
 
 ## Lighting
 
-Fixed directional light at `(0.3, 1.0, 0.5)` (world space).  Ambient factor: `0.2`.  Diffuse factor: `0.8 * max(N·L, 0)`.  Total: `clamp(ambient + diffuse)`.
+Fixed directional light at `(0.3, 1.0, 0.5)` (world space). Ambient factor: `0.2`. Diffuse factor: `0.8 * max(N·L, 0)`. Total: `clamp(ambient + diffuse)`.
 
 ## Edge Function Rasterization
 
@@ -103,4 +103,4 @@ w1 = edge(v2, v0, pixel)
 w2 = edge(v0, v1, pixel)
 ```
 
-CW and CCW triangles are both handled: if the triangle's signed area is negative (CW after Y-flip), all edge values are negated before the `≥ 0` test.  Barycentric weights are normalized by absolute area.
+CW and CCW triangles are both handled: if the triangle's signed area is negative (CW after Y-flip), all edge values are negated before the `≥ 0` test. Barycentric weights are normalized by absolute area.

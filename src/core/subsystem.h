@@ -23,8 +23,8 @@ typedef struct MopSubsystem MopSubsystem;
  * ------------------------------------------------------------------------- */
 
 typedef enum MopSubsystemPhase {
-    MOP_SUBSYS_PHASE_SIMULATE,     /* before rendering (water waves, particles) */
-    MOP_SUBSYS_PHASE_POST_RENDER,  /* after rasterization (postprocess effects) */
+  MOP_SUBSYS_PHASE_SIMULATE,    /* before rendering (water waves, particles) */
+  MOP_SUBSYS_PHASE_POST_RENDER, /* after rasterization (postprocess effects) */
 } MopSubsystemPhase;
 
 /* -------------------------------------------------------------------------
@@ -32,10 +32,10 @@ typedef enum MopSubsystemPhase {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopSubsystemVTable {
-    const char        *name;
-    MopSubsystemPhase  phase;
-    void (*update)(MopSubsystem *self, MopViewport *vp, float dt, float t);
-    void (*destroy)(MopSubsystem *self, MopViewport *vp);
+  const char *name;
+  MopSubsystemPhase phase;
+  void (*update)(MopSubsystem *self, MopViewport *vp, float dt, float t);
+  void (*destroy)(MopSubsystem *self, MopViewport *vp);
 } MopSubsystemVTable;
 
 /* -------------------------------------------------------------------------
@@ -46,8 +46,8 @@ typedef struct MopSubsystemVTable {
  * ------------------------------------------------------------------------- */
 
 struct MopSubsystem {
-    const MopSubsystemVTable *vtable;
-    bool enabled;
+  const MopSubsystemVTable *vtable;
+  bool enabled;
 };
 
 /* -------------------------------------------------------------------------
@@ -57,8 +57,8 @@ struct MopSubsystem {
 #define MOP_MAX_SUBSYSTEMS 32
 
 typedef struct MopSubsystemRegistry {
-    MopSubsystem *entries[MOP_MAX_SUBSYSTEMS];
-    uint32_t      count;
+  MopSubsystem *entries[MOP_MAX_SUBSYSTEMS];
+  uint32_t count;
 } MopSubsystemRegistry;
 
 /* Register a subsystem.  Returns false if the registry is full. */
@@ -69,7 +69,7 @@ bool mop_subsystem_unregister(MopSubsystemRegistry *reg, MopSubsystem *sub);
 
 /* Dispatch update to all enabled subsystems matching the given phase. */
 void mop_subsystem_dispatch(MopSubsystemRegistry *reg, MopSubsystemPhase phase,
-                             MopViewport *vp, float dt, float t);
+                            MopViewport *vp, float dt, float t);
 
 /* Destroy all registered subsystems (calls each vtable->destroy). */
 void mop_subsystem_destroy_all(MopSubsystemRegistry *reg, MopViewport *vp);

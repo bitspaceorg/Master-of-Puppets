@@ -3,19 +3,41 @@ title: "API Contracts"
 description: "Public API function contracts, preconditions, and postconditions"
 slug: "reference-api"
 author: "rahulmnavneeth"
-date: "19 FEB 2026"
+date: "21 FEB 2026"
 tags: ["reference", "api"]
 ---
 
 ## Headers
 
-| Header          | Contents                                  |
-| --------------- | ----------------------------------------- |
-| `types.h`       | Value types, math utilities               |
-| `backend.h`     | Backend enumeration and query functions   |
-| `viewport.h`    | Viewport lifecycle, camera, rendering     |
-| `scene.h`       | Mesh creation, removal, transforms        |
-| `picking.h`     | Object picking via ID buffer              |
+| Header            | Contents                                      | Docs                                     |
+| ----------------- | --------------------------------------------- | ---------------------------------------- |
+| `types.h`         | Value types, math utilities                   | [Math](reference-math)                   |
+| `backend.h`       | Backend enumeration and query functions       |                                          |
+| `viewport.h`      | Viewport lifecycle, camera, rendering         |                                          |
+| `scene.h`         | Mesh creation, removal, transforms, textures  |                                          |
+| `picking.h`       | Object picking via ID buffer                  | [Picking](reference-picking)             |
+| `light.h`         | Multi-light system (directional, point, spot) | [Light](reference-light)                 |
+| `input.h`         | Input events, output events, interaction      | [Input](reference-input)                 |
+| `gizmo.h`         | TRS manipulation gizmo                        | [Gizmo](reference-gizmo)                 |
+| `camera.h`        | Orbit camera                                  | [Camera](reference-camera)               |
+| `camera_query.h`  | Camera state snapshot, ray generation         | [Camera Query](reference-camera-query)   |
+| `display.h`       | Display settings and visualization modes      | [Display](reference-display)             |
+| `overlay.h`       | Built-in and custom overlays                  | [Overlay](reference-overlay)             |
+| `material.h`      | PBR-inspired material descriptor              | [Material](reference-material)           |
+| `vertex_format.h` | Flexible vertex attributes                    | [Vertex Format](reference-vertex-format) |
+| `loader.h`        | OBJ and binary mesh loading                   | [Loader](reference-loader)               |
+| `query.h`         | Read-only mesh introspection                  | [Query](reference-query)                 |
+| `snapshot.h`      | Zero-copy scene iteration                     | [Snapshot](reference-snapshot)           |
+| `spatial.h`       | AABB, frustum culling, raycasting             | [Spatial](reference-spatial)             |
+| `undo.h`          | Transform undo/redo stack                     | [Undo](reference-undo)                   |
+| `pipeline.h`      | Custom render pass hooks                      | [Pipeline](reference-pipeline)           |
+| `particle.h`      | Particle emitters and presets                 | [Particle](reference-particle)           |
+| `water.h`         | Procedural water surface                      | [Water](reference-water)                 |
+| `postprocess.h`   | Gamma, tonemapping, vignette, fog             | [Post-Processing](reference-postprocess) |
+| `config.h`        | Optional Lua configuration                    | [Config](reference-config)               |
+| `log.h`           | Logging levels and callbacks                  | [Log](reference-log)                     |
+| `profile.h`       | Frame timing statistics                       | [Profile](reference-profile)             |
+| `mop.h`           | Umbrella header — includes all above          |                                          |
 
 ## Viewport Lifecycle
 
@@ -26,10 +48,10 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc);
 ```
 
 | Precondition | `desc` non-NULL, `width > 0`, `height > 0`, valid `backend` |
-| ------------ | ------------------------------------------------------------ |
-| Returns      | Valid pointer or NULL on failure                              |
-| Ownership    | Caller owns the pointer; must call `mop_viewport_destroy`    |
-| Defaults     | Camera at `(0,0,5)`, clear `(0.1,0.1,0.1,1)`, solid mode   |
+| ------------ | ----------------------------------------------------------- |
+| Returns      | Valid pointer or NULL on failure                            |
+| Ownership    | Caller owns the pointer; must call `mop_viewport_destroy`   |
+| Defaults     | Camera at `(0,0,5)`, clear `(0.1,0.1,0.1,1)`, solid mode    |
 
 ### `mop_viewport_destroy`
 
@@ -37,10 +59,10 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc);
 void mop_viewport_destroy(MopViewport *viewport);
 ```
 
-| Precondition | NULL or valid viewport pointer |
-| ------------ | ------------------------------ |
-| Effect       | Destroys all meshes, RHI resources, and the viewport itself |
-| NULL         | No-op                          |
+| Precondition | NULL or valid viewport pointer                                                |
+| ------------ | ----------------------------------------------------------------------------- |
+| Effect       | Destroys all meshes, lights, gizmo, overlays, RHI resources, and the viewport |
+| NULL         | No-op                                                                         |
 
 ### `mop_viewport_resize`
 
@@ -48,8 +70,8 @@ void mop_viewport_destroy(MopViewport *viewport);
 void mop_viewport_resize(MopViewport *viewport, int width, int height);
 ```
 
-| Precondition | `width > 0`, `height > 0`                           |
-| ------------ | ---------------------------------------------------- |
+| Precondition | `width > 0`, `height > 0`                             |
+| ------------ | ----------------------------------------------------- |
 | Effect       | Reallocates framebuffer, recomputes projection matrix |
 
 ## Camera
@@ -63,10 +85,10 @@ void mop_viewport_set_camera(MopViewport *viewport,
                              float near_plane, float far_plane);
 ```
 
-| Precondition | `eye != target`, `up` not parallel to view direction  |
-| ------------ | ----------------------------------------------------- |
+| Precondition | `eye != target`, `up` not parallel to view direction |
+| ------------ | ---------------------------------------------------- |
 | Precondition | `fov_degrees` in `(0, 180)`, `0 < near < far`        |
-| Effect       | Recomputes view and projection matrices immediately    |
+| Effect       | Recomputes view and projection matrices immediately  |
 
 ## Scene
 
@@ -79,8 +101,16 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc);
 | Precondition | Valid arrays, `index_count % 3 == 0`, indices in bounds |
 | ------------ | ------------------------------------------------------- |
 | Copy         | Vertex and index data are **copied** into RHI buffers   |
-| Ownership    | Viewport owns the mesh; app may free its arrays after    |
-| Limit        | `MOP_MAX_MESHES` (4096)                                  |
+| Ownership    | Viewport owns the mesh; app may free its arrays after   |
+| Limit        | `MOP_MAX_MESHES` (4096)                                 |
+
+### `mop_viewport_add_mesh_ex`
+
+```c
+MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport, const MopMeshDescEx *desc);
+```
+
+Flexible vertex format variant. `desc->vertex_format` specifies attribute layout and stride. Otherwise identical to `mop_viewport_add_mesh`.
 
 ### `mop_mesh_set_transform`
 
@@ -91,6 +121,36 @@ void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform);
 | Effect | Updates the mesh model matrix; takes effect on next render |
 | ------ | ---------------------------------------------------------- |
 
+### `mop_mesh_set_position` / `set_rotation` / `set_scale`
+
+```c
+void mop_mesh_set_position(MopMesh *mesh, MopVec3 position);
+void mop_mesh_set_rotation(MopMesh *mesh, MopVec3 euler_radians);
+void mop_mesh_set_scale(MopMesh *mesh, MopVec3 scale);
+```
+
+TRS convenience setters. The model matrix is recomputed from the TRS components on next render.
+
+## Lights
+
+### `mop_viewport_add_light`
+
+```c
+MopLight *mop_viewport_add_light(MopViewport *viewport, const MopLight *desc);
+```
+
+| Returns | Pointer to the light slot, or NULL if `MOP_MAX_LIGHTS` (8) reached |
+| ------- | ------------------------------------------------------------------ |
+| Copy    | The descriptor is copied into the viewport's light array           |
+
+### `mop_viewport_remove_light`
+
+```c
+void mop_viewport_remove_light(MopViewport *viewport, MopLight *light);
+```
+
+Marks the light inactive and destroys its indicator mesh.
+
 ## Rendering
 
 ### `mop_viewport_render`
@@ -99,9 +159,9 @@ void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform);
 void mop_viewport_render(MopViewport *viewport);
 ```
 
-| Effect | Clears buffers, draws all active meshes, finalizes frame |
-| ------ | -------------------------------------------------------- |
-| Sync   | Fully synchronous — returns only when all pixels are written |
+| Effect | Clears buffers, updates indicators and gizmo, draws all passes, finalizes frame |
+| ------ | ------------------------------------------------------------------------------- |
+| Sync   | Fully synchronous — returns only when all pixels are written                    |
 
 ### `mop_viewport_read_color`
 
@@ -110,10 +170,10 @@ const uint8_t *mop_viewport_read_color(MopViewport *viewport,
                                        int *out_width, int *out_height);
 ```
 
-| Returns    | Pointer to RGBA8 data, row-major, top-left origin |
-| ---------- | ------------------------------------------------- |
-| Lifetime   | Valid until next `render`, `resize`, or `destroy`  |
-| Ownership  | Borrowed — caller must not free                    |
+| Returns   | Pointer to RGBA8 data, row-major, top-left origin |
+| --------- | ------------------------------------------------- |
+| Lifetime  | Valid until next `render`, `resize`, or `destroy` |
+| Ownership | Borrowed — caller must not free                   |
 
 ## Picking
 
@@ -123,7 +183,25 @@ const uint8_t *mop_viewport_read_color(MopViewport *viewport,
 MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y);
 ```
 
-| Returns  | `hit=true` with `object_id` and `depth` if a rendered object exists at `(x,y)` |
-| -------- | ------------------------------------------------------------------------------- |
-| Depth    | Normalized `[0, 1]` — 0 is near plane, 1 is far plane                          |
-| Timing   | Reads from the most recently rendered frame                                      |
+| Returns | `hit=true` with `object_id` and `depth` if a rendered object exists at `(x,y)` |
+| ------- | ------------------------------------------------------------------------------ |
+| Depth   | Normalized `[0, 1]` — 0 is near plane, 1 is far plane                          |
+| Timing  | Reads from the most recently rendered frame                                    |
+
+## Input / Events
+
+### `mop_viewport_input`
+
+```c
+void mop_viewport_input(MopViewport *viewport, const MopInputEvent *event);
+```
+
+Feeds a platform input event into the viewport's interaction state machine. See [Input](reference-input) for the full event type list and state machine.
+
+### `mop_viewport_poll_event`
+
+```c
+bool mop_viewport_poll_event(MopViewport *viewport, MopEvent *out);
+```
+
+Dequeues the next output event. Returns `false` when the queue is empty. See [Input](reference-input) for the full output event type list.

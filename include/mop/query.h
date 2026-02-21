@@ -13,14 +13,14 @@
 #ifndef MOP_QUERY_H
 #define MOP_QUERY_H
 
-#include "types.h"
-#include "material.h"
 #include "light.h"
+#include "material.h"
+#include "types.h"
 #include "vertex_format.h"
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
-typedef struct MopMesh     MopMesh;
+typedef struct MopMesh MopMesh;
 
 /* -------------------------------------------------------------------------
  * Mesh enumeration
@@ -44,7 +44,7 @@ MopMesh *mop_viewport_mesh_by_id(const MopViewport *vp, uint32_t object_id);
 
 /* Identity */
 uint32_t mop_mesh_get_object_id(const MopMesh *mesh);
-bool     mop_mesh_is_active(const MopMesh *mesh);
+bool mop_mesh_is_active(const MopMesh *mesh);
 
 /* Geometry counts */
 uint32_t mop_mesh_get_vertex_count(const MopMesh *mesh);
@@ -56,18 +56,18 @@ uint32_t mop_mesh_get_triangle_count(const MopMesh *mesh);
  * mop_mesh_get_vertex_data_raw + mop_mesh_get_vertex_format instead).
  * Pointer valid until next geometry update or viewport destroy. */
 const MopVertex *mop_mesh_get_vertices(const MopMesh *mesh,
-                                        const MopViewport *vp);
+                                       const MopViewport *vp);
 
 /* Index data — zero-copy pointer into the RHI buffer. */
 const uint32_t *mop_mesh_get_indices(const MopMesh *mesh,
-                                      const MopViewport *vp);
+                                     const MopViewport *vp);
 
 /* Raw vertex data for flexible-format meshes.
  * Returns the raw byte pointer and stride.  Returns NULL for
  * standard-format meshes (use mop_mesh_get_vertices instead). */
 const void *mop_mesh_get_vertex_data_raw(const MopMesh *mesh,
-                                          const MopViewport *vp,
-                                          uint32_t *out_stride);
+                                         const MopViewport *vp,
+                                         uint32_t *out_stride);
 
 /* Vertex format — NULL means standard MopVertex layout. */
 const MopVertexFormat *mop_mesh_get_vertex_format(const MopMesh *mesh);
@@ -78,11 +78,11 @@ MopMat4 mop_mesh_get_world_transform(const MopMesh *mesh);
 
 /* Material — returns the material if set, otherwise the default. */
 MopMaterial mop_mesh_get_material(const MopMesh *mesh);
-bool        mop_mesh_has_material(const MopMesh *mesh);
+bool mop_mesh_has_material(const MopMesh *mesh);
 
 /* Blend and opacity */
 MopBlendMode mop_mesh_get_blend_mode(const MopMesh *mesh);
-float        mop_mesh_get_opacity(const MopMesh *mesh);
+float mop_mesh_get_opacity(const MopMesh *mesh);
 
 /* -------------------------------------------------------------------------
  * Light enumeration

@@ -1,0 +1,181 @@
+---
+title: "Camera Query API"
+description: "Camera matrix export, parameter access, and pixel-to-ray generation"
+slug: "reference-camera-query"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "camera", "query"]
+---
+
+## Location
+
+```
+include/mop/camera_query.h   — Public API
+src/query/camera_query.c     — Implementation
+```
+
+## Overview
+
+The camera query API exposes the viewport's camera state as read-only data. It provides a single-call snapshot of all camera parameters, individual getters for each property, and a ray generation function that unprojects pixel coordinates into world-space rays. All values reflect the most recent `mop_viewport_render` or `mop_viewport_set_camera` call.
+
+## Types
+
+### MopCameraState
+
+```c
+typedef struct MopCameraState {
+    MopVec3 eye;
+    MopVec3 target;
+    MopVec3 up;
+    float   fov_radians;
+    float   near_plane;
+    float   far_plane;
+    float   aspect_ratio;
+    MopMat4 view_matrix;
+    MopMat4 projection_matrix;
+} MopCameraState;
+```
+
+Complete snapshot of the camera at the time of the query. All fields needed to reconstruct camera rays or replicate the viewport camera in an external renderer.
+
+| Field               | Type      | Description                                          |
+| ------------------- | --------- | ---------------------------------------------------- |
+| `eye`               | `MopVec3` | World-space camera position                          |
+| `target`            | `MopVec3` | World-space look-at target                           |
+| `up`                | `MopVec3` | Camera up vector                                     |
+| `fov_radians`       | `float`   | Vertical field of view in radians                    |
+| `near_plane`        | `float`   | Distance to the near clipping plane                  |
+| `far_plane`         | `float`   | Distance to the far clipping plane                   |
+| `aspect_ratio`      | `float`   | Width / height, computed from framebuffer dimensions |
+| `view_matrix`       | `MopMat4` | Column-major view matrix (world to camera space)     |
+| `projection_matrix` | `MopMat4` | Column-major perspective projection matrix           |
+
+### MopRay
+
+```c
+typedef struct MopRay {
+    MopVec3 origin;
+    MopVec3 direction;
+} MopRay;
+```
+
+A world-space ray with origin and normalized direction. Used by `mop_viewport_pixel_to_ray` and the spatial query ray intersection functions.
+
+| Field       | Type      | Description                       |
+| ----------- | --------- | --------------------------------- |
+| `origin`    | `MopVec3` | Ray start position in world space |
+| `direction` | `MopVec3` | Normalized ray direction          |
+
+## Functions
+
+### mop_viewport_get_camera_state
+
+```c
+MopCameraState mop_viewport_get_camera_state(const MopViewport *vp);
+```
+
+Returns a complete snapshot of the current camera state. If `vp` is `NULL`, all fields are zero-initialized. The `aspect_ratio` field is computed as `width / height` from the framebuffer dimensions, falling back to `1.0` if height is zero.
+
+### mop_viewport_get_view_matrix
+
+```c
+MopMat4 mop_viewport_get_view_matrix(const MopViewport *vp);
+```
+
+Returns the current view matrix (world-to-camera transform). Returns the identity matrix if `vp` is `NULL`.
+
+### mop_viewport_get_projection_matrix
+
+```c
+MopMat4 mop_viewport_get_projection_matrix(const MopViewport *vp);
+```
+
+Returns the current perspective projection matrix. Returns the identity matrix if `vp` is `NULL`.
+
+### mop_viewport_get_fov
+
+```c
+float mop_viewport_get_fov(const MopViewport *vp);
+```
+
+Returns the vertical field of view in radians. Returns `0.0` if `vp` is `NULL`.
+
+### mop_viewport_get_near_plane
+
+```c
+float mop_viewport_get_near_plane(const MopViewport *vp);
+```
+
+Returns the near clipping plane distance. Returns `0.0` if `vp` is `NULL`.
+
+### mop_viewport_get_far_plane
+
+```c
+float mop_viewport_get_far_plane(const MopViewport *vp);
+```
+
+Returns the far clipping plane distance. Returns `0.0` if `vp` is `NULL`.
+
+### mop_viewport_get_aspect_ratio
+
+```c
+float mop_viewport_get_aspect_ratio(const MopViewport *vp);
+```
+
+Returns the aspect ratio computed as `(float)width / (float)height` from the framebuffer dimensions. Returns `1.0` if `vp` is `NULL` or the height is zero.
+
+### mop_viewport_get_camera_up
+
+```c
+MopVec3 mop_viewport_get_camera_up(const MopViewport *vp);
+```
+
+Returns the camera's up vector. Returns `{0, 1, 0}` (Y-up) if `vp` is `NULL`.
+
+### mop_viewport_pixel_to_ray
+
+```c
+MopRay mop_viewport_pixel_to_ray(const MopViewport *vp, float x, float y);
+```
+
+Generates a world-space ray from pixel coordinates. The `x` and `y` parameters use framebuffer space with a top-left origin. Returns a ray with origin at `{0,0,0}` and direction `{0,0,-1}` if `vp` is `NULL` or the framebuffer has zero dimensions.
+
+The implementation:
+
+1. Converts pixel `(x, y)` to NDC: `ndc_x = 2x/width - 1`, `ndc_y = 1 - 2y/height`
+2. Computes the inverse of the view-projection matrix
+3. Unprojects the NDC point at both `z = -1` (near) and `z = 1` (far) into world space
+4. Performs perspective divide on both points
+5. Sets the ray origin to the near point and direction to `normalize(far - near)`
+
+If the perspective divide encounters a near-zero `w` component, the function returns the default ray to avoid division by zero.
+
+## Ray Generation for Custom Picking and Raycasting
+
+`mop_viewport_pixel_to_ray` is the entry point for any custom ray-based operation. It produces the same ray that a raytracer would cast for a given pixel, using the viewport's current camera configuration.
+
+### Basic picking
+
+```c
+MopRay ray = mop_viewport_pixel_to_ray(vp, mouse_x, mouse_y);
+// Test against your own acceleration structure
+MyHit hit = my_bvh_trace(bvh, ray.origin, ray.direction);
+```
+
+### Full-screen raytracing
+
+```c
+MopCameraState cam = mop_viewport_get_camera_state(vp);
+for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+        MopRay ray = mop_viewport_pixel_to_ray(vp, (float)x + 0.5f, (float)y + 0.5f);
+        framebuffer[y * width + x] = trace(ray);
+    }
+}
+```
+
+The `+0.5f` offset targets the center of each pixel rather than the top-left corner. For sub-pixel anti-aliasing, add jitter within the `[0, 1)` range to both `x` and `y` before calling.
+
+### Coordinate system
+
+Pixel coordinates use a top-left origin matching typical framebuffer and windowing system conventions. The NDC Y axis is flipped during conversion (`ndc_y = 1 - 2y/height`) so that positive Y points upward in world space.

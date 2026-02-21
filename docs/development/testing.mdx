@@ -13,11 +13,11 @@ tags: ["development", "testing"]
 make test
 ```
 
-This builds all test binaries in `build/tests/` and runs them sequentially.  The exit code is non-zero if any test fails.
+This builds all test binaries in `build/tests/` and runs them sequentially. The exit code is non-zero if any test fails.
 
 ## Test Framework
 
-MOP uses a custom minimal test harness with no external dependencies.  The harness is defined in `tests/test_harness.h`.
+MOP uses a custom minimal test harness with no external dependencies. The harness is defined in `tests/test_harness.h`.
 
 ### Writing a Test
 
@@ -48,23 +48,23 @@ int main(void) {
 
 ### Available Assertions
 
-| Macro                                | Description                                  |
-|--------------------------------------|----------------------------------------------|
-| `TEST_ASSERT(expr)`                  | Fails if `expr` is false                     |
-| `TEST_ASSERT_MSG(expr, msg)`         | Fails with a custom message                  |
-| `TEST_ASSERT_FLOAT_EQ(a, b)`        | Fails if `|a - b| > 1e-4`                   |
-| `TEST_ASSERT_VEC3_EQ(v, x, y, z)`   | Fails if any component differs by > 1e-4     |
+| Macro                             | Description                              |
+| --------------------------------- | ---------------------------------------- | ----- | ------- |
+| `TEST_ASSERT(expr)`               | Fails if `expr` is false                 |
+| `TEST_ASSERT_MSG(expr, msg)`      | Fails with a custom message              |
+| `TEST_ASSERT_FLOAT_EQ(a, b)`      | Fails if `                               | a - b | > 1e-4` |
+| `TEST_ASSERT_VEC3_EQ(v, x, y, z)` | Fails if any component differs by > 1e-4 |
 
 ### Test Structure
 
-| Macro                    | Purpose                                         |
-|--------------------------|------------------------------------------------|
-| `TEST_SUITE_BEGIN(name)` | Prints the suite name header                    |
-| `TEST_BEGIN(name)`       | Starts a test case                              |
-| `TEST_END()`             | Ends a test case, prints PASS/FAIL              |
-| `TEST_RUN(fn)`           | Calls a test function                           |
-| `TEST_REPORT()`          | Prints the summary (total, passed, failed)      |
-| `TEST_EXIT()`            | Returns 0 on success, 1 on any failure          |
+| Macro                    | Purpose                                    |
+| ------------------------ | ------------------------------------------ |
+| `TEST_SUITE_BEGIN(name)` | Prints the suite name header               |
+| `TEST_BEGIN(name)`       | Starts a test case                         |
+| `TEST_END()`             | Ends a test case, prints PASS/FAIL         |
+| `TEST_RUN(fn)`           | Calls a test function                      |
+| `TEST_REPORT()`          | Prints the summary (total, passed, failed) |
+| `TEST_EXIT()`            | Returns 0 on success, 1 on any failure     |
 
 ## Test Organization
 
@@ -92,7 +92,7 @@ tests/
 
 ## Build Integration
 
-Tests link against `build/lib/libmop.a` with flags `-lm -lpthread`.  Each test is a standalone binary — no shared test state between files.
+Tests link against `build/lib/libmop.a` with flags `-lm -lpthread`. Each test is a standalone binary — no shared test state between files.
 
 ```makefile
 # From the root Makefile

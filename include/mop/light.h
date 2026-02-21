@@ -20,9 +20,9 @@
  * ------------------------------------------------------------------------- */
 
 typedef enum MopLightType {
-    MOP_LIGHT_DIRECTIONAL = 0,
-    MOP_LIGHT_POINT       = 1,
-    MOP_LIGHT_SPOT        = 2,
+  MOP_LIGHT_DIRECTIONAL = 0,
+  MOP_LIGHT_POINT = 1,
+  MOP_LIGHT_SPOT = 2,
 } MopLightType;
 
 /* -------------------------------------------------------------------------
@@ -30,16 +30,16 @@ typedef enum MopLightType {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopLight {
-    MopLightType type;
-    MopVec3      position;       /* world space (point/spot) */
-    MopVec3      direction;      /* normalized (directional/spot) */
-    MopColor     color;          /* linear RGB */
-    float        intensity;      /* multiplier */
-    float        range;          /* attenuation cutoff (point/spot) */
-    float        spot_inner_cos; /* cos(inner_cone_angle) */
-    float        spot_outer_cos; /* cos(outer_cone_angle) */
-    bool         active;
-    bool         cast_shadows;   /* reserved for future use */
+  MopLightType type;
+  MopVec3 position;     /* world space (point/spot) */
+  MopVec3 direction;    /* normalized (directional/spot) */
+  MopColor color;       /* linear RGB */
+  float intensity;      /* multiplier */
+  float range;          /* attenuation cutoff (point/spot) */
+  float spot_inner_cos; /* cos(inner_cone_angle) */
+  float spot_outer_cos; /* cos(outer_cone_angle) */
+  bool active;
+  bool cast_shadows; /* reserved for future use */
 } MopLight;
 
 /* -------------------------------------------------------------------------

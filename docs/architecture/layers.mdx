@@ -9,11 +9,11 @@ tags: ["architecture", "layers"]
 
 ## Rules
 
-Every source file belongs to exactly one layer.  These rules are enforced by include-path structure — violations are caught in code review.
+Every source file belongs to exactly one layer. These rules are enforced by include-path structure — violations are caught in code review.
 
 ### Rule 1 — Public headers are self-contained
 
-Every file in `include/mop/` must compile with only C standard library headers and other `include/mop/` headers.  No file in `include/mop/` may include anything from `src/`.
+Every file in `include/mop/` must compile with only C standard library headers and other `include/mop/` headers. No file in `include/mop/` may include anything from `src/`.
 
 ### Rule 2 — No backend headers in public API
 
@@ -21,11 +21,11 @@ The tokens `GL`, `Vk`, `EGL`, `CGL`, `vulkan`, or `opengl` must never appear in 
 
 ### Rule 3 — Viewport core uses RHI, never backend
 
-Files in `src/viewport/` may include `src/rhi/rhi.h`.  They must never include files from `src/backend/`.
+Files in `src/viewport/` may include `src/rhi/rhi.h`. They must never include files from `src/backend/`.
 
 ### Rule 4 — Backends are isolated
 
-A backend in `src/backend/opengl/` must never include files from `src/backend/vulkan/` or `src/backend/cpu/`.  Backends share the RHI contract — nothing else.
+A backend in `src/backend/opengl/` must never include files from `src/backend/vulkan/` or `src/backend/cpu/`. Backends share the RHI contract — nothing else.
 
 ### Rule 5 — Math is a leaf
 
@@ -49,12 +49,12 @@ All commands must produce no output.
 
 ## Directory → Layer Mapping
 
-| Directory              | Layer            | Allowed dependencies                             |
-| ---------------------- | ---------------- | ------------------------------------------------ |
-| `include/mop/`        | Public API       | C stdlib                                         |
-| `src/math/`           | Math             | `include/mop/types.h`, C stdlib                  |
-| `src/rhi/`            | RHI              | `include/mop/`, C stdlib                         |
-| `src/viewport/`       | Viewport Core    | `include/mop/`, `src/rhi/`                       |
-| `src/backend/cpu/`    | CPU Backend      | `include/mop/`, `src/rhi/`                       |
-| `src/backend/opengl/` | OpenGL Backend   | `include/mop/`, `src/rhi/`, OpenGL headers       |
-| `src/backend/vulkan/` | Vulkan Backend   | `include/mop/`, `src/rhi/`, Vulkan headers       |
+| Directory             | Layer          | Allowed dependencies                       |
+| --------------------- | -------------- | ------------------------------------------ |
+| `include/mop/`        | Public API     | C stdlib                                   |
+| `src/math/`           | Math           | `include/mop/types.h`, C stdlib            |
+| `src/rhi/`            | RHI            | `include/mop/`, C stdlib                   |
+| `src/viewport/`       | Viewport Core  | `include/mop/`, `src/rhi/`                 |
+| `src/backend/cpu/`    | CPU Backend    | `include/mop/`, `src/rhi/`                 |
+| `src/backend/opengl/` | OpenGL Backend | `include/mop/`, `src/rhi/`, OpenGL headers |
+| `src/backend/vulkan/` | Vulkan Backend | `include/mop/`, `src/rhi/`, Vulkan headers |

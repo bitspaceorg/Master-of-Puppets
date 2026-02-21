@@ -1,0 +1,242 @@
+---
+title: "Scene Query API"
+description: "Read-only access to mesh data, materials, lights, and transforms"
+slug: "reference-query"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "query", "scene"]
+---
+
+## Location
+
+```
+include/mop/query.h   — Public API
+src/query/query.c     — Implementation
+```
+
+## Overview
+
+The scene query API provides read-only access to mesh geometry, transforms, materials, and lights in the current viewport. All returned pointers reference MOP-owned memory and are valid until the next `mop_viewport_render`, `mop_viewport_resize`, or `mop_viewport_destroy` call. No query function modifies viewport or mesh state.
+
+## Types
+
+The query API operates on opaque `MopViewport` and `MopMesh` pointers. It returns data through the following public types:
+
+| Type              | Header            | Description                                  |
+| ----------------- | ----------------- | -------------------------------------------- |
+| `MopVertex`       | `types.h`         | Standard vertex: position, normal, color, UV |
+| `MopMat4`         | `types.h`         | Column-major 4x4 matrix                      |
+| `MopMaterial`     | `material.h`      | PBR-inspired material descriptor             |
+| `MopBlendMode`    | `types.h`         | Blend mode enum (`MOP_BLEND_OPAQUE`, etc.)   |
+| `MopVertexFormat` | `vertex_format.h` | Flexible vertex attribute layout descriptor  |
+| `MopLight`        | `light.h`         | Light descriptor                             |
+
+## Functions
+
+### Mesh Enumeration
+
+#### mop_viewport_mesh_count
+
+```c
+uint32_t mop_viewport_mesh_count(const MopViewport *vp);
+```
+
+Returns the number of active scene meshes in the viewport. Internal meshes (grid, gizmo handles, background) are excluded via the scene mesh filter: a mesh qualifies if it is active, has a non-zero `object_id`, and its `object_id` is below `0xFFFF0000`. Returns `0` if `vp` is `NULL`.
+
+#### mop_viewport_mesh_at
+
+```c
+MopMesh *mop_viewport_mesh_at(const MopViewport *vp, uint32_t index);
+```
+
+Returns the mesh at the given active-mesh index in the range `[0, mesh_count)`. The index is into the filtered set of scene meshes, not the internal flat array. Returns `NULL` if the index is out of range or `vp` is `NULL`.
+
+#### mop_viewport_mesh_by_id
+
+```c
+MopMesh *mop_viewport_mesh_by_id(const MopViewport *vp, uint32_t object_id);
+```
+
+Finds a mesh by its `object_id`. Performs an O(n) linear scan over the internal mesh array. Returns `NULL` if the ID is `0`, not found, or `vp` is `NULL`. For hot paths, cache the result rather than calling this every frame.
+
+### Mesh Identity
+
+#### mop_mesh_get_object_id
+
+```c
+uint32_t mop_mesh_get_object_id(const MopMesh *mesh);
+```
+
+Returns the application-assigned object ID for the mesh. Returns `0` if `mesh` is `NULL`.
+
+#### mop_mesh_is_active
+
+```c
+bool mop_mesh_is_active(const MopMesh *mesh);
+```
+
+Returns whether the mesh slot is active in the internal flat array. Returns `false` if `mesh` is `NULL`.
+
+### Geometry Counts
+
+#### mop_mesh_get_vertex_count
+
+```c
+uint32_t mop_mesh_get_vertex_count(const MopMesh *mesh);
+```
+
+Returns the number of vertices in the mesh. Returns `0` if `mesh` is `NULL`.
+
+#### mop_mesh_get_index_count
+
+```c
+uint32_t mop_mesh_get_index_count(const MopMesh *mesh);
+```
+
+Returns the number of indices in the mesh. Returns `0` if `mesh` is `NULL`.
+
+#### mop_mesh_get_triangle_count
+
+```c
+uint32_t mop_mesh_get_triangle_count(const MopMesh *mesh);
+```
+
+Returns `index_count / 3`. Assumes the mesh uses a triangle list topology. Returns `0` if `mesh` is `NULL`.
+
+### Vertex and Index Data
+
+#### mop_mesh_get_vertices
+
+```c
+const MopVertex *mop_mesh_get_vertices(const MopMesh *mesh,
+                                        const MopViewport *vp);
+```
+
+Returns a zero-copy pointer into the RHI buffer containing vertex data in standard `MopVertex` layout. Returns `NULL` if the mesh uses a flexible vertex format (use `mop_mesh_get_vertex_data_raw` instead), or if either argument is `NULL`, or the vertex buffer is missing. The pointer is valid until the next geometry update or viewport destroy.
+
+#### mop_mesh_get_indices
+
+```c
+const uint32_t *mop_mesh_get_indices(const MopMesh *mesh,
+                                      const MopViewport *vp);
+```
+
+Returns a zero-copy pointer into the RHI buffer containing 32-bit index data. Returns `NULL` if either argument is `NULL` or the index buffer is missing.
+
+#### mop_mesh_get_vertex_data_raw
+
+```c
+const void *mop_mesh_get_vertex_data_raw(const MopMesh *mesh,
+                                          const MopViewport *vp,
+                                          uint32_t *out_stride);
+```
+
+Returns the raw byte pointer and stride for meshes using a flexible `MopVertexFormat`. If `out_stride` is non-`NULL`, it receives `vertex_format->stride`. Returns `NULL` for standard-format meshes (use `mop_mesh_get_vertices` instead) or if the mesh lacks a vertex format or buffer.
+
+#### mop_mesh_get_vertex_format
+
+```c
+const MopVertexFormat *mop_mesh_get_vertex_format(const MopMesh *mesh);
+```
+
+Returns the mesh's custom vertex format descriptor. Returns `NULL` if the mesh uses the standard `MopVertex` layout or if `mesh` is `NULL`.
+
+### Transforms
+
+#### mop_mesh_get_local_transform
+
+```c
+MopMat4 mop_mesh_get_local_transform(const MopMesh *mesh);
+```
+
+Returns the mesh's local (parent-relative) transform as a column-major 4x4 matrix. Returns the identity matrix if `mesh` is `NULL`.
+
+#### mop_mesh_get_world_transform
+
+```c
+MopMat4 mop_mesh_get_world_transform(const MopMesh *mesh);
+```
+
+Returns the fully resolved world transform (the product of all ancestor transforms). Returns the identity matrix if `mesh` is `NULL`.
+
+### Material
+
+#### mop_mesh_get_material
+
+```c
+MopMaterial mop_mesh_get_material(const MopMesh *mesh);
+```
+
+Returns the mesh's material if one has been explicitly assigned, otherwise returns the default material (from `mop_material_default()`). Returns the default material if `mesh` is `NULL`.
+
+#### mop_mesh_has_material
+
+```c
+bool mop_mesh_has_material(const MopMesh *mesh);
+```
+
+Returns `true` if the mesh has an explicitly assigned material. Returns `false` if `mesh` is `NULL` or no material has been set.
+
+### Blend and Opacity
+
+#### mop_mesh_get_blend_mode
+
+```c
+MopBlendMode mop_mesh_get_blend_mode(const MopMesh *mesh);
+```
+
+Returns the mesh's blend mode. Returns `MOP_BLEND_OPAQUE` if `mesh` is `NULL`.
+
+| Value                | Meaning                 |
+| -------------------- | ----------------------- |
+| `MOP_BLEND_OPAQUE`   | No blending (default)   |
+| `MOP_BLEND_ALPHA`    | Standard alpha blending |
+| `MOP_BLEND_ADDITIVE` | Additive blending       |
+| `MOP_BLEND_MULTIPLY` | Multiplicative blending |
+
+#### mop_mesh_get_opacity
+
+```c
+float mop_mesh_get_opacity(const MopMesh *mesh);
+```
+
+Returns the mesh's opacity in `[0, 1]`. Returns `1.0` (fully opaque) if `mesh` is `NULL`.
+
+### Light Enumeration
+
+#### mop_viewport_light_at
+
+```c
+const MopLight *mop_viewport_light_at(const MopViewport *vp, uint32_t index);
+```
+
+Returns a pointer to the light at the given index. The valid range is `[0, light_count)`. Returns `NULL` if the index is out of range, the light is inactive, or `vp` is `NULL`. The returned pointer references MOP-owned memory.
+
+## Read-Only Contract
+
+Every function in the query API is strictly read-only. No function modifies the viewport, mesh, or any internal state. This guarantee means:
+
+- Query functions are safe to call from any thread that holds a `const MopViewport *` or `const MopMesh *`, provided no other thread is concurrently calling mutating functions (`mop_viewport_render`, `mop_viewport_resize`, `mop_viewport_destroy`, or any `mop_mesh_set_*` function).
+- The returned pointers (`MopVertex *`, `uint32_t *`, `MopLight *`) point into RHI buffer memory. They become invalid after any call that triggers re-allocation: `mop_viewport_render`, `mop_viewport_resize`, or `mop_viewport_destroy`.
+- No query function allocates heap memory. All return values are either stack-copied structs or pointers into existing buffers.
+
+### Typical read pattern
+
+```c
+mop_viewport_render(viewport);
+
+uint32_t n = mop_viewport_mesh_count(viewport);
+for (uint32_t i = 0; i < n; i++) {
+    MopMesh *mesh = mop_viewport_mesh_at(viewport, i);
+    MopMat4 world = mop_mesh_get_world_transform(mesh);
+    MopMaterial mat = mop_mesh_get_material(mesh);
+
+    const MopVertex *verts = mop_mesh_get_vertices(mesh, viewport);
+    const uint32_t *idx = mop_mesh_get_indices(mesh, viewport);
+    uint32_t tri_count = mop_mesh_get_triangle_count(mesh);
+
+    // Process geometry...
+}
+```
+
+Call `mop_viewport_render` first to ensure transforms and buffers are up to date. All queries between two render calls will return consistent data.

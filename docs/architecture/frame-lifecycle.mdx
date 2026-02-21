@@ -9,7 +9,7 @@ tags: ["architecture", "rendering"]
 
 ## Overview
 
-A single call to `mop_viewport_render` executes a complete frame.  There is no retained command buffer or deferred execution — the frame is processed synchronously.
+A single call to `mop_viewport_render` executes a complete frame. There is no retained command buffer or deferred execution — the frame is processed synchronously.
 
 ## Frame Sequence
 
@@ -45,12 +45,12 @@ For each `draw` call, the CPU backend:
    b. Transforms normals via the model matrix (upper 3x3)
    c. Clips the triangle against 6 frustum planes (Sutherland-Hodgman)
    d. For each clipped sub-triangle:
-      - Perspective division → NDC
-      - Viewport transform (NDC → screen pixels, Y-flipped)
-      - Backface culling (screen-space signed area test)
-      - Flat shading (average face normal · light direction)
-      - Half-space rasterization (solid) or Bresenham (wireframe)
-      - Per-pixel: depth test → write color + depth + object_id
+    - Perspective division → NDC
+    - Viewport transform (NDC → screen pixels, Y-flipped)
+    - Backface culling (screen-space signed area test)
+    - Flat shading (average face normal · light direction)
+    - Half-space rasterization (solid) or Bresenham (wireframe)
+    - Per-pixel: depth test → write color + depth + object_id
 
 ## Post-Frame
 
@@ -62,4 +62,4 @@ After `mop_viewport_render` returns:
 
 ## Timing
 
-The frame is fully synchronous.  `mop_viewport_render` does not return until all pixels are written.
+The frame is fully synchronous. `mop_viewport_render` does not return until all pixels are written.

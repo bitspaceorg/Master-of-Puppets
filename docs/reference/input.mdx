@@ -1,0 +1,247 @@
+---
+title: "Input & Event System"
+description: "Platform-agnostic input processing and output event polling"
+slug: "reference-input"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "input", "interaction"]
+---
+
+## Location
+
+```
+include/mop/input.h      — Public types and API
+src/interact/input.c     — Interaction state machine and event processing
+```
+
+## Overview
+
+The input system decouples platform events from viewport interaction. The application maps platform-specific events (SDL, GLFW, etc.) to `MopInputEvent` structs and feeds them to MOP via `mop_viewport_input()`. MOP processes all interaction logic internally -- selection, gizmo manipulation, camera control, click-vs-drag detection -- and emits `MopEvent` output events that the application polls with `mop_viewport_poll_event()`.
+
+## Types
+
+### MopInputType
+
+All input event types that the application sends to MOP.
+
+```c
+typedef enum MopInputType {
+    /* Pointer (primary / left mouse) */
+    MOP_INPUT_POINTER_DOWN,
+    MOP_INPUT_POINTER_UP,
+    MOP_INPUT_POINTER_MOVE,
+
+    /* Secondary (right mouse) */
+    MOP_INPUT_SECONDARY_DOWN,
+    MOP_INPUT_SECONDARY_UP,
+
+    /* Scroll wheel */
+    MOP_INPUT_SCROLL,
+
+    /* Gizmo mode actions */
+    MOP_INPUT_MODE_TRANSLATE,
+    MOP_INPUT_MODE_ROTATE,
+    MOP_INPUT_MODE_SCALE,
+
+    /* Viewport actions */
+    MOP_INPUT_DESELECT,
+    MOP_INPUT_TOGGLE_WIREFRAME,
+    MOP_INPUT_RESET_VIEW,
+
+    /* Undo/redo */
+    MOP_INPUT_UNDO,
+    MOP_INPUT_REDO,
+
+    /* Camera movement (continuous) */
+    MOP_INPUT_CAMERA_MOVE,
+
+    /* Render state setters */
+    MOP_INPUT_SET_SHADING,       /* value = MopShadingMode        */
+    MOP_INPUT_SET_RENDER_MODE,   /* value = MopRenderMode         */
+    MOP_INPUT_SET_POST_EFFECTS,  /* value = MopPostEffect bitmask */
+} MopInputType;
+```
+
+| Input Type                   | Required Fields      | Description                                |
+| ---------------------------- | -------------------- | ------------------------------------------ |
+| `MOP_INPUT_POINTER_DOWN`     | `x`, `y`             | Left mouse button pressed                  |
+| `MOP_INPUT_POINTER_UP`       | `x`, `y`             | Left mouse button released                 |
+| `MOP_INPUT_POINTER_MOVE`     | `x`, `y`, `dx`, `dy` | Mouse moved (absolute + delta)             |
+| `MOP_INPUT_SECONDARY_DOWN`   | --                   | Right mouse button pressed                 |
+| `MOP_INPUT_SECONDARY_UP`     | --                   | Right mouse button released                |
+| `MOP_INPUT_SCROLL`           | `scroll`             | Scroll wheel (positive = zoom in)          |
+| `MOP_INPUT_MODE_TRANSLATE`   | --                   | Switch gizmo to translate mode             |
+| `MOP_INPUT_MODE_ROTATE`      | --                   | Switch gizmo to rotate mode                |
+| `MOP_INPUT_MODE_SCALE`       | --                   | Switch gizmo to scale mode                 |
+| `MOP_INPUT_DESELECT`         | --                   | Clear selection                            |
+| `MOP_INPUT_TOGGLE_WIREFRAME` | --                   | Toggle solid/wireframe rendering           |
+| `MOP_INPUT_RESET_VIEW`       | --                   | Reset camera to defaults + deselect        |
+| `MOP_INPUT_UNDO`             | --                   | Undo last transform                        |
+| `MOP_INPUT_REDO`             | --                   | Redo last undone transform                 |
+| `MOP_INPUT_CAMERA_MOVE`      | `dx`, `dy`           | WASD-style movement (forward/right deltas) |
+| `MOP_INPUT_SET_SHADING`      | `value`              | Set shading mode                           |
+| `MOP_INPUT_SET_RENDER_MODE`  | `value`              | Set render mode                            |
+| `MOP_INPUT_SET_POST_EFFECTS` | `value`              | Set post-effect bitmask                    |
+
+### MopInputEvent
+
+```c
+typedef struct MopInputEvent {
+    MopInputType type;
+    float x, y;       /* absolute position (POINTER_DOWN/UP/MOVE) */
+    float dx, dy;     /* relative delta (POINTER_MOVE, CAMERA_MOVE) */
+    float scroll;     /* scroll amount (SCROLL, positive = zoom in) */
+    uint32_t value;   /* generic payload for SET_* events            */
+} MopInputEvent;
+```
+
+### MopEventType
+
+All output event types that MOP emits for the application to poll.
+
+```c
+typedef enum MopEventType {
+    MOP_EVENT_NONE = 0,
+    MOP_EVENT_SELECTED,
+    MOP_EVENT_DESELECTED,
+    MOP_EVENT_TRANSFORM_CHANGED,
+    MOP_EVENT_RENDER_MODE_CHANGED,   /* object_id = MopRenderMode    */
+    MOP_EVENT_SHADING_CHANGED,       /* object_id = MopShadingMode   */
+    MOP_EVENT_POST_EFFECTS_CHANGED,  /* object_id = post effect mask */
+    MOP_EVENT_LIGHT_CHANGED,         /* object_id = 0xFFFE0000 + idx */
+} MopEventType;
+```
+
+| Event Type                       | `object_id` Content      | TRS Fields  |
+| -------------------------------- | ------------------------ | ----------- |
+| `MOP_EVENT_SELECTED`             | Selected mesh/light ID   | Current TRS |
+| `MOP_EVENT_DESELECTED`           | Previously selected ID   | --          |
+| `MOP_EVENT_TRANSFORM_CHANGED`    | Affected mesh ID         | Updated TRS |
+| `MOP_EVENT_RENDER_MODE_CHANGED`  | `MopRenderMode` value    | --          |
+| `MOP_EVENT_SHADING_CHANGED`      | `MopShadingMode` value   | --          |
+| `MOP_EVENT_POST_EFFECTS_CHANGED` | Post effect bitmask      | --          |
+| `MOP_EVENT_LIGHT_CHANGED`        | `0xFFFE0000 + light_idx` | Light pos   |
+
+### MopEvent
+
+```c
+typedef struct MopEvent {
+    MopEventType type;
+    uint32_t     object_id;
+    MopVec3      position;
+    MopVec3      rotation;
+    MopVec3      scale;
+} MopEvent;
+```
+
+The `position`, `rotation`, and `scale` fields are populated for `MOP_EVENT_SELECTED` and `MOP_EVENT_TRANSFORM_CHANGED`. For other event types, only `object_id` is meaningful.
+
+## Functions
+
+### mop_viewport_input
+
+```c
+void mop_viewport_input(MopViewport *vp, const MopInputEvent *event);
+```
+
+Feed a platform input event into the viewport. MOP processes the event internally, updating camera state, selection, gizmo interaction, and the output event queue. Call this once per platform event inside the application's event loop.
+
+### mop_viewport_poll_event
+
+```c
+bool mop_viewport_poll_event(MopViewport *vp, MopEvent *out);
+```
+
+Poll the next output event from the viewport's event queue. Returns `true` and fills `*out` if an event is available, `false` when the queue is empty. The event queue is a fixed-size ring buffer of `MOP_MAX_EVENTS` entries; if the queue fills, the newest events are dropped with a warning.
+
+### mop_viewport_get_selected
+
+```c
+uint32_t mop_viewport_get_selected(const MopViewport *vp);
+```
+
+Return the `object_id` of the currently selected mesh, or `0` if nothing is selected.
+
+## Interaction State Machine
+
+MOP uses an internal state machine to distinguish clicks from drags and to route mouse motion to the correct handler.
+
+```
+IDLE ─── POINTER_DOWN ──→ CLICK_PENDING
+                              │
+                     ┌────────┴────────┐
+                     │                 │
+              (moved > 5px)     (POINTER_UP)
+                     │                 │
+                     v                 v
+                 ORBITING        Click → pick + select/deselect
+                     │
+              (POINTER_UP)
+                     │
+                     v
+                   IDLE
+
+IDLE ─── POINTER_DOWN (hit gizmo) ──→ GIZMO_DRAG
+                                          │
+                                   (POINTER_UP)
+                                          │
+                                          v
+                                        IDLE (push undo)
+
+IDLE ─── SECONDARY_DOWN ──→ PANNING
+                                │
+                         (SECONDARY_UP)
+                                │
+                                v
+                              IDLE
+```
+
+The click threshold is 5 pixels (`CLICK_THRESHOLD`). If the pointer moves more than 5 pixels from its down position before release, the interaction transitions from `CLICK_PENDING` to `ORBITING` instead of performing a selection click.
+
+Orbit sensitivity is fixed at `0.005` radians per pixel.
+
+## Object ID Ranges
+
+MOP reserves specific ID ranges for internal objects. The application should assign mesh object IDs within the scene range only.
+
+| Range                        | Owner        | Purpose                |
+| ---------------------------- | ------------ | ---------------------- |
+| `0x00000000`                 | System       | Background (no object) |
+| `0x00000001` -- `0xFFFDFFFF` | Application  | Scene meshes           |
+| `0xFFFE0000` -- `0xFFFEFFFF` | Light system | Light indicators       |
+| `0xFFFF0000` -- `0xFFFFFFFF` | Gizmo system | Gizmo handles          |
+
+The helper functions `is_gizmo_handle(id)` and `is_light_indicator(id)` are used internally to classify picked object IDs. The light index can be recovered from an indicator ID with `id - 0xFFFE0000`.
+
+## Usage
+
+```c
+/* Feed platform events */
+MopInputEvent ev = {
+    .type = MOP_INPUT_POINTER_DOWN,
+    .x    = mouse_x,
+    .y    = mouse_y,
+};
+mop_viewport_input(viewport, &ev);
+
+/* Poll output events after processing */
+MopEvent out;
+while (mop_viewport_poll_event(viewport, &out)) {
+    switch (out.type) {
+    case MOP_EVENT_SELECTED:
+        printf("Selected object %u\n", out.object_id);
+        break;
+    case MOP_EVENT_TRANSFORM_CHANGED:
+        sync_transform(out.object_id, out.position,
+                       out.rotation, out.scale);
+        break;
+    case MOP_EVENT_LIGHT_CHANGED:
+        update_light_ui(out.object_id - 0xFFFE0000);
+        break;
+    default: break;
+    }
+}
+
+/* Query current selection */
+uint32_t sel = mop_viewport_get_selected(viewport);
+```

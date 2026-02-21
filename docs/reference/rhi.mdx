@@ -9,7 +9,7 @@ tags: ["reference", "rhi"]
 
 ## Overview
 
-The RHI is a function-pointer table that decouples the viewport core from specific rendering APIs.  The viewport calls through `MopRhiBackend *` — it never calls backend functions directly.
+The RHI is a function-pointer table that decouples the viewport core from specific rendering APIs. The viewport calls through `MopRhiBackend *` — it never calls backend functions directly.
 
 ## Location
 
@@ -21,31 +21,31 @@ src/rhi/
 
 ## Opaque Handles
 
-| Handle                | Represents                                              |
-| --------------------- | ------------------------------------------------------- |
-| `MopRhiDevice`        | A rendering context (GL context, Vk device, CPU state)  |
-| `MopRhiBuffer`        | Vertex or index data storage                            |
-| `MopRhiFramebuffer`   | Color + depth + object-ID render targets                |
+| Handle              | Represents                                             |
+| ------------------- | ------------------------------------------------------ |
+| `MopRhiDevice`      | A rendering context (GL context, Vk device, CPU state) |
+| `MopRhiBuffer`      | Vertex or index data storage                           |
+| `MopRhiFramebuffer` | Color + depth + object-ID render targets               |
 
 ## Function Table
 
-Every backend must populate every function pointer.  NULL entries are invalid.
+Every backend must populate every function pointer. NULL entries are invalid.
 
-| Function                | Signature                                                          | Purpose                    |
-| ----------------------- | ------------------------------------------------------------------ | -------------------------- |
-| `device_create`         | `() → Device*`                                                     | Create rendering context   |
-| `device_destroy`        | `(Device*) → void`                                                 | Destroy context            |
-| `buffer_create`         | `(Device*, BufferDesc*) → Buffer*`                                 | Upload vertex/index data   |
-| `buffer_destroy`        | `(Device*, Buffer*) → void`                                        | Free buffer                |
-| `framebuffer_create`    | `(Device*, FbDesc*) → Fb*`                                         | Create render targets      |
-| `framebuffer_destroy`   | `(Device*, Fb*) → void`                                            | Free render targets        |
-| `framebuffer_resize`    | `(Device*, Fb*, w, h) → void`                                      | Reallocate at new size     |
-| `frame_begin`           | `(Device*, Fb*, ClearColor) → void`                                | Clear and begin frame      |
-| `frame_end`             | `(Device*, Fb*) → void`                                            | Finalize frame             |
-| `draw`                  | `(Device*, Fb*, DrawCall*) → void`                                  | Rasterize one mesh         |
-| `pick_read_id`          | `(Device*, Fb*, x, y) → uint32_t`                                  | Read object ID at pixel    |
-| `pick_read_depth`       | `(Device*, Fb*, x, y) → float`                                     | Read depth at pixel        |
-| `framebuffer_read_color`| `(Device*, Fb*, &w, &h) → uint8_t*`                                | Read RGBA8 color buffer    |
+| Function                 | Signature                           | Purpose                  |
+| ------------------------ | ----------------------------------- | ------------------------ |
+| `device_create`          | `() → Device*`                      | Create rendering context |
+| `device_destroy`         | `(Device*) → void`                  | Destroy context          |
+| `buffer_create`          | `(Device*, BufferDesc*) → Buffer*`  | Upload vertex/index data |
+| `buffer_destroy`         | `(Device*, Buffer*) → void`         | Free buffer              |
+| `framebuffer_create`     | `(Device*, FbDesc*) → Fb*`          | Create render targets    |
+| `framebuffer_destroy`    | `(Device*, Fb*) → void`             | Free render targets      |
+| `framebuffer_resize`     | `(Device*, Fb*, w, h) → void`       | Reallocate at new size   |
+| `frame_begin`            | `(Device*, Fb*, ClearColor) → void` | Clear and begin frame    |
+| `frame_end`              | `(Device*, Fb*) → void`             | Finalize frame           |
+| `draw`                   | `(Device*, Fb*, DrawCall*) → void`  | Rasterize one mesh       |
+| `pick_read_id`           | `(Device*, Fb*, x, y) → uint32_t`   | Read object ID at pixel  |
+| `pick_read_depth`        | `(Device*, Fb*, x, y) → float`      | Read depth at pixel      |
+| `framebuffer_read_color` | `(Device*, Fb*, &w, &h) → uint8_t*` | Read RGBA8 color buffer  |
 
 ## Draw Call Descriptor
 
@@ -62,7 +62,7 @@ typedef struct MopRhiDrawCall {
 } MopRhiDrawCall;
 ```
 
-The viewport precomputes `mvp`.  Backends may use `mvp` directly (CPU) or upload separate matrices as uniforms (GPU).
+The viewport precomputes `mvp`. Backends may use `mvp` directly (CPU) or upload separate matrices as uniforms (GPU).
 
 ## Backend Registration
 
@@ -72,7 +72,7 @@ Each backend exposes a factory returning `static const MopRhiBackend *`:
 const MopRhiBackend *mop_rhi_backend_cpu(void);
 ```
 
-The dispatcher in `rhi.c` maps `MopBackendType → factory`.  `MOP_BACKEND_AUTO` resolves to the platform default.
+The dispatcher in `rhi.c` maps `MopBackendType → factory`. `MOP_BACKEND_AUTO` resolves to the platform default.
 
 ## Implementing a New Backend
 

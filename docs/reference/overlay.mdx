@@ -1,0 +1,143 @@
+---
+title: "Overlay System"
+description: "Built-in and custom overlay registration, enable/disable, and dispatch"
+slug: "reference-overlay"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "overlay", "rendering"]
+---
+
+## Location
+
+```
+include/mop/overlay.h   — Public types and function declarations
+src/core/overlay.c       — Registration, enable/disable, dispatch
+src/core/viewport.c      — pass_overlays() invocation during frame rendering
+```
+
+## Overview
+
+Overlays are draw callbacks invoked after the main scene passes during each frame. Four built-in overlays (wireframe, normals, bounds, selection) are pre-registered at viewport creation. Applications can register up to 12 additional custom overlays for a total capacity of `MOP_MAX_OVERLAYS` (16).
+
+## Types
+
+### MopOverlayId
+
+```c
+typedef enum MopOverlayId {
+    MOP_OVERLAY_WIREFRAME     = 0,
+    MOP_OVERLAY_NORMALS       = 1,
+    MOP_OVERLAY_BOUNDS        = 2,
+    MOP_OVERLAY_SELECTION     = 3,
+    MOP_OVERLAY_BUILTIN_COUNT = 4,
+} MopOverlayId;
+```
+
+| Value                       | Slot | Description                                     |
+| --------------------------- | ---- | ----------------------------------------------- |
+| `MOP_OVERLAY_WIREFRAME`     | 0    | Wireframe edges drawn on top of shaded geometry |
+| `MOP_OVERLAY_NORMALS`       | 1    | Vertex normal direction lines                   |
+| `MOP_OVERLAY_BOUNDS`        | 2    | Per-mesh axis-aligned bounding boxes            |
+| `MOP_OVERLAY_SELECTION`     | 3    | Highlight for the currently selected object     |
+| `MOP_OVERLAY_BUILTIN_COUNT` | 4    | Sentinel marking the end of the built-in range  |
+
+### MopOverlayFn
+
+```c
+typedef void (*MopOverlayFn)(MopViewport *vp, void *user_data);
+```
+
+Callback signature for custom overlay draw functions. The viewport pointer provides access to the RHI, camera matrices, and scene state. `user_data` is the pointer passed at registration time.
+
+### MopOverlayEntry
+
+```c
+#define MOP_MAX_OVERLAYS 16
+
+typedef struct MopOverlayEntry {
+    const char  *name;
+    MopOverlayFn draw_fn;
+    void        *user_data;
+    bool         active;
+} MopOverlayEntry;
+```
+
+| Field       | Type           | Description                                                             |
+| ----------- | -------------- | ----------------------------------------------------------------------- |
+| `name`      | `const char *` | Human-readable label (not copied -- caller must keep the string alive)  |
+| `draw_fn`   | `MopOverlayFn` | Draw callback invoked each frame when the overlay is active and enabled |
+| `user_data` | `void *`       | Opaque pointer forwarded to `draw_fn`                                   |
+| `active`    | `bool`         | Whether the slot is occupied (set by add/remove)                        |
+
+## Functions
+
+### mop_viewport_add_overlay
+
+```c
+uint32_t mop_viewport_add_overlay(MopViewport *vp, const char *name,
+                                   MopOverlayFn draw_fn, void *user_data);
+```
+
+Registers a custom overlay. Searches for the first free slot in the range `[MOP_OVERLAY_BUILTIN_COUNT, MOP_MAX_OVERLAYS)`. The overlay is automatically enabled on registration. Returns the slot index (handle) on success, or `UINT32_MAX` if `vp` is NULL, `draw_fn` is NULL, or no slots remain.
+
+### mop_viewport_remove_overlay
+
+```c
+void mop_viewport_remove_overlay(MopViewport *vp, uint32_t handle);
+```
+
+Removes a custom overlay by its handle. Clears the `draw_fn`, sets `active` and `enabled` to false. Silently ignores attempts to remove built-in overlays (handles below `MOP_OVERLAY_BUILTIN_COUNT`) or out-of-range handles.
+
+### mop_viewport_set_overlay_enabled
+
+```c
+void mop_viewport_set_overlay_enabled(MopViewport *vp, uint32_t id, bool enabled);
+```
+
+Enables or disables any overlay by its slot index. Works for both built-in and custom overlays. Disabling a built-in overlay suppresses its draw call without removing it. Invalid IDs (`>= MOP_MAX_OVERLAYS`) are silently ignored.
+
+### mop_viewport_get_overlay_enabled
+
+```c
+bool mop_viewport_get_overlay_enabled(const MopViewport *vp, uint32_t id);
+```
+
+Returns whether the overlay at slot `id` is enabled. Returns `false` for NULL viewports or out-of-range IDs.
+
+## Built-in vs Custom Overlays
+
+### Built-in overlays
+
+Built-in overlays occupy slots 0 through 3. They are registered internally during `mop_viewport_create` and cannot be removed. Their draw functions are defined in the viewport core:
+
+- `mop_overlay_builtin_wireframe` -- draws wireframe edges over shaded geometry. Controlled by `MopDisplaySettings.wireframe_overlay`.
+- `mop_overlay_builtin_normals` -- draws vertex normal lines. Controlled by `MopDisplaySettings.show_normals`.
+- `mop_overlay_builtin_bounds` -- draws axis-aligned bounding boxes. Controlled by `MopDisplaySettings.show_bounds`.
+- `mop_overlay_builtin_selection` -- highlights the selected object. Runs whenever the selection overlay is enabled, regardless of display settings.
+
+Built-in overlays require both their `MopDisplaySettings` flag **and** their `overlay_enabled` flag to be true (except selection, which only checks `overlay_enabled`). At creation time all `overlay_enabled` flags default to false.
+
+### Custom overlays
+
+Custom overlays occupy slots 4 through 15. They are registered with `mop_viewport_add_overlay` and removed with `mop_viewport_remove_overlay`. Custom overlays are dispatched when both `active` and `overlay_enabled` are true.
+
+## Usage
+
+```c
+/* Custom grid overlay */
+void draw_debug_grid(MopViewport *vp, void *user_data) {
+    /* Custom drawing logic using viewport RHI */
+}
+
+uint32_t handle = mop_viewport_add_overlay(vp, "debug_grid",
+                                            draw_debug_grid, NULL);
+
+/* Toggle it off */
+mop_viewport_set_overlay_enabled(vp, handle, false);
+
+/* Remove it entirely */
+mop_viewport_remove_overlay(vp, handle);
+
+/* Toggle a built-in overlay */
+mop_viewport_set_overlay_enabled(vp, MOP_OVERLAY_WIREFRAME, true);
+```

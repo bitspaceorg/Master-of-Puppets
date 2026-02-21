@@ -9,7 +9,7 @@ tags: ["architecture", "scene-graph", "transforms"]
 
 ## Overview
 
-MOP provides a single-level parent-child hierarchy for mesh transforms.  A mesh may have one parent; when a parent has a transform, its children inherit it.  This is sufficient for common patterns like attaching objects to moving platforms or grouping related geometry.
+MOP provides a single-level parent-child hierarchy for mesh transforms. A mesh may have one parent; when a parent has a transform, its children inherit it. This is sufficient for common patterns like attaching objects to moving platforms or grouping related geometry.
 
 ## Data Model
 
@@ -20,7 +20,7 @@ int32_t  parent_index;     /* -1 = no parent (root)     */
 MopMat4  world_transform;  /* Computed each frame        */
 ```
 
-The `world_transform` is the product of the parent's world transform and the mesh's own local TRS matrix.  Root meshes have `world_transform = local_transform`.
+The `world_transform` is the product of the parent's world transform and the mesh's own local TRS matrix. Root meshes have `world_transform = local_transform`.
 
 ## Render-Time Computation
 
@@ -39,7 +39,7 @@ This two-pass approach guarantees parents are resolved before children without r
 void mop_mesh_set_parent(MopMesh *mesh, MopMesh *parent, MopViewport *viewport);
 ```
 
-Sets the mesh's parent.  Both meshes must belong to the same viewport.  The viewport is needed to resolve the parent's internal index.
+Sets the mesh's parent. Both meshes must belong to the same viewport. The viewport is needed to resolve the parent's internal index.
 
 ### mop_mesh_clear_parent
 
@@ -51,8 +51,8 @@ Makes the mesh a root node (removes its parent relationship).
 
 ## Limitations
 
-- **Single level:** MOP supports one level of nesting (parent → child).  Deep hierarchies (grandparent → parent → child) are not propagated beyond one level.
-- **No automatic cleanup:** Removing a parent does not remove its children.  Children become orphaned (their `parent_index` may point to an inactive slot).  Clear parent references before removing a parent mesh.
+- **Single level:** MOP supports one level of nesting (parent → child). Deep hierarchies (grandparent → parent → child) are not propagated beyond one level.
+- **No automatic cleanup:** Removing a parent does not remove its children. Children become orphaned (their `parent_index` may point to an inactive slot). Clear parent references before removing a parent mesh.
 - **No sibling ordering:** Children are rendered in mesh array order, not insertion order relative to their parent.
 
 ## Usage Pattern

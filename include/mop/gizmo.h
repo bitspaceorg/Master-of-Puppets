@@ -13,22 +13,22 @@
 #ifndef MOP_GIZMO_H
 #define MOP_GIZMO_H
 
-#include "types.h"
 #include "picking.h"
+#include "types.h"
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
-typedef struct MopMesh     MopMesh;
-typedef struct MopGizmo    MopGizmo;
+typedef struct MopMesh MopMesh;
+typedef struct MopGizmo MopGizmo;
 
 /* -------------------------------------------------------------------------
  * Gizmo mode — which kind of handle geometry to display
  * ------------------------------------------------------------------------- */
 
 typedef enum MopGizmoMode {
-    MOP_GIZMO_TRANSLATE = 0,
-    MOP_GIZMO_ROTATE    = 1,
-    MOP_GIZMO_SCALE     = 2
+  MOP_GIZMO_TRANSLATE = 0,
+  MOP_GIZMO_ROTATE = 1,
+  MOP_GIZMO_SCALE = 2
 } MopGizmoMode;
 
 /* -------------------------------------------------------------------------
@@ -36,11 +36,11 @@ typedef enum MopGizmoMode {
  * ------------------------------------------------------------------------- */
 
 typedef enum MopGizmoAxis {
-    MOP_GIZMO_AXIS_NONE   = -1,
-    MOP_GIZMO_AXIS_X      = 0,
-    MOP_GIZMO_AXIS_Y      = 1,
-    MOP_GIZMO_AXIS_Z      = 2,
-    MOP_GIZMO_AXIS_CENTER = 3
+  MOP_GIZMO_AXIS_NONE = -1,
+  MOP_GIZMO_AXIS_X = 0,
+  MOP_GIZMO_AXIS_Y = 1,
+  MOP_GIZMO_AXIS_Z = 2,
+  MOP_GIZMO_AXIS_CENTER = 3
 } MopGizmoAxis;
 
 /* -------------------------------------------------------------------------
@@ -53,9 +53,9 @@ typedef enum MopGizmoAxis {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopGizmoDelta {
-    MopVec3 translate;
-    MopVec3 rotate;
-    MopVec3 scale;
+  MopVec3 translate;
+  MopVec3 rotate;
+  MopVec3 scale;
 } MopGizmoDelta;
 
 /* -------------------------------------------------------------------------
@@ -86,14 +86,14 @@ void mop_gizmo_hide(MopGizmo *gizmo);
  * Configuration
  * ------------------------------------------------------------------------- */
 
-void         mop_gizmo_set_mode(MopGizmo *gizmo, MopGizmoMode mode);
+void mop_gizmo_set_mode(MopGizmo *gizmo, MopGizmoMode mode);
 MopGizmoMode mop_gizmo_get_mode(const MopGizmo *gizmo);
-void         mop_gizmo_set_position(MopGizmo *gizmo, MopVec3 position);
-void         mop_gizmo_set_rotation(MopGizmo *gizmo, MopVec3 rotation);
+void mop_gizmo_set_position(MopGizmo *gizmo, MopVec3 position);
+void mop_gizmo_set_rotation(MopGizmo *gizmo, MopVec3 rotation);
 
 /* Refresh handle transforms (call each frame to keep gizmo screen-size
  * stable as the camera moves). */
-void         mop_gizmo_update(MopGizmo *gizmo);
+void mop_gizmo_update(MopGizmo *gizmo);
 
 /* -------------------------------------------------------------------------
  * Picking
@@ -114,6 +114,6 @@ MopGizmoAxis mop_gizmo_test_pick(const MopGizmo *gizmo, MopPickResult pick);
  * ------------------------------------------------------------------------- */
 
 MopGizmoDelta mop_gizmo_drag(const MopGizmo *gizmo, MopGizmoAxis axis,
-                              float mouse_dx, float mouse_dy);
+                             float mouse_dx, float mouse_dy);
 
 #endif /* MOP_GIZMO_H */

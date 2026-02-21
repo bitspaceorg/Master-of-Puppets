@@ -31,7 +31,7 @@ Software rasterization backends can reuse the shared rasterizer at `src/rasteriz
 
 ## Adding a New Vertex Attribute
 
-The current fixed vertex format (`MopVertex`) includes position, normal, and color.  To add UV coordinates:
+The current fixed vertex format (`MopVertex`) includes position, normal, and color. To add UV coordinates:
 
 1. Add `MopVec2 uv` to `MopVertex` in `include/mop/types.h`
 2. Update the software rasterizer to interpolate UVs during rasterization
@@ -52,7 +52,7 @@ The subsystem must follow the same layer rules — it may consume the RHI but mu
 
 ## Documentation-Code Invariant
 
-For every directory under `src/`, a corresponding `.mdx` file must exist under `docs/reference/`.  For every `.mdx` file under `docs/reference/`, there must be a corresponding implementation.
+For every directory under `src/`, a corresponding `.mdx` file must exist under `docs/reference/`. For every `.mdx` file under `docs/reference/`, there must be a corresponding implementation.
 
 ```
 docs/reference/rhi.mdx           ↔  src/rhi/
@@ -61,4 +61,4 @@ docs/reference/backend-cpu.mdx   ↔  src/backend/cpu/
 docs/reference/math.mdx          ↔  src/math/
 ```
 
-This invariant is checked during review.  If you add code, add docs.  If you add docs, add code.
+This invariant is checked during review. If you add code, add docs. If you add docs, add code.

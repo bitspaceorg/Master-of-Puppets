@@ -14,8 +14,8 @@
 #define MOP_SW_RASTERIZER_MT_H
 
 #include "rasterizer.h"
-#include <mop/types.h>
 #include <mop/light.h>
+#include <mop/types.h>
 
 #define MOP_TILE_SIZE 32
 
@@ -27,21 +27,21 @@
  * ------------------------------------------------------------------------- */
 
 typedef struct MopSwPreparedTri {
-    MopSwClipVertex vertices[3];
-    uint32_t        object_id;
-    bool            wireframe;
-    bool            depth_test;
-    bool            cull_back;
-    MopVec3         light_dir;
-    float           ambient;
-    float           opacity;
-    bool            smooth_shading;
-    MopBlendMode    blend_mode;
+  MopSwClipVertex vertices[3];
+  uint32_t object_id;
+  bool wireframe;
+  bool depth_test;
+  bool cull_back;
+  MopVec3 light_dir;
+  float ambient;
+  float opacity;
+  bool smooth_shading;
+  MopBlendMode blend_mode;
 
-    /* Multi-light: NULL = use legacy light_dir + ambient */
-    const MopLight *lights;
-    uint32_t        light_count;
-    MopVec3         cam_eye;
+  /* Multi-light: NULL = use legacy light_dir + ambient */
+  const MopLight *lights;
+  uint32_t light_count;
+  MopVec3 cam_eye;
 } MopSwPreparedTri;
 
 /* -------------------------------------------------------------------------
@@ -61,8 +61,7 @@ void mop_sw_threadpool_destroy(MopSwThreadPool *pool);
  * ------------------------------------------------------------------------- */
 
 void mop_sw_rasterize_tiled(MopSwThreadPool *pool,
-                             const MopSwPreparedTri *triangles,
-                             uint32_t triangle_count,
-                             MopSwFramebuffer *fb);
+                            const MopSwPreparedTri *triangles,
+                            uint32_t triangle_count, MopSwFramebuffer *fb);
 
 #endif /* MOP_SW_RASTERIZER_MT_H */

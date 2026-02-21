@@ -1,72 +1,100 @@
 ---
 title: "Vulkan Backend"
-description: "Vulkan 1.0 headless backend contract"
+description: "Vulkan 1.0 headless backend — offscreen rendering with GPU acceleration"
 slug: "reference-backend-vulkan"
 author: "rahulmnavneeth"
-date: "19 FEB 2026"
+date: "21 FEB 2026"
 tags: ["reference", "backend", "vulkan"]
 ---
-
-## Status
-
-**Not yet implemented.**  This document defines the contract for the Vulkan backend.  Enable with `make MOP_ENABLE_VULKAN=1` once implemented.
 
 ## Location
 
 ```
 src/backend/vulkan/
-  vulkan_backend.c    — RHI function table implementation
+  vulkan_backend.c    — RHI function table, device lifecycle, frame recording
+  vulkan_pipeline.c   — Pipeline creation, render pass, descriptor set layout
+  vulkan_memory.c     — Buffer and image allocation helpers
+  vulkan_internal.h   — Shared internal types and constants
+  vulkan_shaders.h    — Embedded SPIR-V bytecode
   shaders/            — GLSL source for SPIR-V compilation
 ```
 
-## Design
+## Overview
 
-### Instance and Device
+Fully implemented Vulkan 1.0 headless backend. Renders offscreen with no surface or swapchain — the application reads back RGBA8 pixels via `mop_viewport_read_color` and blits to its own window (e.g. SDL3 texture). Enable with `make MOP_ENABLE_VULKAN=1`.
 
-Headless Vulkan — no surface or swapchain extensions.  Required extensions:
+## Instance and Device
 
-- None beyond core Vulkan 1.0
+Headless Vulkan — no surface or swapchain extensions required. The backend:
 
-The backend selects the first discrete GPU, falling back to integrated.  A single graphics queue is used.
+1. Creates a `VkInstance` (with validation layers if available)
+2. Selects the first discrete GPU, falling back to integrated
+3. Creates a single-queue `VkDevice` on the graphics queue family
+4. Allocates a command pool, descriptor pool, fence, and staging buffer
 
-### Render Pass
+## Render Pass
 
 Three attachments:
 
-| Attachment | Format              | Usage                |
-| ---------- | ------------------- | -------------------- |
-| Color      | `VK_FORMAT_R8G8B8A8_UNORM` | Color output   |
-| Depth      | `VK_FORMAT_D32_SFLOAT`      | Depth testing  |
-| Object ID  | `VK_FORMAT_R32_UINT`        | Picking buffer |
+| Attachment | Format                    | Usage             |
+| ---------- | ------------------------- | ----------------- |
+| Color      | `VK_FORMAT_R8G8B8A8_SRGB` | sRGB color output |
+| Depth      | `VK_FORMAT_D32_SFLOAT`    | Depth testing     |
+| Object ID  | `VK_FORMAT_R32_UINT`      | Picking buffer    |
 
-### Pipeline
+## Pipeline
 
-- Vertex input: position (vec3), normal (vec3), color (vec4) — matching `MopVertex` layout
-- Push constants: MVP (mat4), model (mat4), objectId (uint)
+- Vertex input: position (vec3), normal (vec3), color (vec4), texcoord (vec2) — matching `MopVertex` layout
+- Flexible vertex stride: respects per-mesh `MopVertexFormat` stride
+- Push constants: MVP matrix (mat4), model matrix (mat4), object ID (uint), render flags
+- UBO: multi-light data (up to `MOP_MAX_LIGHTS`), camera position, ambient, shading mode
 - Polygon mode: `VK_POLYGON_MODE_FILL` or `VK_POLYGON_MODE_LINE`
-- Depth test: enabled, compare `VK_COMPARE_OP_LESS`
-- Cull mode: `VK_CULL_MODE_BACK_BIT`
+- Depth test: configurable per draw call (disabled for gizmo/light indicator overlays)
+- Backface culling: configurable per draw call (disabled for overlays and indicators)
+- Pipeline caching: pipelines are created on demand and cached by configuration hash
 
-### Command Recording
+## Command Recording
 
 Per-frame:
 
-1. `vkBeginCommandBuffer`
-2. `vkCmdBeginRenderPass` (clear values for all attachments)
-3. For each draw call: bind pipeline, push constants, bind vertex/index buffer, `vkCmdDrawIndexed`
-4. `vkCmdEndRenderPass`
-5. Copy color/depth/ID images to host-visible staging buffers
-6. `vkEndCommandBuffer`
-7. `vkQueueSubmit` + `vkQueueWaitIdle`
+1. `vkResetCommandBuffer` + `vkBeginCommandBuffer`
+2. `vkCmdBeginRenderPass` (clear all attachments)
+3. Set viewport and scissor
+4. For each draw call: bind pipeline, push constants, bind vertex/index buffer, `vkCmdDrawIndexed`
+5. `vkCmdEndRenderPass`
+6. Pipeline barrier for color image transfer
+7. `vkCmdCopyImageToBuffer` — color, depth, and object ID to host-visible staging
+8. `vkEndCommandBuffer`
+9. `vkQueueSubmit` + fence wait
 
-### Readback
+## Readback
 
-Map staging buffers to read RGBA8 color, float depth, and uint32 object ID.
+Host-visible staging buffers are persistently mapped. After fence completion, the application reads RGBA8 color, float depth, and uint32 object ID directly from the mapped pointers. Zero-copy on the CPU side.
 
 ## RHI Handle Mapping
 
-| RHI Handle           | Vulkan Concrete Type                              |
-| -------------------- | ------------------------------------------------- |
-| `MopRhiDevice`       | VkInstance, VkDevice, VkQueue, VkCommandPool, pipelines |
-| `MopRhiBuffer`       | VkBuffer + VkDeviceMemory                          |
-| `MopRhiFramebuffer`  | VkFramebuffer + VkImage × 3 + staging buffers      |
+| RHI Handle          | Vulkan Concrete Type                                            |
+| ------------------- | --------------------------------------------------------------- |
+| `MopRhiDevice`      | VkInstance, VkDevice, VkQueue, VkCommandPool, pipelines, UBO    |
+| `MopRhiBuffer`      | VkBuffer + VkDeviceMemory (device-local)                        |
+| `MopRhiFramebuffer` | VkFramebuffer + VkImage x 3 + VkImageView x 3 + staging buffers |
+| `MopRhiTexture`     | VkImage + VkImageView + VkDeviceMemory                          |
+
+## Buffer Updates
+
+Vertex and index data are uploaded through a staging buffer (`MOP_VK_STAGING_SIZE`). The staging buffer is host-visible and persistently mapped. Data is copied to the staging buffer, then `vkCmdCopyBuffer` transfers it to device-local memory with a pipeline barrier for vertex/index access.
+
+## Runtime Selection
+
+```c
+MopViewport *vp = mop_viewport_create(&(MopViewportDesc){
+    .width = 800, .height = 600,
+    .backend = MOP_BACKEND_VULKAN
+});
+```
+
+Or via environment variable in the showcase:
+
+```bash
+MOP_BACKEND=vulkan ./build/mop_showcase
+```

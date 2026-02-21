@@ -35,29 +35,29 @@ The indexing macro used internally:
 
 ## Vector Operations
 
-| Function             | Signature                          | Description           |
-| -------------------- | ---------------------------------- | --------------------- |
-| `mop_vec3_add`       | `(Vec3, Vec3) → Vec3`             | Component-wise add    |
-| `mop_vec3_sub`       | `(Vec3, Vec3) → Vec3`             | Component-wise sub    |
-| `mop_vec3_scale`     | `(Vec3, float) → Vec3`            | Scalar multiply       |
-| `mop_vec3_cross`     | `(Vec3, Vec3) → Vec3`             | Cross product         |
-| `mop_vec3_dot`       | `(Vec3, Vec3) → float`            | Dot product           |
-| `mop_vec3_length`    | `(Vec3) → float`                  | Euclidean length      |
-| `mop_vec3_normalize` | `(Vec3) → Vec3`                   | Unit vector (0 if degenerate) |
+| Function             | Signature              | Description                   |
+| -------------------- | ---------------------- | ----------------------------- |
+| `mop_vec3_add`       | `(Vec3, Vec3) → Vec3`  | Component-wise add            |
+| `mop_vec3_sub`       | `(Vec3, Vec3) → Vec3`  | Component-wise sub            |
+| `mop_vec3_scale`     | `(Vec3, float) → Vec3` | Scalar multiply               |
+| `mop_vec3_cross`     | `(Vec3, Vec3) → Vec3`  | Cross product                 |
+| `mop_vec3_dot`       | `(Vec3, Vec3) → float` | Dot product                   |
+| `mop_vec3_length`    | `(Vec3) → float`       | Euclidean length              |
+| `mop_vec3_normalize` | `(Vec3) → Vec3`        | Unit vector (0 if degenerate) |
 
 ## Matrix Operations
 
-| Function               | Signature                                    | Description                  |
-| ---------------------- | -------------------------------------------- | ---------------------------- |
-| `mop_mat4_identity`    | `() → Mat4`                                  | Identity matrix              |
-| `mop_mat4_perspective` | `(fov_rad, aspect, near, far) → Mat4`        | Symmetric perspective frustum |
-| `mop_mat4_look_at`     | `(eye, center, up) → Mat4`                   | View matrix                  |
-| `mop_mat4_rotate_y`    | `(angle_rad) → Mat4`                         | Rotation around Y axis       |
-| `mop_mat4_rotate_x`    | `(angle_rad) → Mat4`                         | Rotation around X axis       |
-| `mop_mat4_translate`   | `(Vec3) → Mat4`                              | Translation matrix           |
-| `mop_mat4_scale`       | `(Vec3) → Mat4`                              | Non-uniform scale            |
-| `mop_mat4_multiply`    | `(Mat4, Mat4) → Mat4`                        | Matrix product `A * B`       |
-| `mop_mat4_mul_vec4`    | `(Mat4, Vec4) → Vec4`                        | Matrix-vector product `M * v`|
+| Function               | Signature                             | Description                   |
+| ---------------------- | ------------------------------------- | ----------------------------- |
+| `mop_mat4_identity`    | `() → Mat4`                           | Identity matrix               |
+| `mop_mat4_perspective` | `(fov_rad, aspect, near, far) → Mat4` | Symmetric perspective frustum |
+| `mop_mat4_look_at`     | `(eye, center, up) → Mat4`            | View matrix                   |
+| `mop_mat4_rotate_y`    | `(angle_rad) → Mat4`                  | Rotation around Y axis        |
+| `mop_mat4_rotate_x`    | `(angle_rad) → Mat4`                  | Rotation around X axis        |
+| `mop_mat4_translate`   | `(Vec3) → Mat4`                       | Translation matrix            |
+| `mop_mat4_scale`       | `(Vec3) → Mat4`                       | Non-uniform scale             |
+| `mop_mat4_multiply`    | `(Mat4, Mat4) → Mat4`                 | Matrix product `A * B`        |
+| `mop_mat4_mul_vec4`    | `(Mat4, Vec4) → Vec4`                 | Matrix-vector product `M * v` |
 
 ## Perspective Matrix
 

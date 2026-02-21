@@ -21,15 +21,15 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopCameraState {
-    MopVec3 eye;
-    MopVec3 target;
-    MopVec3 up;
-    float   fov_radians;
-    float   near_plane;
-    float   far_plane;
-    float   aspect_ratio;
-    MopMat4 view_matrix;
-    MopMat4 projection_matrix;
+  MopVec3 eye;
+  MopVec3 target;
+  MopVec3 up;
+  float fov_radians;
+  float near_plane;
+  float far_plane;
+  float aspect_ratio;
+  MopMat4 view_matrix;
+  MopMat4 projection_matrix;
 } MopCameraState;
 
 /* Retrieve a complete snapshot of the current camera state.
@@ -40,10 +40,10 @@ MopCameraState mop_viewport_get_camera_state(const MopViewport *vp);
 /* Individual getters */
 MopMat4 mop_viewport_get_view_matrix(const MopViewport *vp);
 MopMat4 mop_viewport_get_projection_matrix(const MopViewport *vp);
-float   mop_viewport_get_fov(const MopViewport *vp);
-float   mop_viewport_get_near_plane(const MopViewport *vp);
-float   mop_viewport_get_far_plane(const MopViewport *vp);
-float   mop_viewport_get_aspect_ratio(const MopViewport *vp);
+float mop_viewport_get_fov(const MopViewport *vp);
+float mop_viewport_get_near_plane(const MopViewport *vp);
+float mop_viewport_get_far_plane(const MopViewport *vp);
+float mop_viewport_get_aspect_ratio(const MopViewport *vp);
 MopVec3 mop_viewport_get_camera_up(const MopViewport *vp);
 
 /* -------------------------------------------------------------------------
@@ -51,8 +51,8 @@ MopVec3 mop_viewport_get_camera_up(const MopViewport *vp);
  * ------------------------------------------------------------------------- */
 
 typedef struct MopRay {
-    MopVec3 origin;
-    MopVec3 direction;
+  MopVec3 origin;
+  MopVec3 direction;
 } MopRay;
 
 /* -------------------------------------------------------------------------

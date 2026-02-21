@@ -9,14 +9,14 @@ tags: ["reference", "picking"]
 
 ## Overview
 
-Every backend maintains a per-pixel `uint32_t` object-ID buffer alongside color and depth.  Picking reads this buffer to identify the object at a given screen coordinate.
+Every backend maintains a per-pixel `uint32_t` object-ID buffer alongside color and depth. Picking reads this buffer to identify the object at a given screen coordinate.
 
 ## Object IDs
 
-| Value  | Meaning                         |
-| ------ | ------------------------------- |
-| `0`    | Background (no object)          |
-| `1+`   | Application-defined object ID   |
+| Value | Meaning                       |
+| ----- | ----------------------------- |
+| `0`   | Background (no object)        |
+| `1+`  | Application-defined object ID |
 
 Multiple meshes may share the same ID if the application treats them as one selectable entity.
 
@@ -50,4 +50,4 @@ if (r.hit) {
 }
 ```
 
-Picking reads the most recently rendered frame.  Render before picking.
+Picking reads the most recently rendered frame. Render before picking.

@@ -34,11 +34,11 @@ typedef struct MopMesh MopMesh;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopMeshDesc {
-    const MopVertex *vertices;
-    uint32_t         vertex_count;
-    const uint32_t  *indices;
-    uint32_t         index_count;
-    uint32_t         object_id;
+  const MopVertex *vertices;
+  uint32_t vertex_count;
+  const uint32_t *indices;
+  uint32_t index_count;
+  uint32_t object_id;
 } MopMeshDesc;
 
 /* -------------------------------------------------------------------------
@@ -55,8 +55,7 @@ typedef struct MopMeshDesc {
  * mesh array is reallocated (when adding more meshes beyond the current
  * capacity).  Do not cache this pointer across calls to mop_viewport_add_mesh.
  * Instead, re-query using mop_viewport_mesh_at or mop_viewport_mesh_by_id. */
-MopMesh *mop_viewport_add_mesh(MopViewport *viewport,
-                               const MopMeshDesc *desc);
+MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc);
 
 /* -------------------------------------------------------------------------
  * Extended mesh descriptor — flexible vertex format
@@ -67,17 +66,17 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport,
  * ------------------------------------------------------------------------- */
 
 typedef struct MopMeshDescEx {
-    const void            *vertex_data;     /* raw interleaved bytes */
-    uint32_t               vertex_count;
-    const uint32_t        *indices;
-    uint32_t               index_count;
-    uint32_t               object_id;
-    const MopVertexFormat *vertex_format;   /* required */
+  const void *vertex_data; /* raw interleaved bytes */
+  uint32_t vertex_count;
+  const uint32_t *indices;
+  uint32_t index_count;
+  uint32_t object_id;
+  const MopVertexFormat *vertex_format; /* required */
 } MopMeshDescEx;
 
 /* Add a mesh with a flexible vertex format.  Returns NULL on failure. */
 MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport,
-                                   const MopMeshDescEx *desc);
+                                  const MopMeshDescEx *desc);
 
 /* Remove a mesh from the viewport and free its resources. */
 void mop_viewport_remove_mesh(MopViewport *viewport, MopMesh *mesh);
@@ -94,7 +93,8 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
 /* Set the model transform for a mesh.  Identity by default. */
 void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform);
 
-/* Set the opacity for a mesh.  1.0 = fully opaque (default), 0.0 = invisible. */
+/* Set the opacity for a mesh.  1.0 = fully opaque (default), 0.0 = invisible.
+ */
 void mop_mesh_set_opacity(MopMesh *mesh, float opacity);
 
 /* Set the blend mode for a mesh.  MOP_BLEND_OPAQUE by default. */
@@ -125,9 +125,9 @@ void mop_mesh_set_texture(MopMesh *mesh, MopTexture *texture);
  * Default: position = (0,0,0), rotation = (0,0,0), scale = (1,1,1).
  * ------------------------------------------------------------------------- */
 
-void    mop_mesh_set_position(MopMesh *mesh, MopVec3 position);
-void    mop_mesh_set_rotation(MopMesh *mesh, MopVec3 rotation);
-void    mop_mesh_set_scale(MopMesh *mesh, MopVec3 scale);
+void mop_mesh_set_position(MopMesh *mesh, MopVec3 position);
+void mop_mesh_set_rotation(MopMesh *mesh, MopVec3 rotation);
+void mop_mesh_set_scale(MopMesh *mesh, MopVec3 scale);
 MopVec3 mop_mesh_get_position(const MopMesh *mesh);
 MopVec3 mop_mesh_get_rotation(const MopMesh *mesh);
 MopVec3 mop_mesh_get_scale(const MopMesh *mesh);
@@ -162,17 +162,17 @@ typedef struct MopInstancedMesh MopInstancedMesh;
 /* Add an instanced mesh to the viewport.  Returns NULL on failure.
  * The engine copies transforms; the application may free its array. */
 MopInstancedMesh *mop_viewport_add_instanced_mesh(MopViewport *viewport,
-                                                    const MopMeshDesc *desc,
-                                                    const MopMat4 *transforms,
-                                                    uint32_t instance_count);
+                                                  const MopMeshDesc *desc,
+                                                  const MopMat4 *transforms,
+                                                  uint32_t instance_count);
 
 /* Update the per-instance transforms of an instanced mesh. */
 void mop_instanced_mesh_update_transforms(MopInstancedMesh *mesh,
-                                           const MopMat4 *transforms,
-                                           uint32_t count);
+                                          const MopMat4 *transforms,
+                                          uint32_t count);
 
 /* Remove an instanced mesh from the viewport and free its resources. */
 void mop_viewport_remove_instanced_mesh(MopViewport *viewport,
-                                         MopInstancedMesh *mesh);
+                                        MopInstancedMesh *mesh);
 
 #endif /* MOP_SCENE_H */

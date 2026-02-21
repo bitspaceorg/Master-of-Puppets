@@ -25,41 +25,41 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef enum MopInputType {
-    /* Pointer (primary / left mouse) */
-    MOP_INPUT_POINTER_DOWN,
-    MOP_INPUT_POINTER_UP,
-    MOP_INPUT_POINTER_MOVE,
+  /* Pointer (primary / left mouse) */
+  MOP_INPUT_POINTER_DOWN,
+  MOP_INPUT_POINTER_UP,
+  MOP_INPUT_POINTER_MOVE,
 
-    /* Secondary (right mouse) */
-    MOP_INPUT_SECONDARY_DOWN,
-    MOP_INPUT_SECONDARY_UP,
+  /* Secondary (right mouse) */
+  MOP_INPUT_SECONDARY_DOWN,
+  MOP_INPUT_SECONDARY_UP,
 
-    /* Scroll wheel */
-    MOP_INPUT_SCROLL,
+  /* Scroll wheel */
+  MOP_INPUT_SCROLL,
 
-    /* Gizmo mode actions */
-    MOP_INPUT_MODE_TRANSLATE,
-    MOP_INPUT_MODE_ROTATE,
-    MOP_INPUT_MODE_SCALE,
+  /* Gizmo mode actions */
+  MOP_INPUT_MODE_TRANSLATE,
+  MOP_INPUT_MODE_ROTATE,
+  MOP_INPUT_MODE_SCALE,
 
-    /* Viewport actions */
-    MOP_INPUT_DESELECT,
-    MOP_INPUT_TOGGLE_WIREFRAME,
-    MOP_INPUT_RESET_VIEW,
+  /* Viewport actions */
+  MOP_INPUT_DESELECT,
+  MOP_INPUT_TOGGLE_WIREFRAME,
+  MOP_INPUT_RESET_VIEW,
 
-    /* Undo/redo */
-    MOP_INPUT_UNDO,
-    MOP_INPUT_REDO,
+  /* Undo/redo */
+  MOP_INPUT_UNDO,
+  MOP_INPUT_REDO,
 
-    /* Camera movement (continuous — send each frame with magnitude) */
-    MOP_INPUT_CAMERA_MOVE,
+  /* Camera movement (continuous — send each frame with magnitude) */
+  MOP_INPUT_CAMERA_MOVE,
 
-    /* Render state — use 'value' field to pass the desired state.
-     * MOP updates its internal state and emits a corresponding output
-     * event so the app can sync its UI. */
-    MOP_INPUT_SET_SHADING,       /* value = MopShadingMode          */
-    MOP_INPUT_SET_RENDER_MODE,   /* value = MopRenderMode           */
-    MOP_INPUT_SET_POST_EFFECTS,  /* value = MopPostEffect bitmask   */
+  /* Render state — use 'value' field to pass the desired state.
+   * MOP updates its internal state and emits a corresponding output
+   * event so the app can sync its UI. */
+  MOP_INPUT_SET_SHADING,      /* value = MopShadingMode          */
+  MOP_INPUT_SET_RENDER_MODE,  /* value = MopRenderMode           */
+  MOP_INPUT_SET_POST_EFFECTS, /* value = MopPostEffect bitmask   */
 } MopInputType;
 
 /* -------------------------------------------------------------------------
@@ -67,11 +67,11 @@ typedef enum MopInputType {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopInputEvent {
-    MopInputType type;
-    float x, y;       /* absolute position (POINTER_DOWN/UP/MOVE) */
-    float dx, dy;     /* relative delta (POINTER_MOVE, CAMERA_MOVE) */
-    float scroll;     /* scroll amount (SCROLL, positive = zoom in) */
-    uint32_t value;   /* generic payload for SET_* events            */
+  MopInputType type;
+  float x, y;     /* absolute position (POINTER_DOWN/UP/MOVE) */
+  float dx, dy;   /* relative delta (POINTER_MOVE, CAMERA_MOVE) */
+  float scroll;   /* scroll amount (SCROLL, positive = zoom in) */
+  uint32_t value; /* generic payload for SET_* events            */
 } MopInputEvent;
 
 /* -------------------------------------------------------------------------
@@ -79,14 +79,14 @@ typedef struct MopInputEvent {
  * ------------------------------------------------------------------------- */
 
 typedef enum MopEventType {
-    MOP_EVENT_NONE = 0,
-    MOP_EVENT_SELECTED,
-    MOP_EVENT_DESELECTED,
-    MOP_EVENT_TRANSFORM_CHANGED,
-    MOP_EVENT_RENDER_MODE_CHANGED,   /* object_id = MopRenderMode      */
-    MOP_EVENT_SHADING_CHANGED,       /* object_id = MopShadingMode     */
-    MOP_EVENT_POST_EFFECTS_CHANGED,  /* object_id = post effect mask   */
-    MOP_EVENT_LIGHT_CHANGED,         /* object_id = 0xFFFE0000 + idx   */
+  MOP_EVENT_NONE = 0,
+  MOP_EVENT_SELECTED,
+  MOP_EVENT_DESELECTED,
+  MOP_EVENT_TRANSFORM_CHANGED,
+  MOP_EVENT_RENDER_MODE_CHANGED,  /* object_id = MopRenderMode      */
+  MOP_EVENT_SHADING_CHANGED,      /* object_id = MopShadingMode     */
+  MOP_EVENT_POST_EFFECTS_CHANGED, /* object_id = post effect mask   */
+  MOP_EVENT_LIGHT_CHANGED,        /* object_id = 0xFFFE0000 + idx   */
 } MopEventType;
 
 /* -------------------------------------------------------------------------
@@ -94,11 +94,11 @@ typedef enum MopEventType {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopEvent {
-    MopEventType type;
-    uint32_t     object_id;
-    MopVec3      position;
-    MopVec3      rotation;
-    MopVec3      scale;
+  MopEventType type;
+  uint32_t object_id;
+  MopVec3 position;
+  MopVec3 rotation;
+  MopVec3 scale;
 } MopEvent;
 
 /* -------------------------------------------------------------------------

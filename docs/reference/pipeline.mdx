@@ -1,0 +1,165 @@
+---
+title: "Render Pipeline"
+description: "Pipeline stage hooks, frame callbacks, and render pass ordering"
+slug: "reference-pipeline"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "pipeline", "rendering"]
+---
+
+## Location
+
+```
+include/mop/pipeline.h   — Public types and function declarations
+src/core/viewport.c       — Hook storage, dispatch_hooks(), mop_viewport_render()
+```
+
+## Overview
+
+The pipeline system lets applications inject custom logic at seven fixed points in the frame lifecycle. Pipeline hooks are the primary extension mechanism for effects that need to run between rendering passes (shadow maps, custom post-processing, GPU readbacks). A simpler frame callback is available for consumers that only need start/end notifications.
+
+## Types
+
+### MopPipelineStage
+
+```c
+typedef enum MopPipelineStage {
+    MOP_STAGE_PRE_RENDER   = 0,
+    MOP_STAGE_POST_CLEAR   = 1,
+    MOP_STAGE_PRE_SCENE    = 2,
+    MOP_STAGE_POST_OPAQUE  = 3,
+    MOP_STAGE_POST_SCENE   = 4,
+    MOP_STAGE_POST_OVERLAY = 5,
+    MOP_STAGE_POST_RENDER  = 6,
+    MOP_STAGE_COUNT        = 7
+} MopPipelineStage;
+```
+
+| Value                    | ID  | Fires...                                                                   |
+| ------------------------ | --- | -------------------------------------------------------------------------- |
+| `MOP_STAGE_PRE_RENDER`   | 0   | Before `frame_begin` -- scene setup, camera sync                           |
+| `MOP_STAGE_POST_CLEAR`   | 1   | After clear, before background gradient                                    |
+| `MOP_STAGE_PRE_SCENE`    | 2   | After background, before the opaque pass                                   |
+| `MOP_STAGE_POST_OPAQUE`  | 3   | After opaque meshes, before the transparent pass                           |
+| `MOP_STAGE_POST_SCENE`   | 4   | After all scene passes (opaque + transparent + instanced), before overlays |
+| `MOP_STAGE_POST_OVERLAY` | 5   | After overlays, before HUD                                                 |
+| `MOP_STAGE_POST_RENDER`  | 6   | After `frame_end` and post-process subsystems                              |
+
+### MopPipelineHookFn
+
+```c
+typedef void (*MopPipelineHookFn)(MopViewport *vp, void *user_data);
+```
+
+Callback signature for pipeline hooks. Receives the viewport and the opaque user pointer passed at registration.
+
+### MopFrameCallbackFn
+
+```c
+typedef void (*MopFrameCallbackFn)(MopViewport *vp,
+                                    bool is_pre_render,
+                                    void *user_data);
+```
+
+Lightweight frame notification callback. Called twice per frame: once with `is_pre_render = true` at the very start (after `MOP_STAGE_PRE_RENDER` hooks), and once with `is_pre_render = false` at the very end (after `MOP_STAGE_POST_RENDER` hooks).
+
+## Functions
+
+### mop_viewport_add_hook
+
+```c
+uint32_t mop_viewport_add_hook(MopViewport *vp,
+                                MopPipelineStage stage,
+                                MopPipelineHookFn fn,
+                                void *user_data);
+```
+
+Registers a hook at the specified pipeline stage. Multiple hooks per stage are supported and execute in registration order. Returns a handle for later removal, or `UINT32_MAX` on failure (NULL viewport, NULL function, invalid stage, or table full).
+
+The maximum number of hooks across all stages is `MOP_MAX_HOOKS` (56, which is 7 stages times 8 per stage). Hooks are stored in a flat array and inactive slots are reused.
+
+### mop_viewport_remove_hook
+
+```c
+void mop_viewport_remove_hook(MopViewport *vp, uint32_t handle);
+```
+
+Removes a previously registered hook by its handle. The slot is marked inactive and its function pointer is set to NULL. The slot can be reused by a future `mop_viewport_add_hook` call. Silently ignores NULL viewports or out-of-range handles.
+
+### mop_viewport_set_frame_callback
+
+```c
+void mop_viewport_set_frame_callback(MopViewport *vp,
+                                      MopFrameCallbackFn fn,
+                                      void *user_data);
+```
+
+Sets the frame callback. Only one frame callback is supported per viewport -- setting a new one replaces the previous. Pass `NULL` for `fn` to disable the callback.
+
+## Render Pass Ordering
+
+The following is the exact sequence of operations inside `mop_viewport_render`, showing where each pipeline stage fires:
+
+```
+ 1. dispatch_hooks(PRE_RENDER)
+ 2. frame_cb(is_pre_render = true)
+ 3. Camera apply + light indicators + gizmo update
+ 4. Transform phase (TRS composition + hierarchy)
+ 5. Subsystem simulate (water, particles)
+ 6. rhi->frame_begin (clear)
+ 7. dispatch_hooks(POST_CLEAR)
+ 8. Background gradient
+ 9. dispatch_hooks(PRE_SCENE)
+10. pass_scene_opaque
+11. dispatch_hooks(POST_OPAQUE)
+12. pass_scene_transparent (back-to-front sorted)
+13. pass_instanced
+14. dispatch_hooks(POST_SCENE)
+15. pass_overlays (built-in + custom)
+16. pass_gizmo
+17. dispatch_hooks(POST_OVERLAY)
+18. pass_hud (axis indicator)
+19. rhi->frame_end
+20. Subsystem post-render (postprocess effects)
+21. dispatch_hooks(POST_RENDER)
+22. frame_cb(is_pre_render = false)
+```
+
+### Stage selection guide
+
+| Use case                            | Recommended stage |
+| ----------------------------------- | ----------------- |
+| Update uniforms / sync game state   | `PRE_RENDER`      |
+| Render a skybox or environment map  | `POST_CLEAR`      |
+| Shadow map generation               | `PRE_SCENE`       |
+| Transparent effect setup (e.g. OIT) | `POST_OPAQUE`     |
+| Screen-space effects / readback     | `POST_SCENE`      |
+| UI compositing after overlays       | `POST_OVERLAY`    |
+| Frame timing / async readback kick  | `POST_RENDER`     |
+
+## Usage
+
+```c
+/* Shadow map hook before scene rendering */
+void shadow_pass(MopViewport *vp, void *user_data) {
+    ShadowState *state = (ShadowState *)user_data;
+    /* Render scene from light's perspective into shadow FBO */
+}
+
+uint32_t shadow_hook = mop_viewport_add_hook(vp, MOP_STAGE_PRE_SCENE,
+                                              shadow_pass, &shadow_state);
+
+/* Frame timing callback */
+void frame_timer(MopViewport *vp, bool is_pre, void *user_data) {
+    double *t = (double *)user_data;
+    if (is_pre) *t = get_time_ms();
+    else        printf("frame: %.2f ms\n", get_time_ms() - *t);
+}
+
+double frame_start;
+mop_viewport_set_frame_callback(vp, frame_timer, &frame_start);
+
+/* Clean up when done */
+mop_viewport_remove_hook(vp, shadow_hook);
+mop_viewport_set_frame_callback(vp, NULL, NULL);
+```

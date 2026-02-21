@@ -44,7 +44,8 @@ static const char *MOP_GL_VERTEX_SHADER =
  *
  * Lambert diffuse lighting with optional texture sampling.
  * Supports blend modes via uniform (0=opaque, 1=alpha, 2=additive, 3=multiply).
- * Outputs to two render targets: color (location 0) and picking ID (location 1).
+ * Outputs to two render targets: color (location 0) and picking ID (location
+ * 1).
  * ------------------------------------------------------------------------- */
 
 static const char *MOP_GL_FRAGMENT_SHADER =
@@ -64,10 +65,11 @@ static const char *MOP_GL_FRAGMENT_SHADER =
     "\n"
     "/* Multi-light support (matches Vulkan fragment shader logic) */\n"
     "uniform int u_num_lights;\n"
-    "uniform vec4 u_light_position[4];\n"   /* xyz + type */
-    "uniform vec4 u_light_direction[4];\n"  /* xyz + pad */
-    "uniform vec4 u_light_color[4];\n"      /* rgb + intensity */
-    "uniform vec4 u_light_params[4];\n"     /* range, inner_cos, outer_cos, active */
+    "uniform vec4 u_light_position[4];\n"  /* xyz + type */
+    "uniform vec4 u_light_direction[4];\n" /* xyz + pad */
+    "uniform vec4 u_light_color[4];\n"     /* rgb + intensity */
+    "uniform vec4 u_light_params[4];\n" /* range, inner_cos, outer_cos, active
+                                         */
     "\n"
     "layout(location = 0) out vec4 frag_color;\n"
     "layout(location = 1) out uint frag_object_id;\n"
@@ -116,7 +118,8 @@ static const char *MOP_GL_FRAGMENT_SHADER =
     "                } else if (cos_angle < inner_cos) {\n"
     "                    float range_val = inner_cos - outer_cos;\n"
     "                    if (range_val > 0.000001) {\n"
-    "                        spot_factor = (cos_angle - outer_cos) / range_val;\n"
+    "                        spot_factor = (cos_angle - outer_cos) / "
+    "range_val;\n"
     "                    }\n"
     "                }\n"
     "                float range = u_light_params[i].x;\n"
@@ -134,7 +137,8 @@ static const char *MOP_GL_FRAGMENT_SHADER =
     "    } else {\n"
     "        vec3 l = normalize(u_light_dir);\n"
     "        float ndotl = max(dot(n, l), 0.0);\n"
-    "        lighting = clamp(u_ambient + (1.0 - u_ambient) * ndotl, 0.0, 1.0);\n"
+    "        lighting = clamp(u_ambient + (1.0 - u_ambient) * ndotl, 0.0, "
+    "1.0);\n"
     "    }\n"
     "\n"
     "    vec4 base = v_color;\n"

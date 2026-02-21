@@ -17,11 +17,11 @@
  * ------------------------------------------------------------------------- */
 
 typedef struct MopVec3 {
-    float x, y, z;
+  float x, y, z;
 } MopVec3;
 
 typedef struct MopVec4 {
-    float x, y, z, w;
+  float x, y, z, w;
 } MopVec4;
 
 /* -------------------------------------------------------------------------
@@ -33,7 +33,7 @@ typedef struct MopVec4 {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopMat4 {
-    float d[16];
+  float d[16];
 } MopMat4;
 
 /* -------------------------------------------------------------------------
@@ -41,7 +41,7 @@ typedef struct MopMat4 {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopColor {
-    float r, g, b, a;
+  float r, g, b, a;
 } MopColor;
 
 /* -------------------------------------------------------------------------
@@ -52,10 +52,10 @@ typedef struct MopColor {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopVertex {
-    MopVec3 position;
-    MopVec3 normal;
-    MopColor color;
-    float u, v;     /* texture coordinates */
+  MopVec3 position;
+  MopVec3 normal;
+  MopColor color;
+  float u, v; /* texture coordinates */
 } MopVertex;
 
 /* -------------------------------------------------------------------------
@@ -63,8 +63,8 @@ typedef struct MopVertex {
  * ------------------------------------------------------------------------- */
 
 typedef enum MopRenderMode {
-    MOP_RENDER_SOLID     = 0,
-    MOP_RENDER_WIREFRAME = 1
+  MOP_RENDER_SOLID = 0,
+  MOP_RENDER_WIREFRAME = 1
 } MopRenderMode;
 
 /* -------------------------------------------------------------------------
@@ -72,10 +72,10 @@ typedef enum MopRenderMode {
  * ------------------------------------------------------------------------- */
 
 typedef enum MopBlendMode {
-    MOP_BLEND_OPAQUE   = 0,
-    MOP_BLEND_ALPHA    = 1,
-    MOP_BLEND_ADDITIVE = 2,
-    MOP_BLEND_MULTIPLY = 3
+  MOP_BLEND_OPAQUE = 0,
+  MOP_BLEND_ALPHA = 1,
+  MOP_BLEND_ADDITIVE = 2,
+  MOP_BLEND_MULTIPLY = 3
 } MopBlendMode;
 
 /* -------------------------------------------------------------------------
@@ -83,8 +83,8 @@ typedef enum MopBlendMode {
  * ------------------------------------------------------------------------- */
 
 typedef enum MopShadingMode {
-    MOP_SHADING_FLAT   = 0,
-    MOP_SHADING_SMOOTH = 1
+  MOP_SHADING_FLAT = 0,
+  MOP_SHADING_SMOOTH = 1
 } MopShadingMode;
 
 /* -------------------------------------------------------------------------
@@ -95,8 +95,8 @@ typedef enum MopShadingMode {
  * ------------------------------------------------------------------------- */
 
 MopMat4 mop_mat4_identity(void);
-MopMat4 mop_mat4_perspective(float fov_radians, float aspect,
-                             float near_plane, float far_plane);
+MopMat4 mop_mat4_perspective(float fov_radians, float aspect, float near_plane,
+                             float far_plane);
 MopMat4 mop_mat4_look_at(MopVec3 eye, MopVec3 center, MopVec3 up);
 MopMat4 mop_mat4_rotate_y(float angle_radians);
 MopMat4 mop_mat4_rotate_x(float angle_radians);
@@ -115,8 +115,8 @@ MopVec3 mop_vec3_add(MopVec3 a, MopVec3 b);
 MopVec3 mop_vec3_sub(MopVec3 a, MopVec3 b);
 MopVec3 mop_vec3_scale(MopVec3 v, float s);
 MopVec3 mop_vec3_cross(MopVec3 a, MopVec3 b);
-float   mop_vec3_dot(MopVec3 a, MopVec3 b);
-float   mop_vec3_length(MopVec3 v);
+float mop_vec3_dot(MopVec3 a, MopVec3 b);
+float mop_vec3_length(MopVec3 v);
 MopVec3 mop_vec3_normalize(MopVec3 v);
 
 #endif /* MOP_TYPES_H */

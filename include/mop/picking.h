@@ -22,9 +22,9 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopPickResult {
-    bool     hit;
-    uint32_t object_id;
-    float    depth;
+  bool hit;
+  uint32_t object_id;
+  float depth;
 } MopPickResult;
 
 /* -------------------------------------------------------------------------

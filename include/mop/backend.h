@@ -19,11 +19,11 @@
  * ------------------------------------------------------------------------- */
 
 typedef enum MopBackendType {
-    MOP_BACKEND_AUTO   = 0,
-    MOP_BACKEND_CPU    = 1,
-    MOP_BACKEND_OPENGL = 2,
-    MOP_BACKEND_VULKAN = 3,
-    MOP_BACKEND_COUNT  = 4
+  MOP_BACKEND_AUTO = 0,
+  MOP_BACKEND_CPU = 1,
+  MOP_BACKEND_OPENGL = 2,
+  MOP_BACKEND_VULKAN = 3,
+  MOP_BACKEND_COUNT = 4
 } MopBackendType;
 
 /* Return a human-readable name for the backend. Never returns NULL. */

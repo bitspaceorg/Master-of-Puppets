@@ -32,22 +32,22 @@ compile_shader() {
     echo "  Compiling $src -> $array_name"
     glslc -O "$src" -o "$spv"
 
-    echo "static const uint32_t ${array_name}[] = {" >> "$OUT_FILE"
+    echo "static const uint32_t ${array_name}[] = {" >>"$OUT_FILE"
 
     # Convert binary SPIR-V to C hex array
-    xxd -i < "$spv" | \
+    xxd -i <"$spv" |
         sed 's/0x\([0-9a-f]\{2\}\), 0x\([0-9a-f]\{2\}\), 0x\([0-9a-f]\{2\}\), 0x\([0-9a-f]\{2\}\)/0x\4\3\2\1/g' \
-        >> "$OUT_FILE"
+            >>"$OUT_FILE"
 
-    echo "};" >> "$OUT_FILE"
-    echo "static const size_t ${array_name}_size = sizeof(${array_name});" >> "$OUT_FILE"
-    echo "" >> "$OUT_FILE"
+    echo "};" >>"$OUT_FILE"
+    echo "static const size_t ${array_name}_size = sizeof(${array_name});" >>"$OUT_FILE"
+    echo "" >>"$OUT_FILE"
 
     rm -f "$spv"
 }
 
 # Write header
-cat > "$OUT_FILE" << 'HEADER'
+cat >"$OUT_FILE" <<'HEADER'
 /*
  * Master of Puppets — Vulkan Backend
  * vulkan_shaders.h — Pre-compiled SPIR-V shader bytecode
@@ -68,10 +68,10 @@ HEADER
 
 echo "Compiling GLSL 450 -> SPIR-V -> C arrays..."
 
-compile_shader "$SCRIPT_DIR/mop_solid.vert"     "mop_solid_vert_spv"
-compile_shader "$SCRIPT_DIR/mop_solid.frag"      "mop_solid_frag_spv"
-compile_shader "$SCRIPT_DIR/mop_wireframe.frag"  "mop_wireframe_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_solid.vert" "mop_solid_vert_spv"
+compile_shader "$SCRIPT_DIR/mop_solid.frag" "mop_solid_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_wireframe.frag" "mop_wireframe_frag_spv"
 
-echo "#endif /* MOP_VK_SHADERS_H */" >> "$OUT_FILE"
+echo "#endif /* MOP_VK_SHADERS_H */" >>"$OUT_FILE"
 
 echo "Done: $OUT_FILE"

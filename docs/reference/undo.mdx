@@ -1,0 +1,143 @@
+---
+title: "Undo/Redo System"
+description: "Ring-buffer undo/redo for mesh TRS transform operations"
+slug: "reference-undo"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "undo", "interaction"]
+---
+
+## Location
+
+```
+include/mop/undo.h      — Public API
+src/interact/undo.c     — Ring buffer TRS snapshot implementation
+```
+
+## Overview
+
+The undo system records mesh TRS (translate, rotate, scale) snapshots before gizmo manipulations and allows the user to step backward and forward through the history. The history is stored in a fixed-size ring buffer of `MOP_UNDO_CAPACITY` (256) entries embedded in the `MopViewport` struct.
+
+## Types
+
+### MopUndoEntry (internal)
+
+```c
+typedef struct MopUndoEntry {
+    uint32_t mesh_index;
+    MopVec3  pos;
+    MopVec3  rot;
+    MopVec3  scale;
+} MopUndoEntry;
+```
+
+Each entry captures the mesh's array index within the viewport and a snapshot of its position, rotation (euler angles in radians), and scale at the time of recording.
+
+## Functions
+
+### mop_viewport_push_undo
+
+```c
+void mop_viewport_push_undo(MopViewport *viewport, MopMesh *mesh);
+```
+
+Record the current TRS state of the given mesh as an undo snapshot. The mesh must belong to the viewport's mesh array. If the ring buffer is full, the oldest entry is silently discarded to make room. Pushing a new entry clears any pending redo history.
+
+### mop_viewport_undo
+
+```c
+void mop_viewport_undo(MopViewport *viewport);
+```
+
+Restore the most recently pushed TRS snapshot. The mesh's current TRS state is swapped into the entry so it becomes the redo state. No-op if the undo stack is empty. After undo, the mesh's `use_trs` flag is set to `true` to ensure the TRS-composed transform is used for rendering.
+
+### mop_viewport_redo
+
+```c
+void mop_viewport_redo(MopViewport *viewport);
+```
+
+Re-apply the most recently undone TRS change. Like undo, the current state is swapped into the entry to enable further undo. No-op if nothing has been undone.
+
+## What Is Tracked
+
+The undo system tracks only mesh TRS values:
+
+| Field   | Type      | Description                        |
+| ------- | --------- | ---------------------------------- |
+| `pos`   | `MopVec3` | World-space position (translation) |
+| `rot`   | `MopVec3` | Euler angles in radians (rotation) |
+| `scale` | `MopVec3` | Scale factors per axis             |
+
+The following are not tracked and cannot be undone:
+
+- Camera position or orientation
+- Light property changes
+- Material or color changes
+- Mesh addition or removal
+- Render mode or shading mode changes
+
+Undo entries are pushed automatically by the input system at the end of a gizmo drag (`MOP_INPUT_POINTER_UP` after `GIZMO_DRAG` state). Light indicator drags do not create undo entries.
+
+## Stack Behavior
+
+The undo/redo system uses a ring buffer with swap-based state management.
+
+### Push
+
+Pushing a new entry writes the mesh's current TRS to the next slot in the ring buffer. If the buffer is at capacity (`MOP_UNDO_CAPACITY` = 256), the head advances, discarding the oldest entry. Every push sets `redo_count` to 0, clearing any redo history.
+
+```
+Before push:  [A] [B] [C]         undo_count=3, redo_count=1, [D] is redo
+After push:   [A] [B] [C] [E]     undo_count=4, redo_count=0
+```
+
+### Undo
+
+Undo pops the top entry, reads the mesh's stored TRS, swaps it with the mesh's current TRS, and increments `redo_count`. This swap means the same entry can be used for redo without allocating additional storage.
+
+```
+Before undo:  [A] [B] [C]     undo_count=3, redo_count=0
+              mesh TRS = T3
+After undo:   [A] [B] [T3]    undo_count=2, redo_count=1
+              mesh TRS = C
+```
+
+### Redo
+
+Redo reads the entry just past the current undo stack top, swaps its TRS with the mesh's current state, and moves the boundary between undo and redo.
+
+```
+Before redo:  [A] [B] [T3]    undo_count=2, redo_count=1
+              mesh TRS = C
+After redo:   [A] [B] [C]     undo_count=3, redo_count=0
+              mesh TRS = T3
+```
+
+### Ring Buffer Wrap
+
+When `undo_count` reaches `MOP_UNDO_CAPACITY`, the next push advances `undo_head`, effectively dropping the oldest entry. This prevents unbounded memory growth while keeping the most recent 256 operations available.
+
+## Usage
+
+```c
+/* Undo is typically driven by the input system automatically.
+ * Manual usage for programmatic transforms: */
+
+/* Before modifying a mesh, snapshot its state */
+mop_viewport_push_undo(viewport, mesh);
+
+/* Apply the modification */
+mesh->position = new_position;
+mesh->rotation = new_rotation;
+mesh->scale_val = new_scale;
+mesh->use_trs = true;
+
+/* Later, undo/redo via input events */
+mop_viewport_input(viewport, &(MopInputEvent){.type = MOP_INPUT_UNDO});
+mop_viewport_input(viewport, &(MopInputEvent){.type = MOP_INPUT_REDO});
+
+/* Or call directly */
+mop_viewport_undo(viewport);
+mop_viewport_redo(viewport);
+```

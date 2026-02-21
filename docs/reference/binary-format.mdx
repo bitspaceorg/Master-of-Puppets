@@ -17,7 +17,7 @@ tools/mop_convert.c        — OBJ-to-.mop converter CLI
 
 ## Overview
 
-The `.mop` format is a compact binary mesh format designed for fast loading.  On POSIX platforms (Linux, macOS) the file is memory-mapped for zero-copy access — vertex and index pointers point directly into the mapped region.  On other platforms a `malloc` + `fread` fallback is used.
+The `.mop` format is a compact binary mesh format designed for fast loading. On POSIX platforms (Linux, macOS) the file is memory-mapped for zero-copy access — vertex and index pointers point directly into the mapped region. On other platforms a `malloc` + `fread` fallback is used.
 
 ## File Layout
 
@@ -49,7 +49,7 @@ Offset  Size  Type       Field           Description
 56      72    uint8_t[]  _reserved       Zero-padded to 128 bytes
 ```
 
-All values are little-endian.  The header is exactly 128 bytes for cache-line alignment.
+All values are little-endian. The header is exactly 128 bytes for cache-line alignment.
 
 ## Vertex Layout
 
@@ -68,7 +68,7 @@ On little-endian platforms the vertex data is used in-place from the mmap'd regi
 
 ## Index Data
 
-Pre-triangulated `uint32_t` indices.  The count is always a multiple of 3.
+Pre-triangulated `uint32_t` indices. The count is always a multiple of 3.
 
 ## API
 
@@ -78,9 +78,10 @@ Pre-triangulated `uint32_t` indices.  The count is always a multiple of 3.
 bool mop_binary_load(const char *path, MopBinaryMesh *out);
 ```
 
-Opens and validates the file.  On POSIX, uses `mmap(MAP_PRIVATE)`.  Sets `out->is_mmapped = true` on success.  On non-POSIX platforms, allocates memory and reads the file.
+Opens and validates the file. On POSIX, uses `mmap(MAP_PRIVATE)`. Sets `out->is_mmapped = true` on success. On non-POSIX platforms, allocates memory and reads the file.
 
 Returns `false` on:
+
 - NULL path
 - File not found or too small
 - Invalid magic number
@@ -93,7 +94,7 @@ Returns `false` on:
 void mop_binary_free(MopBinaryMesh *mesh);
 ```
 
-Unmaps or frees the mesh data.  Zeroes the struct.  Safe to call on a zeroed struct (no-op).
+Unmaps or frees the mesh data. Zeroes the struct. Safe to call on a zeroed struct (no-op).
 
 ### MopBinaryMesh
 

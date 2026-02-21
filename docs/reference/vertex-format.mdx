@@ -1,0 +1,193 @@
+---
+title: "Vertex Format"
+description: "Flexible per-vertex attribute descriptor for interleaved vertex layouts"
+slug: "reference-vertex-format"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "vertex", "format"]
+---
+
+## Location
+
+```
+include/mop/vertex_format.h   — Public types and function declarations
+src/core/vertex_format.c       — Standard format construction and query helpers
+```
+
+## Overview
+
+`MopVertexFormat` describes the layout of interleaved vertex data. It enables arbitrary per-vertex attributes (multiple UV sets, bone weights, tangent frames, custom float channels) without changing the fixed `MopVertex` struct used by existing code. Meshes created with `mop_viewport_add_mesh` use the implicit standard layout; meshes created with `mop_viewport_add_mesh_ex` can specify any custom format.
+
+## Types
+
+### MopAttribSemantic
+
+```c
+typedef enum MopAttribSemantic {
+    MOP_ATTRIB_POSITION  = 0,
+    MOP_ATTRIB_NORMAL    = 1,
+    MOP_ATTRIB_COLOR     = 2,
+    MOP_ATTRIB_TEXCOORD0 = 3,
+    MOP_ATTRIB_TEXCOORD1 = 4,
+    MOP_ATTRIB_TANGENT   = 5,
+    MOP_ATTRIB_JOINTS    = 6,
+    MOP_ATTRIB_WEIGHTS   = 7,
+    MOP_ATTRIB_CUSTOM0   = 8,
+    MOP_ATTRIB_CUSTOM1   = 9,
+    MOP_ATTRIB_CUSTOM2   = 10,
+    MOP_ATTRIB_CUSTOM3   = 11,
+    MOP_ATTRIB_COUNT     = 12
+} MopAttribSemantic;
+```
+
+| Value                  | ID  | Typical Format | Description                           |
+| ---------------------- | --- | -------------- | ------------------------------------- |
+| `MOP_ATTRIB_POSITION`  | 0   | `float3`       | Vertex position (required)            |
+| `MOP_ATTRIB_NORMAL`    | 1   | `float3`       | Vertex normal direction               |
+| `MOP_ATTRIB_COLOR`     | 2   | `float4`       | RGBA vertex color                     |
+| `MOP_ATTRIB_TEXCOORD0` | 3   | `float2`       | Primary UV coordinates                |
+| `MOP_ATTRIB_TEXCOORD1` | 4   | `float2`       | Secondary UV set (lightmaps, etc.)    |
+| `MOP_ATTRIB_TANGENT`   | 5   | `float4`       | Tangent vector (xyz) + handedness (w) |
+| `MOP_ATTRIB_JOINTS`    | 6   | `ubyte4`       | Bone indices for skeletal animation   |
+| `MOP_ATTRIB_WEIGHTS`   | 7   | `float4`       | Bone weights (should sum to 1.0)      |
+| `MOP_ATTRIB_CUSTOM0`   | 8   | `float4`       | Application-defined channel 0         |
+| `MOP_ATTRIB_CUSTOM1`   | 9   | `float4`       | Application-defined channel 1         |
+| `MOP_ATTRIB_CUSTOM2`   | 10  | `float4`       | Application-defined channel 2         |
+| `MOP_ATTRIB_CUSTOM3`   | 11  | `float4`       | Application-defined channel 3         |
+| `MOP_ATTRIB_COUNT`     | 12  | --             | Sentinel (total number of semantics)  |
+
+### MopAttribFormat
+
+```c
+typedef enum MopAttribFormat {
+    MOP_FORMAT_FLOAT  = 0,
+    MOP_FORMAT_FLOAT2 = 1,
+    MOP_FORMAT_FLOAT3 = 2,
+    MOP_FORMAT_FLOAT4 = 3,
+    MOP_FORMAT_UBYTE4 = 4,
+} MopAttribFormat;
+```
+
+| Value               | Byte Size | Component Count | Description                |
+| ------------------- | --------- | --------------- | -------------------------- |
+| `MOP_FORMAT_FLOAT`  | 4         | 1               | Single 32-bit float        |
+| `MOP_FORMAT_FLOAT2` | 8         | 2               | Two 32-bit floats          |
+| `MOP_FORMAT_FLOAT3` | 12        | 3               | Three 32-bit floats        |
+| `MOP_FORMAT_FLOAT4` | 16        | 4               | Four 32-bit floats         |
+| `MOP_FORMAT_UBYTE4` | 4         | 4               | Four packed unsigned bytes |
+
+### MopVertexAttrib
+
+```c
+typedef struct MopVertexAttrib {
+    MopAttribSemantic semantic;
+    MopAttribFormat   format;
+    uint32_t          offset;
+} MopVertexAttrib;
+```
+
+| Field      | Type                | Description                                     |
+| ---------- | ------------------- | ----------------------------------------------- |
+| `semantic` | `MopAttribSemantic` | What this attribute represents                  |
+| `format`   | `MopAttribFormat`   | Data type and component count                   |
+| `offset`   | `uint32_t`          | Byte offset of this attribute within one vertex |
+
+### MopVertexFormat
+
+```c
+#define MOP_MAX_VERTEX_ATTRIBS 12
+
+typedef struct MopVertexFormat {
+    MopVertexAttrib attribs[MOP_MAX_VERTEX_ATTRIBS];
+    uint32_t        attrib_count;
+    uint32_t        stride;
+} MopVertexFormat;
+```
+
+| Field          | Type                  | Description                                        |
+| -------------- | --------------------- | -------------------------------------------------- |
+| `attribs`      | `MopVertexAttrib[12]` | Array of attribute descriptors                     |
+| `attrib_count` | `uint32_t`            | Number of active entries in `attribs`              |
+| `stride`       | `uint32_t`            | Total bytes per vertex (distance between vertices) |
+
+## Functions
+
+### mop_vertex_format_standard
+
+```c
+MopVertexFormat mop_vertex_format_standard(void);
+```
+
+Returns the format that matches the fixed `MopVertex` struct layout:
+
+| Index | Semantic    | Format   | Offset | Size     |
+| ----- | ----------- | -------- | ------ | -------- |
+| 0     | `POSITION`  | `float3` | 0      | 12 bytes |
+| 1     | `NORMAL`    | `float3` | 12     | 12 bytes |
+| 2     | `COLOR`     | `float4` | 24     | 16 bytes |
+| 3     | `TEXCOORD0` | `float2` | 40     | 8 bytes  |
+
+Total stride: 48 bytes, matching `sizeof(MopVertex)`.
+
+### mop_vertex_format_find
+
+```c
+const MopVertexAttrib *mop_vertex_format_find(const MopVertexFormat *fmt,
+                                               MopAttribSemantic sem);
+```
+
+Searches for an attribute with the given semantic in the format. Returns a pointer to the matching `MopVertexAttrib`, or `NULL` if the semantic is not present or `fmt` is NULL. The search is linear over `attrib_count` entries.
+
+### mop_attrib_format_size
+
+```c
+uint32_t mop_attrib_format_size(MopAttribFormat fmt);
+```
+
+Returns the byte size of a given attribute format. Returns 0 for unrecognized format values.
+
+| Format              | Returns |
+| ------------------- | ------- |
+| `MOP_FORMAT_FLOAT`  | 4       |
+| `MOP_FORMAT_FLOAT2` | 8       |
+| `MOP_FORMAT_FLOAT3` | 12      |
+| `MOP_FORMAT_FLOAT4` | 16      |
+| `MOP_FORMAT_UBYTE4` | 4       |
+
+## Standard MopVertex vs Flex Format
+
+The standard `MopVertex` struct (position + normal + color + uv) is sufficient for most meshes. Use `mop_viewport_add_mesh` with `MopMeshDesc` for these cases -- the engine assumes the standard layout implicitly and no `MopVertexFormat` allocation is needed.
+
+Use the flex format with `mop_viewport_add_mesh_ex` and `MopMeshDescEx` when a mesh requires attributes beyond the standard set:
+
+- **Multiple UV sets** (lightmaps, detail maps): add `TEXCOORD1`
+- **Skeletal animation**: add `JOINTS` (ubyte4) + `WEIGHTS` (float4)
+- **Normal mapping**: add `TANGENT` (float4 with handedness in w)
+- **Application-specific data**: add `CUSTOM0` through `CUSTOM3`
+
+When using flex format, the engine heap-allocates a copy of the `MopVertexFormat` and stores it on the mesh. This copy is freed automatically on mesh removal or viewport destruction.
+
+## Usage
+
+```c
+/* Define a skinned vertex format */
+MopVertexFormat skinned = {
+    .attrib_count = 6,
+    .stride       = 64,
+    .attribs = {
+        [0] = { MOP_ATTRIB_POSITION, MOP_FORMAT_FLOAT3,  0 },
+        [1] = { MOP_ATTRIB_NORMAL,   MOP_FORMAT_FLOAT3, 12 },
+        [2] = { MOP_ATTRIB_COLOR,    MOP_FORMAT_FLOAT4, 24 },
+        [3] = { MOP_ATTRIB_TEXCOORD0,MOP_FORMAT_FLOAT2, 40 },
+        [4] = { MOP_ATTRIB_JOINTS,   MOP_FORMAT_UBYTE4, 48 },
+        [5] = { MOP_ATTRIB_WEIGHTS,  MOP_FORMAT_FLOAT4, 52 },
+    }
+};
+
+/* Look up a specific attribute */
+const MopVertexAttrib *weights = mop_vertex_format_find(&skinned,
+                                                         MOP_ATTRIB_WEIGHTS);
+if (weights) {
+    uint32_t size = mop_attrib_format_size(weights->format); /* 16 */
+}
+```

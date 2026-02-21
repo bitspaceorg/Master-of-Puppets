@@ -11,11 +11,11 @@ tags: ["architecture", "threading"]
 
 ### Single-Threaded Per Viewport
 
-One viewport instance must be accessed from exactly one thread at a time.  The engine provides no internal synchronization.
+One viewport instance must be accessed from exactly one thread at a time. The engine provides no internal synchronization.
 
 ### No Global Mutable State
 
-The engine has zero global variables.  All state is encapsulated in `MopViewport` and its owned resources.  This means:
+The engine has zero global variables. All state is encapsulated in `MopViewport` and its owned resources. This means:
 
 - Multiple viewports can exist simultaneously
 - Each viewport can be operated from a different thread (one thread per viewport)
@@ -23,27 +23,27 @@ The engine has zero global variables.  All state is encapsulated in `MopViewport
 
 ### Backend State Isolation
 
-Each backend creates its own `MopRhiDevice`.  There is no shared state between device instances.  For the CPU backend, this is trivially true.  For GPU backends, each device may share the underlying driver — but the engine does not coordinate access.
+Each backend creates its own `MopRhiDevice`. There is no shared state between device instances. For the CPU backend, this is trivially true. For GPU backends, each device may share the underlying driver — but the engine does not coordinate access.
 
 ## Thread Safety Summary
 
-| Operation                          | Thread-safe?    |
-| ---------------------------------- | --------------- |
-| Create two viewports on two threads | Yes            |
-| Render two viewports concurrently   | Yes            |
-| Render and pick on the same viewport concurrently | No |
-| Create mesh and render concurrently on same viewport | No |
-| Access different viewports from different threads | Yes |
-| Access same viewport from different threads | No |
+| Operation                                            | Thread-safe? |
+| ---------------------------------------------------- | ------------ |
+| Create two viewports on two threads                  | Yes          |
+| Render two viewports concurrently                    | Yes          |
+| Render and pick on the same viewport concurrently    | No           |
+| Create mesh and render concurrently on same viewport | No           |
+| Access different viewports from different threads    | Yes          |
+| Access same viewport from different threads          | No           |
 
 ## Future: Multi-Threaded Command Recording
 
 The architecture is designed to support future multi-threaded command recording:
 
-1. The RHI `draw` function takes all data by value (the `MopRhiDrawCall` struct).  No shared mutable state is referenced.
+1. The RHI `draw` function takes all data by value (the `MopRhiDrawCall` struct). No shared mutable state is referenced.
 
 2. The viewport mesh array is read-only during rendering — transforms are set before `mop_viewport_render`, not during.
 
 3. A future `MopRhiCommandList` abstraction could allow recording draw calls on multiple threads, with a single-threaded submit phase.
 
-The current architecture does not implement this — but it does not preclude it.  No architectural changes are needed to add command lists.
+The current architecture does not implement this — but it does not preclude it. No architectural changes are needed to add command lists.

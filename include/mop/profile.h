@@ -26,12 +26,12 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopFrameStats {
-    double   frame_time_ms;
-    double   clear_ms;
-    double   transform_ms;
-    double   rasterize_ms;
-    uint32_t triangle_count;
-    uint32_t pixel_count;
+  double frame_time_ms;
+  double clear_ms;
+  double transform_ms;
+  double rasterize_ms;
+  uint32_t triangle_count;
+  uint32_t pixel_count;
 } MopFrameStats;
 
 /* Retrieve the statistics from the most recent mop_viewport_render call.

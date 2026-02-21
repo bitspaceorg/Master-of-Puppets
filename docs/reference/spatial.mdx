@@ -1,0 +1,297 @@
+---
+title: "Spatial Query API"
+description: "Axis-aligned bounding boxes, frustum culling, ray intersection, and CPU raycast"
+slug: "reference-spatial"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "spatial", "query"]
+---
+
+## Location
+
+```
+include/mop/spatial.h   — Public API
+src/query/spatial.c     — Implementation
+```
+
+## Overview
+
+The spatial query API provides geometric primitives and algorithms for bounding box computation, frustum culling, ray intersection, and full CPU raycasting. It builds on the camera query API for ray generation and operates on the same scene mesh filter used by the query and snapshot APIs.
+
+## Types
+
+### MopAABB
+
+```c
+typedef struct MopAABB {
+    MopVec3 min;
+    MopVec3 max;
+} MopAABB;
+```
+
+An axis-aligned bounding box defined by its minimum and maximum corner points.
+
+| Field | Type      | Description                              |
+| ----- | --------- | ---------------------------------------- |
+| `min` | `MopVec3` | Minimum corner (smallest x, y, z values) |
+| `max` | `MopVec3` | Maximum corner (largest x, y, z values)  |
+
+### MopFrustum
+
+```c
+typedef struct MopFrustum {
+    MopVec4 planes[6];
+} MopFrustum;
+```
+
+Six clipping planes extracted from the view-projection matrix using the Gribb-Hartmann method. Each plane is represented as `(a, b, c, d)` where `ax + by + cz + d >= 0` defines the inside half-space. Planes are normalized so that `(a, b, c)` is a unit vector.
+
+| Index | Plane  |
+| ----- | ------ |
+| `0`   | Left   |
+| `1`   | Right  |
+| `2`   | Bottom |
+| `3`   | Top    |
+| `4`   | Near   |
+| `5`   | Far    |
+
+### MopRayHit
+
+```c
+typedef struct MopRayHit {
+    bool     hit;
+    uint32_t object_id;
+    float    distance;
+    MopVec3  position;
+    MopVec3  normal;
+    float    u, v;
+    uint32_t triangle_index;
+} MopRayHit;
+```
+
+Result of a CPU raycast operation.
+
+| Field            | Type       | Description                                              |
+| ---------------- | ---------- | -------------------------------------------------------- |
+| `hit`            | `bool`     | `true` if the ray hit any scene geometry                 |
+| `object_id`      | `uint32_t` | Object ID of the hit mesh (valid only when `hit`)        |
+| `distance`       | `float`    | Distance from ray origin to hit point                    |
+| `position`       | `MopVec3`  | World-space hit position                                 |
+| `normal`         | `MopVec3`  | World-space face normal at the hit point (normalized)    |
+| `u`, `v`         | `float`    | Barycentric coordinates of the hit within the triangle   |
+| `triangle_index` | `uint32_t` | Index of the hit triangle within the mesh's index buffer |
+
+## Functions
+
+### Per-Mesh AABB
+
+#### mop_mesh_get_aabb_local
+
+```c
+MopAABB mop_mesh_get_aabb_local(const MopMesh *mesh, const MopViewport *vp);
+```
+
+Computes the local-space AABB by scanning all vertex positions. Supports both standard `MopVertex` layout and flexible vertex formats (by locating the `MOP_ATTRIB_POSITION` attribute). Returns a zero-sized AABB at the origin if the mesh has no vertex data.
+
+#### mop_mesh_get_aabb_world
+
+```c
+MopAABB mop_mesh_get_aabb_world(const MopMesh *mesh, const MopViewport *vp);
+```
+
+Computes the world-space AABB by transforming all 8 corners of the local AABB by the mesh's `world_transform` and re-fitting an axis-aligned box around the results. This produces a conservative (potentially larger) bounding box that is correct for any rotation or scale.
+
+### AABB Utilities
+
+#### mop_aabb_union
+
+```c
+MopAABB mop_aabb_union(MopAABB a, MopAABB b);
+```
+
+Returns the smallest AABB that contains both `a` and `b`. Computes component-wise min/max across both boxes.
+
+#### mop_aabb_overlaps
+
+```c
+bool mop_aabb_overlaps(MopAABB a, MopAABB b);
+```
+
+Returns `true` if the two AABBs overlap on all three axes. Uses the separating axis test: returns `false` if any axis has a gap between the two boxes.
+
+#### mop_aabb_center
+
+```c
+MopVec3 mop_aabb_center(MopAABB box);
+```
+
+Returns the center point of the AABB, computed as `(min + max) * 0.5`.
+
+#### mop_aabb_extents
+
+```c
+MopVec3 mop_aabb_extents(MopAABB box);
+```
+
+Returns the half-extents of the AABB, computed as `(max - min) * 0.5`. Each component is the distance from the center to the face along that axis.
+
+#### mop_aabb_surface_area
+
+```c
+float mop_aabb_surface_area(MopAABB box);
+```
+
+Returns the total surface area of the AABB: `2 * (dx*dy + dy*dz + dz*dx)` where `dx`, `dy`, `dz` are the full dimensions. Useful as a cost heuristic for BVH construction (surface area heuristic).
+
+### Frustum
+
+#### mop_viewport_get_frustum
+
+```c
+MopFrustum mop_viewport_get_frustum(const MopViewport *vp);
+```
+
+Extracts the six frustum planes from the viewport's current view-projection matrix using the Gribb-Hartmann method. Each plane is normalized so that the `(x, y, z)` components form a unit normal. Returns zero-initialized planes if `vp` is `NULL`.
+
+#### mop_frustum_test_aabb
+
+```c
+int mop_frustum_test_aabb(const MopFrustum *frustum, MopAABB box);
+```
+
+Tests an AABB against the frustum using the positive/negative vertex approach.
+
+| Return | Meaning                                               |
+| ------ | ----------------------------------------------------- |
+| `1`    | AABB is fully inside the frustum                      |
+| `0`    | AABB intersects the frustum (partially visible)       |
+| `-1`   | AABB is fully outside the frustum (completely culled) |
+
+Returns `-1` if `frustum` is `NULL`.
+
+### Ray Intersection
+
+#### mop_ray_intersect_aabb
+
+```c
+bool mop_ray_intersect_aabb(MopRay ray, MopAABB box,
+                             float *t_near, float *t_far);
+```
+
+Ray-AABB intersection using the slab method. Returns `true` if the ray intersects the box. On hit, `t_near` and `t_far` are set to the entry and exit distances along the ray. Either output pointer may be `NULL` if the caller does not need that value. Handles rays parallel to slab boundaries by checking if the origin is inside the slab range.
+
+#### mop_ray_intersect_triangle
+
+```c
+bool mop_ray_intersect_triangle(MopRay ray,
+                                 MopVec3 v0, MopVec3 v1, MopVec3 v2,
+                                 float *t, float *u, float *v);
+```
+
+Ray-triangle intersection using the Moller-Trumbore algorithm. Returns `true` if the ray hits the front or back face of the triangle at a positive distance (t >= 1e-6). On hit, `t` receives the distance, and `u`/`v` receive the barycentric coordinates. Each output pointer may be `NULL`. The third barycentric coordinate is `w = 1 - u - v`.
+
+### Scene-Level Queries
+
+#### mop_viewport_get_scene_aabb
+
+```c
+MopAABB mop_viewport_get_scene_aabb(const MopViewport *vp);
+```
+
+Computes the world-space AABB encompassing all scene meshes by taking the union of each mesh's world-space AABB. Returns a zero-sized AABB at the origin if there are no scene meshes or `vp` is `NULL`.
+
+#### mop_viewport_visible_mesh_count
+
+```c
+uint32_t mop_viewport_visible_mesh_count(const MopViewport *vp);
+```
+
+Returns the number of scene meshes whose world-space AABB is at least partially inside the current view frustum (i.e., `mop_frustum_test_aabb` returns `>= 0`). Returns `0` if `vp` is `NULL`.
+
+### CPU Raycast
+
+#### mop_viewport_raycast
+
+```c
+MopRayHit mop_viewport_raycast(const MopViewport *vp,
+                                float pixel_x, float pixel_y);
+```
+
+Casts a ray from a pixel position (top-left origin) through the scene. Internally calls `mop_viewport_pixel_to_ray` to generate the ray, then delegates to `mop_viewport_raycast_ray`. Returns a `MopRayHit` with `hit = false` if `vp` is `NULL` or nothing is hit.
+
+#### mop_viewport_raycast_ray
+
+```c
+MopRayHit mop_viewport_raycast_ray(const MopViewport *vp, MopRay ray);
+```
+
+Casts an arbitrary world-space ray through the scene using a two-phase approach:
+
+1. **Broadphase:** Tests the ray against each scene mesh's world-space AABB using `mop_ray_intersect_aabb`. Meshes whose AABB is missed or whose nearest AABB hit is farther than the current closest triangle hit are skipped.
+2. **Narrowphase:** For each candidate mesh, transforms every triangle to world space and tests with `mop_ray_intersect_triangle`. Tracks the closest hit across all meshes.
+
+The face normal at the hit point is computed from the world-space triangle edges via cross product, not interpolated from vertex normals. Meshes using flexible vertex formats are currently skipped in the narrowphase.
+
+Returns a `MopRayHit` with `hit = false` if nothing is intersected.
+
+## Frustum Culling Usage Pattern
+
+Frustum culling is the most common spatial query. The typical pattern extracts the frustum once per frame and tests each mesh's world AABB before submitting draw calls or performing other per-mesh work.
+
+### Basic per-frame culling
+
+```c
+mop_viewport_render(viewport);
+MopFrustum frustum = mop_viewport_get_frustum(viewport);
+
+uint32_t n = mop_viewport_mesh_count(viewport);
+for (uint32_t i = 0; i < n; i++) {
+    MopMesh *mesh = mop_viewport_mesh_at(viewport, i);
+    MopAABB wb = mop_mesh_get_aabb_world(mesh, viewport);
+
+    int result = mop_frustum_test_aabb(&frustum, wb);
+    if (result == -1) continue;  /* fully outside -- skip */
+
+    /* result == 1: fully inside, result == 0: partially visible */
+    process_visible_mesh(mesh, result == 1);
+}
+```
+
+### Quick visibility count
+
+```c
+uint32_t total = mop_viewport_mesh_count(viewport);
+uint32_t visible = mop_viewport_visible_mesh_count(viewport);
+printf("Visible: %u / %u meshes\n", visible, total);
+```
+
+### Combining with raycast for picking
+
+```c
+/* User clicked at (mx, my) */
+MopRayHit hit = mop_viewport_raycast(viewport, mx, my);
+if (hit.hit) {
+    printf("Hit object %u at distance %.2f\n", hit.object_id, hit.distance);
+    printf("World position: (%.2f, %.2f, %.2f)\n",
+           hit.position.x, hit.position.y, hit.position.z);
+    printf("Triangle %u, barycentric (%.3f, %.3f, %.3f)\n",
+           hit.triangle_index, hit.u, hit.v, 1.0f - hit.u - hit.v);
+}
+```
+
+### BVH acceleration
+
+For scenes with many meshes, the linear AABB broadphase in `mop_viewport_raycast_ray` may be insufficient. Build a BVH over the scene's world-space AABBs using `mop_aabb_surface_area` as the SAH cost metric:
+
+```c
+MopSceneSnapshot snap = mop_viewport_snapshot(vp);
+uint32_t n = mop_snapshot_mesh_count(&snap);
+
+/* Collect world AABBs for BVH construction */
+for (uint32_t i = 0; i < n; i++) {
+    MopMesh *mesh = mop_viewport_mesh_at(vp, i);
+    MopAABB wb = mop_mesh_get_aabb_world(mesh, vp);
+    float cost = mop_aabb_surface_area(wb);
+    bvh_insert(my_bvh, i, wb, cost);
+}
+```

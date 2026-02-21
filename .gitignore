@@ -2,3 +2,5 @@ build/
 *.ppm
 .DS_Store
 examples/build/
+__pycache__/
+.direnv

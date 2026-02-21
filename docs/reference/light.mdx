@@ -1,0 +1,173 @@
+---
+title: "Light System"
+description: "Multi-light management with directional, point, and spot light types"
+slug: "reference-light"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "light", "shading"]
+---
+
+## Location
+
+```
+include/mop/light.h   — Public types and API
+src/core/light.c      — Light management and visual indicators
+```
+
+## Overview
+
+The light system supports up to `MOP_MAX_LIGHTS` (8) simultaneous lights per viewport. Each light is described by a `MopLight` struct that specifies type, position, direction, color, intensity, and attenuation parameters. Light slot 0 defaults to a directional light matching the legacy `mop_viewport_set_light_dir()` / `set_ambient()` behavior.
+
+## Types
+
+### MopLightType
+
+```c
+typedef enum MopLightType {
+    MOP_LIGHT_DIRECTIONAL = 0,
+    MOP_LIGHT_POINT       = 1,
+    MOP_LIGHT_SPOT        = 2,
+} MopLightType;
+```
+
+### MopLight
+
+```c
+typedef struct MopLight {
+    MopLightType type;
+    MopVec3      position;       /* world space (point/spot) */
+    MopVec3      direction;      /* normalized (directional/spot) */
+    MopColor     color;          /* linear RGB */
+    float        intensity;      /* multiplier */
+    float        range;          /* attenuation cutoff (point/spot) */
+    float        spot_inner_cos; /* cos(inner_cone_angle) */
+    float        spot_outer_cos; /* cos(outer_cone_angle) */
+    bool         active;
+    bool         cast_shadows;   /* reserved for future use */
+} MopLight;
+```
+
+## Light Type Field Usage
+
+Not all fields are meaningful for every light type. The table below shows which fields each type uses.
+
+| Field            | Directional | Point | Spot |
+| ---------------- | :---------: | :---: | :--: |
+| `position`       |             |   x   |  x   |
+| `direction`      |      x      |       |  x   |
+| `color`          |      x      |   x   |  x   |
+| `intensity`      |      x      |   x   |  x   |
+| `range`          |             |   x   |  x   |
+| `spot_inner_cos` |             |       |  x   |
+| `spot_outer_cos` |             |       |  x   |
+
+## Functions
+
+### mop_viewport_add_light
+
+```c
+MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc);
+```
+
+Add a light to the viewport by copying the provided descriptor into the first available slot. Returns a pointer to the internal light slot, or `NULL` if all `MOP_MAX_LIGHTS` slots are occupied. The returned pointer can be passed to the per-light setter functions.
+
+### mop_viewport_remove_light
+
+```c
+void mop_viewport_remove_light(MopViewport *vp, MopLight *light);
+```
+
+Remove a light by setting its `active` flag to `false`. The slot becomes available for reuse by a subsequent `mop_viewport_add_light` call. Any associated light indicator mesh is destroyed on the next frame update.
+
+### mop_light_set_position
+
+```c
+void mop_light_set_position(MopLight *l, MopVec3 pos);
+```
+
+Set the world-space position of a point or spot light. Has no visual effect on directional lights (which use only direction).
+
+### mop_light_set_direction
+
+```c
+void mop_light_set_direction(MopLight *l, MopVec3 dir);
+```
+
+Set the normalized direction vector for a directional or spot light. The caller is responsible for providing a normalized vector.
+
+### mop_light_set_color
+
+```c
+void mop_light_set_color(MopLight *l, MopColor color);
+```
+
+Set the linear RGB color of the light. Color is expected in linear space, not sRGB.
+
+### mop_light_set_intensity
+
+```c
+void mop_light_set_intensity(MopLight *l, float intensity);
+```
+
+Set the intensity multiplier for the light. Final contribution is `color * intensity`.
+
+### mop_viewport_light_count
+
+```c
+uint32_t mop_viewport_light_count(const MopViewport *vp);
+```
+
+Return the number of currently active lights in the viewport. This walks all `MOP_MAX_LIGHTS` slots and counts those with `active == true`.
+
+## Light Indicators
+
+Each active light automatically creates a small visual indicator mesh in the viewport. These indicators are managed internally by `mop_light_update_indicators()`, which is called every frame.
+
+### Object ID Range
+
+Light indicators use object IDs in the range `0xFFFE0000` to `0xFFFEFFFF`. The object ID for light at slot index `i` is `0xFFFE0000 + i`. This range sits between scene meshes (`0x1`--`0xFFFDFFFF`) and gizmo handles (`0xFFFF0000`--`0xFFFFFFFF`).
+
+### Indicator Geometry
+
+| Light Type  | Shape      | Description                                                 |
+| ----------- | ---------- | ----------------------------------------------------------- |
+| Directional | Arrow      | Cylinder + cone pointing along the light direction          |
+| Point       | Octahedron | Small octahedron at the light's world position              |
+| Spot        | Cone       | Open cone at the light's position, oriented along direction |
+
+### Screen-Space Scaling
+
+Indicators use the same screen-space scaling technique as gizmo handles. The scale factor is `distance_to_camera * 0.12` (slightly smaller than gizmo handles at `0.18`), clamped to a minimum of `0.03`. This keeps indicators at a constant visual size regardless of camera distance.
+
+### Interaction
+
+Light indicators are selectable via the picking system. Clicking an indicator selects it and shows a translate-only gizmo. Dragging the gizmo moves the light:
+
+- **Point/Spot lights**: position is translated directly.
+- **Directional lights**: the indicator orbits around the camera target at a fixed radius of 3 units, and the light direction is derived from the new position relative to the target.
+
+Transform changes emit a `MOP_EVENT_LIGHT_CHANGED` event with `object_id` set to `0xFFFE0000 + light_index`. Rotate and scale modes are suppressed for light indicators.
+
+## Usage
+
+```c
+/* Add a point light */
+MopLight desc = {
+    .type      = MOP_LIGHT_POINT,
+    .position  = {2.0f, 3.0f, 1.0f},
+    .color     = {1.0f, 0.9f, 0.8f, 1.0f},
+    .intensity = 1.5f,
+    .range     = 10.0f,
+};
+MopLight *light = mop_viewport_add_light(viewport, &desc);
+
+/* Update at runtime */
+mop_light_set_position(light, (MopVec3){4.0f, 3.0f, 1.0f});
+mop_light_set_intensity(light, 2.0f);
+
+/* Query active count */
+uint32_t n = mop_viewport_light_count(viewport);
+
+/* Remove when done */
+mop_viewport_remove_light(viewport, light);
+```

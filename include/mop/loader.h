@@ -19,13 +19,13 @@
  * ------------------------------------------------------------------------- */
 
 typedef struct MopObjMesh {
-    MopVertex *vertices;
-    uint32_t   vertex_count;
-    uint32_t  *indices;
-    uint32_t   index_count;
-    MopVec3    bbox_min;      /* axis-aligned bounding box (post-normalization) */
-    MopVec3    bbox_max;
-    MopVec3   *tangents;      /* parallel array to vertices (for normal mapping) */
+  MopVertex *vertices;
+  uint32_t vertex_count;
+  uint32_t *indices;
+  uint32_t index_count;
+  MopVec3 bbox_min; /* axis-aligned bounding box (post-normalization) */
+  MopVec3 bbox_max;
+  MopVec3 *tangents; /* parallel array to vertices (for normal mapping) */
 } MopObjMesh;
 
 /* Load a Wavefront .obj file.  Supports v, vn, and f directives.
@@ -47,15 +47,15 @@ void mop_obj_free(MopObjMesh *mesh);
  * ------------------------------------------------------------------------- */
 
 typedef struct MopBinaryMesh {
-    MopVertex  *vertices;
-    uint32_t    vertex_count;
-    uint32_t   *indices;
-    uint32_t    index_count;
-    MopVec3     bbox_min, bbox_max;
-    uint32_t    submesh_count;
-    bool        is_mmapped;
-    void       *_mmap_base;
-    size_t      _mmap_size;
+  MopVertex *vertices;
+  uint32_t vertex_count;
+  uint32_t *indices;
+  uint32_t index_count;
+  MopVec3 bbox_min, bbox_max;
+  uint32_t submesh_count;
+  bool is_mmapped;
+  void *_mmap_base;
+  size_t _mmap_size;
 } MopBinaryMesh;
 
 bool mop_binary_load(const char *path, MopBinaryMesh *out);
@@ -70,23 +70,23 @@ void mop_binary_free(MopBinaryMesh *mesh);
  * ------------------------------------------------------------------------- */
 
 typedef enum MopMeshFormat {
-    MOP_FORMAT_UNKNOWN = 0,
-    MOP_FORMAT_OBJ,
-    MOP_FORMAT_MOP_BINARY,
+  MOP_FORMAT_UNKNOWN = 0,
+  MOP_FORMAT_OBJ,
+  MOP_FORMAT_MOP_BINARY,
 } MopMeshFormat;
 
 typedef struct MopLoadedMesh {
-    MopVertex     *vertices;
-    uint32_t       vertex_count;
-    uint32_t      *indices;
-    uint32_t       index_count;
-    MopVec3        bbox_min, bbox_max;
-    MopVec3       *tangents;        /* NULL if format doesn't provide them */
-    /* internal — used by mop_load_free for correct cleanup */
-    MopMeshFormat  _format;
-    bool           _mmapped;
-    void          *_mmap_base;
-    size_t         _mmap_size;
+  MopVertex *vertices;
+  uint32_t vertex_count;
+  uint32_t *indices;
+  uint32_t index_count;
+  MopVec3 bbox_min, bbox_max;
+  MopVec3 *tangents; /* NULL if format doesn't provide them */
+  /* internal — used by mop_load_free for correct cleanup */
+  MopMeshFormat _format;
+  bool _mmapped;
+  void *_mmap_base;
+  size_t _mmap_size;
 } MopLoadedMesh;
 
 /* Load a mesh file, dispatching by extension (.obj, .mop).

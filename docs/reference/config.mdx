@@ -1,0 +1,167 @@
+---
+title: "Lua Configuration"
+description: "Lua-based configuration system for viewport, camera, and keybindings"
+slug: "reference-config"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "config", "lua"]
+---
+
+## Location
+
+```
+include/mop/config.h   — Public API (with inline stubs when Lua is absent)
+src/config/config.c     — Implementation (compiled only with MOP_HAS_LUA)
+```
+
+## Overview
+
+The config module loads a Lua script that declares `viewport`, `camera`, and `keymap` tables, then applies those settings to a `MopViewport`. It also provides keymap lookup and action-to-input resolution for building configurable key bindings. The entire module is gated by the `MOP_HAS_LUA` preprocessor define; when Lua is not available, all functions are replaced by inline stubs that return failure values.
+
+**Build flag:** `make MOP_ENABLE_LUA=1` sets the `MOP_HAS_LUA` define.
+
+## Types
+
+### MopConfig (opaque)
+
+```c
+typedef struct MopConfig MopConfig;
+```
+
+Opaque handle representing a loaded configuration. Internally stores parsed viewport dimensions, clear color, camera parameters, and up to 64 key bindings. Created by `mop_config_load`, freed by `mop_config_free`.
+
+The internal layout (not part of the public API):
+
+| Internal field    | Source table | Description                         |
+| ----------------- | ------------ | ----------------------------------- |
+| `width`, `height` | `viewport`   | Viewport dimensions in pixels       |
+| `clear_color`     | `viewport`   | Background color `{r, g, b, a}`     |
+| `cam_distance`    | `camera`     | Orbit camera distance               |
+| `cam_yaw`         | `camera`     | Orbit camera yaw (radians)          |
+| `cam_pitch`       | `camera`     | Orbit camera pitch (radians)        |
+| `cam_target`      | `camera`     | Camera look-at target `{x, y, z}`   |
+| `cam_fov`         | `camera`     | Field of view in degrees            |
+| `keybinds[]`      | `keymap`     | Up to 64 key-to-action string pairs |
+
+Each field has an associated `has_*` boolean, so only fields present in the config file are applied.
+
+## Functions
+
+### mop_config_load
+
+```c
+MopConfig *mop_config_load(const char *path);
+```
+
+Loads and executes a Lua configuration file. Creates a new Lua state, runs the script, and extracts values from the `viewport`, `camera`, and `keymap` global tables. Returns an opaque `MopConfig` pointer on success, or `NULL` on failure (file not found, Lua parse error, out of memory). The caller must free the result with `mop_config_free`.
+
+### mop_config_free
+
+```c
+void mop_config_free(MopConfig *cfg);
+```
+
+Frees all resources associated with a loaded configuration. The Lua state is closed during `mop_config_load`, so this only frees the `MopConfig` struct itself. Safe to call with `NULL`.
+
+### mop_config_apply
+
+```c
+void mop_config_apply(const MopConfig *cfg, MopViewport *vp);
+```
+
+Applies loaded configuration values to a viewport. Only fields that were present in the config file are modified; omitted fields are left unchanged. This function calls `mop_viewport_resize` (if width and height are set), `mop_viewport_set_clear_color` (if clear color is set), and directly sets camera struct fields (distance, yaw, pitch, target, fov) on the viewport.
+
+### mop_config_get_action
+
+```c
+const char *mop_config_get_action(const MopConfig *cfg, const char *key);
+```
+
+Looks up the action string bound to a key name in the config's `keymap` table. Key names are platform-agnostic lowercase strings (e.g. `"t"`, `"escape"`, `"space"`). Returns the action string if a binding exists, or `NULL` if the key is not bound. The returned pointer is valid for the lifetime of the `MopConfig`.
+
+### mop_config_resolve_input
+
+```c
+int mop_config_resolve_input(const char *action);
+```
+
+Converts a well-known action string to the corresponding `MopInputType` enum value. Returns `-1` for unrecognized (application-specific) action strings.
+
+Well-known action mappings:
+
+| Action string  | MopInputType                 |
+| -------------- | ---------------------------- |
+| `"translate"`  | `MOP_INPUT_MODE_TRANSLATE`   |
+| `"rotate"`     | `MOP_INPUT_MODE_ROTATE`      |
+| `"scale"`      | `MOP_INPUT_MODE_SCALE`       |
+| `"wireframe"`  | `MOP_INPUT_TOGGLE_WIREFRAME` |
+| `"reset_view"` | `MOP_INPUT_RESET_VIEW`       |
+| `"deselect"`   | `MOP_INPUT_DESELECT`         |
+
+## Lua Table Structure
+
+A configuration file is a plain Lua script that sets global tables. All tables and all fields within them are optional.
+
+```lua
+viewport = {
+    width       = 960,
+    height      = 720,
+    clear_color = { 0.12, 0.12, 0.16, 1.0 }
+}
+
+camera = {
+    distance = 4.5,
+    yaw      = 0.6,
+    pitch    = 0.4,
+    target   = { 0, 0.4, 0 },
+    fov      = 60
+}
+
+keymap = {
+    t       = "translate",
+    g       = "rotate",
+    e       = "scale",
+    w       = "wireframe",
+    escape  = "deselect",
+    r       = "reset_view"
+}
+```
+
+| Table      | Fields                                      | Notes                        |
+| ---------- | ------------------------------------------- | ---------------------------- |
+| `viewport` | `width`, `height`, `clear_color`            | `clear_color` is `{r,g,b,a}` |
+| `camera`   | `distance`, `yaw`, `pitch`, `target`, `fov` | `target` is `{x,y,z}`        |
+| `keymap`   | Any string key mapped to an action string   | Max 64 bindings              |
+
+## Stub Behavior
+
+When `MOP_HAS_LUA` is not defined, all functions are replaced by `static inline` stubs:
+
+- `mop_config_load` returns `NULL`
+- `mop_config_free` and `mop_config_apply` are no-ops
+- `mop_config_get_action` returns `NULL`
+- `mop_config_resolve_input` returns `-1`
+
+This allows application code to call config functions unconditionally without `#ifdef` guards.
+
+## Usage
+
+```c
+MopConfig *cfg = mop_config_load("init.lua");
+if (cfg) {
+    mop_config_apply(cfg, viewport);
+
+    /* Query a keybinding */
+    const char *action = mop_config_get_action(cfg, "t");
+    if (action) {
+        int input = mop_config_resolve_input(action);
+        if (input >= 0) {
+            /* Built-in MOP input type */
+        } else {
+            /* App-specific action, handle manually */
+        }
+    }
+
+    mop_config_free(cfg);
+}
+```

@@ -1,0 +1,154 @@
+---
+title: "Logging"
+description: "Callback-based logging with compile-time and runtime level filtering"
+slug: "reference-log"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "log", "utility"]
+---
+
+## Location
+
+```
+include/mop/log.h   — Public API, macros, log level enum
+src/util/log.c       — Default stderr callback, level filtering, dispatch
+```
+
+## Overview
+
+The log module provides four severity levels, a callback-based output sink, and both compile-time and runtime level filtering. By default all log messages are written to `stderr` with file and line information. Applications can install a custom callback to redirect output to any destination.
+
+## Types
+
+### MopLogLevel
+
+```c
+typedef enum MopLogLevel {
+    MOP_LOG_DEBUG = 0,
+    MOP_LOG_INFO  = 1,
+    MOP_LOG_WARN  = 2,
+    MOP_LOG_ERROR = 3
+} MopLogLevel;
+```
+
+| Value           | Numeric | Purpose                          |
+| --------------- | ------- | -------------------------------- |
+| `MOP_LOG_DEBUG` | `0`     | Verbose diagnostic information   |
+| `MOP_LOG_INFO`  | `1`     | General informational messages   |
+| `MOP_LOG_WARN`  | `2`     | Potential problems or anomalies  |
+| `MOP_LOG_ERROR` | `3`     | Errors that may affect operation |
+
+### MopLogCallback
+
+```c
+typedef void (*MopLogCallback)(MopLogLevel level, const char *file,
+                               int line, const char *fmt, va_list args);
+```
+
+Function pointer type for custom log sinks. Parameters:
+
+| Parameter | Description                      |
+| --------- | -------------------------------- |
+| `level`   | Severity level of the message    |
+| `file`    | Source file name (`__FILE__`)    |
+| `line`    | Source line number (`__LINE__`)  |
+| `fmt`     | `printf`-style format string     |
+| `args`    | Variadic argument list for `fmt` |
+
+## Functions
+
+### mop_log_set_callback
+
+```c
+void mop_log_set_callback(MopLogCallback cb);
+```
+
+Installs a custom log callback. All subsequent log messages will be dispatched to `cb` instead of the default stderr sink. Pass `NULL` to restore the default behavior. Only one callback is active at a time; setting a new callback replaces the previous one.
+
+### mop_log_set_level
+
+```c
+void mop_log_set_level(MopLogLevel level);
+```
+
+Sets the minimum runtime log level. Messages with a severity below `level` are silently discarded. The default level is `MOP_LOG_DEBUG` (all messages pass). This is a runtime filter and can be changed at any time.
+
+### mop_log_emit
+
+```c
+void mop_log_emit(MopLogLevel level, const char *file, int line,
+                  const char *fmt, ...);
+```
+
+Internal log dispatch function. Checks the message against the runtime level, then forwards to the active callback (or the default stderr sink). Application code should use the convenience macros below rather than calling this directly.
+
+## Logging Macros
+
+```c
+MOP_DEBUG(fmt, ...)
+MOP_INFO(fmt, ...)
+MOP_WARN(fmt, ...)
+MOP_ERROR(fmt, ...)
+```
+
+Each macro expands to a call to `mop_log_emit` with the appropriate `MopLogLevel`, `__FILE__`, and `__LINE__`. Arguments follow `printf` format conventions.
+
+```c
+MOP_DEBUG("loaded %u vertices from %s", mesh.vertex_count, path);
+MOP_WARN("resolution %d capped to %d", resolution, max);
+MOP_ERROR("failed to open file: %s", path);
+```
+
+## Compile-Time Filtering
+
+Define `MOP_LOG_MIN_LEVEL` before including `mop/log.h` (or via compiler flags) to strip log calls at compile time. Macros for levels below the minimum expand to `((void)0)`, eliminating both the format string and the function call.
+
+| `MOP_LOG_MIN_LEVEL` | Active macros                                    |
+| ------------------- | ------------------------------------------------ |
+| `0` (default)       | `MOP_DEBUG`, `MOP_INFO`, `MOP_WARN`, `MOP_ERROR` |
+| `1`                 | `MOP_INFO`, `MOP_WARN`, `MOP_ERROR`              |
+| `2`                 | `MOP_WARN`, `MOP_ERROR`                          |
+| `3`                 | `MOP_ERROR`                                      |
+
+Example: compiling with `-DMOP_LOG_MIN_LEVEL=2` strips all debug and info logging from the binary.
+
+## Default Behavior
+
+When no custom callback is installed, log messages are written to `stderr` in this format:
+
+```
+[mop:LEVEL] file.c:42: message text
+```
+
+The level label is right-padded to 5 characters (`DEBUG`, `INFO `, `WARN `, `ERROR`) for aligned output.
+
+## Custom Callback
+
+```c
+void my_logger(MopLogLevel level, const char *file,
+               int line, const char *fmt, va_list args) {
+    /* Write to application log, GUI console, file, etc. */
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    app_log_write(level, buf);
+}
+
+/* Install */
+mop_log_set_callback(my_logger);
+
+/* Restore default */
+mop_log_set_callback(NULL);
+```
+
+## Usage
+
+```c
+/* Set runtime level to suppress debug messages */
+mop_log_set_level(MOP_LOG_INFO);
+
+/* Log at various levels */
+MOP_DEBUG("this will be suppressed");
+MOP_INFO("viewport created: %dx%d", width, height);
+MOP_WARN("framerate below 30 fps: %.1f", fps);
+MOP_ERROR("RHI buffer creation failed");
+```

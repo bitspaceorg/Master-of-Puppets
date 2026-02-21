@@ -8,8 +8,8 @@
 #ifndef MOP_VIEWPORT_H
 #define MOP_VIEWPORT_H
 
-#include "types.h"
 #include "backend.h"
+#include "types.h"
 
 /* -------------------------------------------------------------------------
  * Opaque handle — application never sees internals
@@ -25,9 +25,9 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopViewportDesc {
-    int            width;
-    int            height;
-    MopBackendType backend;
+  int width;
+  int height;
+  MopBackendType backend;
 } MopViewportDesc;
 
 /* -------------------------------------------------------------------------
@@ -71,10 +71,9 @@ void mop_viewport_set_shading(MopViewport *viewport, MopShadingMode mode);
  * perspective frustum derived from the parameters below.
  * ------------------------------------------------------------------------- */
 
-void mop_viewport_set_camera(MopViewport *viewport,
-                             MopVec3 eye, MopVec3 target, MopVec3 up,
-                             float fov_degrees,
-                             float near_plane, float far_plane);
+void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
+                             MopVec3 up, float fov_degrees, float near_plane,
+                             float far_plane);
 
 /* -------------------------------------------------------------------------
  * Rendering
@@ -100,8 +99,8 @@ void mop_viewport_render(MopViewport *viewport);
  * Returns NULL if readback is not available.
  * ------------------------------------------------------------------------- */
 
-const uint8_t *mop_viewport_read_color(MopViewport *viewport,
-                                       int *out_width, int *out_height);
+const uint8_t *mop_viewport_read_color(MopViewport *viewport, int *out_width,
+                                       int *out_height);
 
 /* Return the active backend type. */
 MopBackendType mop_viewport_get_backend(MopViewport *viewport);

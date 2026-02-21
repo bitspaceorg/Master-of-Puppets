@@ -1,0 +1,224 @@
+---
+title: "Gizmo System"
+description: "TRS gizmo handles for interactive object manipulation"
+slug: "reference-gizmo"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "gizmo", "interaction"]
+---
+
+## Location
+
+```
+include/mop/gizmo.h     — Public types and API
+src/interact/gizmo.c    — Handle geometry, picking, and drag math
+```
+
+## Overview
+
+Gizmos are visual handles -- translate arrows, rotate rings, and scale cubes -- that the application attaches to selected objects. The gizmo module manages handle geometry and computes transform deltas from mouse input; the application owns TRS state and applies deltas itself. `MopGizmo` is an opaque handle allocated per viewport.
+
+## Types
+
+### MopGizmoMode
+
+```c
+typedef enum MopGizmoMode {
+    MOP_GIZMO_TRANSLATE = 0,
+    MOP_GIZMO_ROTATE    = 1,
+    MOP_GIZMO_SCALE     = 2
+} MopGizmoMode;
+```
+
+### MopGizmoAxis
+
+```c
+typedef enum MopGizmoAxis {
+    MOP_GIZMO_AXIS_NONE   = -1,
+    MOP_GIZMO_AXIS_X      = 0,
+    MOP_GIZMO_AXIS_Y      = 1,
+    MOP_GIZMO_AXIS_Z      = 2,
+    MOP_GIZMO_AXIS_CENTER = 3
+} MopGizmoAxis;
+```
+
+### MopGizmoDelta
+
+```c
+typedef struct MopGizmoDelta {
+    MopVec3 translate;
+    MopVec3 rotate;
+    MopVec3 scale;
+} MopGizmoDelta;
+```
+
+Only the field corresponding to the active gizmo mode is meaningful after a `mop_gizmo_drag` call:
+
+| Mode        | Meaningful Field | Semantics                    |
+| ----------- | ---------------- | ---------------------------- |
+| `TRANSLATE` | `translate`      | World-space offset           |
+| `ROTATE`    | `rotate`         | Euler angle delta in radians |
+| `SCALE`     | `scale`          | Additive scale delta         |
+
+### MopGizmo (opaque)
+
+```c
+typedef struct MopGizmo MopGizmo;
+```
+
+The internal structure holds a pointer to the owning viewport, the current mode, position, rotation, visibility flag, four handle mesh pointers (X, Y, Z, Center), and a reference to the target mesh made semi-transparent on show. Handle IDs are allocated from the `0xFFFF0000` range with 8 IDs reserved per gizmo instance.
+
+## Functions
+
+### mop_gizmo_create
+
+```c
+MopGizmo *mop_gizmo_create(MopViewport *viewport);
+```
+
+Allocate and initialize a gizmo bound to the given viewport. Returns `NULL` on failure. The gizmo starts hidden in translate mode. Each created instance is assigned a unique set of handle object IDs from the `0xFFFF0000+` range.
+
+### mop_gizmo_destroy
+
+```c
+void mop_gizmo_destroy(MopGizmo *gizmo);
+```
+
+Destroy the gizmo and remove any visible handle meshes from the viewport. Restores target mesh opacity if it was modified.
+
+### mop_gizmo_show
+
+```c
+void mop_gizmo_show(MopGizmo *gizmo, MopVec3 position, MopMesh *target);
+```
+
+Create handle meshes in the viewport at the given position. If `target` is non-`NULL`, the target mesh's opacity is reduced to `0.4` so the center crosshair remains visible through it. Opacity is restored automatically by `mop_gizmo_hide` or by a subsequent `mop_gizmo_show` with a different target. Pass `NULL` to skip auto-transparency (used for light indicators).
+
+### mop_gizmo_hide
+
+```c
+void mop_gizmo_hide(MopGizmo *gizmo);
+```
+
+Remove all handle meshes from the viewport and restore the target mesh's opacity to `1.0`.
+
+### mop_gizmo_set_mode
+
+```c
+void mop_gizmo_set_mode(MopGizmo *gizmo, MopGizmoMode mode);
+```
+
+Switch the gizmo to a different handle type. If the gizmo is visible, the current handles are destroyed and new ones are created immediately. No-op if the mode is already active.
+
+### mop_gizmo_get_mode
+
+```c
+MopGizmoMode mop_gizmo_get_mode(const MopGizmo *gizmo);
+```
+
+Return the current gizmo mode. Returns `MOP_GIZMO_TRANSLATE` if `gizmo` is `NULL`.
+
+### mop_gizmo_set_position
+
+```c
+void mop_gizmo_set_position(MopGizmo *gizmo, MopVec3 position);
+```
+
+Move the gizmo to a new world-space position. If visible, all handle transforms are updated immediately.
+
+### mop_gizmo_set_rotation
+
+```c
+void mop_gizmo_set_rotation(MopGizmo *gizmo, MopVec3 rotation);
+```
+
+Set the gizmo's local-space euler angles (radians). This aligns the gizmo axes with the selected object's orientation. If visible, handle transforms are updated immediately.
+
+### mop_gizmo_update
+
+```c
+void mop_gizmo_update(MopGizmo *gizmo);
+```
+
+Refresh handle transforms. Call each frame to keep the gizmo at a constant screen size as the camera moves. No-op if the gizmo is not visible.
+
+### mop_gizmo_test_pick
+
+```c
+MopGizmoAxis mop_gizmo_test_pick(const MopGizmo *gizmo, MopPickResult pick);
+```
+
+Test whether a pick result hit one of this gizmo's handles. Returns the axis that was hit, or `MOP_GIZMO_AXIS_NONE` if the pick did not hit the gizmo. The function compares `pick.object_id` against the gizmo's four handle IDs.
+
+### mop_gizmo_drag
+
+```c
+MopGizmoDelta mop_gizmo_drag(const MopGizmo *gizmo, MopGizmoAxis axis,
+                              float mouse_dx, float mouse_dy);
+```
+
+Given the active axis and mouse delta in pixels, compute a transform delta using the viewport's current camera state for screen-space projection. The application applies the returned delta to its own TRS state. Returns a zeroed delta if `gizmo` is `NULL` or `axis` is `MOP_GIZMO_AXIS_NONE`.
+
+Drag behavior by mode:
+
+| Mode        | Single Axis                                                              | Center Axis                     |
+| ----------- | ------------------------------------------------------------------------ | ------------------------------- |
+| `TRANSLATE` | Project mouse onto rotated axis screen direction; move along world axis  | Move on camera plane            |
+| `ROTATE`    | Project mouse perpendicular to axis screen direction; rotate around axis | Rotate around Y axis            |
+| `SCALE`     | Project mouse onto axis screen direction; scale along that axis          | Uniform scale on all three axes |
+
+## Procedural Geometry
+
+Handle meshes are generated procedurally at creation time -- no external model files are loaded. Each handle type is composed from geometric primitives:
+
+| Mode        | Axis Handles          | Center Handle                               |
+| ----------- | --------------------- | ------------------------------------------- |
+| `TRANSLATE` | Cylinder + cone arrow | Octahedron + 3 semi-transparent plane quads |
+| `ROTATE`    | Torus ring            | Octahedron + 3 semi-transparent plane quads |
+| `SCALE`     | Cylinder + cube       | Octahedron + 3 semi-transparent plane quads |
+
+Handle colors follow a fixed scheme: X = red `(0.9, 0.15, 0.15)`, Y = green `(0.15, 0.9, 0.15)`, Z = blue `(0.15, 0.15, 0.9)`, Center = yellow `(0.95, 0.85, 0.15)`.
+
+The center handle includes three semi-transparent plane quads (XY, XZ, YZ) for planar movement, each tinted with the blend of its two axis colors.
+
+## Screen-Space Scaling
+
+Gizmo handles maintain a roughly constant visual size regardless of camera distance. Each frame, the scale factor is computed as:
+
+```
+scale = max(distance_to_camera * 0.18, 0.05)
+```
+
+The handle geometry was designed for a reference camera distance of approximately 4.5 units. The scale is applied uniformly to all three axes and combined with the gizmo's rotation and translation before being set on each handle mesh's transform.
+
+## Usage
+
+```c
+/* Create gizmo for a viewport */
+MopGizmo *gizmo = mop_gizmo_create(viewport);
+
+/* Show on a selected mesh */
+mop_gizmo_show(gizmo, mesh_position, mesh);
+mop_gizmo_set_rotation(gizmo, mesh_rotation);
+
+/* Switch to rotate mode */
+mop_gizmo_set_mode(gizmo, MOP_GIZMO_ROTATE);
+
+/* Each frame: keep screen size stable */
+mop_gizmo_update(gizmo);
+
+/* On pointer down: test pick */
+MopPickResult pick = mop_viewport_pick(viewport, mx, my);
+MopGizmoAxis axis = mop_gizmo_test_pick(gizmo, pick);
+if (axis != MOP_GIZMO_AXIS_NONE) {
+    /* Begin drag */
+}
+
+/* During drag: compute and apply delta */
+MopGizmoDelta delta = mop_gizmo_drag(gizmo, axis, mouse_dx, mouse_dy);
+mesh_position = mop_vec3_add(mesh_position, delta.translate);
+
+/* Hide and clean up */
+mop_gizmo_hide(gizmo);
+mop_gizmo_destroy(gizmo);
+```

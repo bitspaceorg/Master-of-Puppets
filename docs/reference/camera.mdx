@@ -1,0 +1,155 @@
+---
+title: "Orbit Camera"
+description: "Spherical orbit camera for interactive 3D viewport navigation"
+slug: "reference-camera"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "camera", "interaction"]
+---
+
+## Location
+
+```
+include/mop/camera.h     — Public struct and API
+src/interact/camera.c    — Spherical orbit camera implementation
+```
+
+## Overview
+
+`MopOrbitCamera` is a spherical camera that orbits around a target point using yaw, pitch, and distance parameters. It provides the standard 3D viewport controls: orbit (left-drag), pan (right-drag), zoom (scroll), and WASD-style movement on the world XZ plane.
+
+## Types
+
+### MopOrbitCamera
+
+```c
+typedef struct MopOrbitCamera {
+    MopVec3 target;       /* look-at point */
+    float   distance;     /* distance from target */
+    float   yaw;          /* horizontal angle (radians) */
+    float   pitch;        /* vertical angle (radians), clamped to +/- max_pitch */
+    float   fov_degrees;  /* vertical field of view */
+    float   near_plane;
+    float   far_plane;
+    float   max_pitch;    /* pitch clamp (default 1.5 rad, approx 86 degrees) */
+} MopOrbitCamera;
+```
+
+| Field         | Type      | Default       | Description                                       |
+| ------------- | --------- | ------------- | ------------------------------------------------- |
+| `target`      | `MopVec3` | `(0, 0.4, 0)` | World-space point the camera looks at             |
+| `distance`    | `float`   | `4.5`         | Distance from `target` along the orbit sphere     |
+| `yaw`         | `float`   | `0.6`         | Horizontal angle in radians                       |
+| `pitch`       | `float`   | `0.4`         | Vertical angle in radians                         |
+| `fov_degrees` | `float`   | `60.0`        | Vertical field of view in degrees                 |
+| `near_plane`  | `float`   | `0.1`         | Near clipping plane                               |
+| `far_plane`   | `float`   | `100.0`       | Far clipping plane                                |
+| `max_pitch`   | `float`   | `1.5`         | Maximum absolute pitch in radians (approx 86 deg) |
+
+## Functions
+
+### mop_orbit_camera_default
+
+```c
+MopOrbitCamera mop_orbit_camera_default(void);
+```
+
+Return a camera with sensible defaults: target at `(0, 0.4, 0)`, distance `4.5`, yaw `0.6`, pitch `0.4`, FOV 60 degrees, near `0.1`, far `100.0`, max pitch `1.5` radians.
+
+### mop_orbit_camera_eye
+
+```c
+MopVec3 mop_orbit_camera_eye(const MopOrbitCamera *cam);
+```
+
+Compute the eye (camera) position from the current orbit state using spherical coordinates:
+
+```
+eye.x = target.x + distance * cos(pitch) * sin(yaw)
+eye.y = target.y + distance * sin(pitch)
+eye.z = target.z + distance * cos(pitch) * cos(yaw)
+```
+
+### mop_orbit_camera_apply
+
+```c
+void mop_orbit_camera_apply(const MopOrbitCamera *cam, MopViewport *vp);
+```
+
+Push the camera state into the viewport by calling `mop_viewport_set_camera` with the computed eye position, the target, an up vector of `(0, 1, 0)`, and the camera's FOV, near, and far values. Call this once per frame after processing input.
+
+### mop_orbit_camera_orbit
+
+```c
+void mop_orbit_camera_orbit(MopOrbitCamera *cam, float dx, float dy,
+                             float sensitivity);
+```
+
+Rotate the camera around the target point. `dx` and `dy` are mouse deltas in pixels. The typical sensitivity value used by the input system is `0.005` radians per pixel. Yaw is decremented by `dx * sensitivity`; pitch is incremented by `dy * sensitivity` and clamped to `+/- max_pitch`.
+
+### mop_orbit_camera_pan
+
+```c
+void mop_orbit_camera_pan(MopOrbitCamera *cam, float dx, float dy);
+```
+
+Translate the target point in the camera's local right/up plane. `dx` and `dy` are mouse deltas in pixels. The translation scales automatically with camera distance (`distance * 0.003`), so panning feels proportional regardless of zoom level. The target moves along the world X/Z plane based on the camera's current yaw, and vertically along world Y.
+
+### mop_orbit_camera_zoom
+
+```c
+void mop_orbit_camera_zoom(MopOrbitCamera *cam, float delta);
+```
+
+Adjust the orbit distance. `delta` is the scroll amount (positive = zoom in). The distance is decremented by `delta * 0.3` and clamped to the range `[0.5, 500.0]`.
+
+### mop_orbit_camera_move
+
+```c
+void mop_orbit_camera_move(MopOrbitCamera *cam, float forward, float right);
+```
+
+Move the target on the world XZ plane along the camera's facing direction. `forward` and `right` are signed amounts (typically `dt * speed`). Movement is projected onto the XZ plane using the camera's yaw, ignoring pitch. This provides WASD-style navigation.
+
+## Orbit Model
+
+The camera uses a spherical coordinate system centered on the `target` point. The eye position lies on a sphere of radius `distance`, parameterized by `yaw` (horizontal angle, rotation around world Y) and `pitch` (elevation above/below the horizontal plane).
+
+```
+          Y (up)
+          |
+          |   * eye
+          |  /
+          | / distance
+          |/ pitch
+  target--+-----------> (yaw=0 faces +Z)
+         /
+        /
+       Z
+```
+
+- **Yaw** rotates the camera around the world Y axis. At yaw = 0, the camera faces along +Z.
+- **Pitch** tilts the camera above or below the horizontal plane. Clamped to `+/- max_pitch` to prevent flipping.
+- **Distance** controls how far the eye is from the target. Zoom adjusts this value.
+- **Target** is the look-at point. Pan and WASD movement translate the target.
+
+All camera manipulations update the `MopOrbitCamera` struct fields directly. The viewport receives the computed matrices only when `mop_orbit_camera_apply` is called.
+
+## Usage
+
+```c
+/* Initialize with defaults */
+MopOrbitCamera cam = mop_orbit_camera_default();
+
+/* In the event loop */
+mop_orbit_camera_orbit(&cam, mouse_dx, mouse_dy, 0.005f);  /* left drag */
+mop_orbit_camera_pan(&cam, mouse_dx, mouse_dy);            /* right drag */
+mop_orbit_camera_zoom(&cam, scroll_delta);                  /* scroll */
+mop_orbit_camera_move(&cam, forward, right);                /* WASD keys */
+
+/* Push to viewport each frame */
+mop_orbit_camera_apply(&cam, viewport);
+
+/* Query eye position for custom logic */
+MopVec3 eye = mop_orbit_camera_eye(&cam);
+```

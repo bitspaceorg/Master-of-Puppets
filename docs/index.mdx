@@ -3,11 +3,11 @@ title: "Master of Puppets Documentation"
 description: "Knowledge base for the Master of Puppets viewport rendering engine"
 slug: "index"
 author: "rahulmnavneeth"
-date: "19 FEB 2026"
+date: "21 FEB 2026"
 tags: ["index", "overview"]
 ---
 
-Master of Puppets is a backend-agnostic viewport rendering engine written in C11.  It provides a clean, layered architecture for rendering 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API.
+Master of Puppets is a backend-agnostic viewport rendering engine written in C11. It provides a clean, layered architecture for rendering 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API.
 
 ## Documentation
 
@@ -19,38 +19,45 @@ Master of Puppets is a backend-agnostic viewport rendering engine written in C11
 
 ## Architecture
 
-| Page                                                | Topic                                              |
-| --------------------------------------------------- | -------------------------------------------------- |
-| [System Architecture](architecture)                 | Layer diagram, dependency rules, design rationale  |
-| [Layer Separation](architecture-layers)              | Strict boundary rules between layers               |
-| [Frame Lifecycle](architecture-frame-lifecycle)      | What happens during a single render frame          |
-| [Threading Model](architecture-threading)            | Single-threaded guarantees, future-proofing        |
-| [Memory Ownership](architecture-memory)              | Who allocates, who frees, no implicit transfers    |
-| [Extension Strategy](architecture-extension)         | How to add backends, features, and subsystems      |
-| [Scene Graph](architecture-scene-graph)              | Hierarchical transforms and parent-child meshes    |
+| Page                                            | Topic                                             |
+| ----------------------------------------------- | ------------------------------------------------- |
+| [System Architecture](architecture)             | Layer diagram, dependency rules, design rationale |
+| [Layer Separation](architecture-layers)         | Strict boundary rules between layers              |
+| [Frame Lifecycle](architecture-frame-lifecycle) | What happens during a single render frame         |
+| [Threading Model](architecture-threading)       | Single-threaded guarantees, future-proofing       |
+| [Memory Ownership](architecture-memory)         | Who allocates, who frees, no implicit transfers   |
+| [Extension Strategy](architecture-extension)    | How to add backends, features, and subsystems     |
+| [Scene Graph](architecture-scene-graph)         | Hierarchical transforms and parent-child meshes   |
 
 ## Reference — Module Map
 
-| Layer            | Modules                      | Docs                                              |
-| ---------------- | ---------------------------- | ------------------------------------------------- |
-| **Public**       | types, viewport, scene, pick | [API Contracts](reference-api)                    |
-| **RHI**          | Device, Buffer, Framebuffer  | [RHI](reference-rhi)                              |
-| **CPU**          | Rasterizer, Backend          | [CPU Backend](reference-backend-cpu)              |
-| **OpenGL**       | Backend                      | [OpenGL Backend](reference-backend-opengl)        |
-| **Vulkan**       | Backend                      | [Vulkan Backend](reference-backend-vulkan)        |
-| **Math**         | Vec3, Mat4, transforms       | [Math](reference-math)                            |
-| **Picking**      | Object ID buffer             | [Picking](reference-picking)                      |
-| **Material**     | PBR-inspired materials       | [Material System](reference-material)             |
-| **Particles**    | Emitters, presets            | [Particle System](reference-particle)             |
-| **Post-Process** | Gamma, fog, vignette         | [Post-Processing](reference-postprocess)          |
-| **Format**       | .mop binary mesh             | [Binary Format](reference-binary-format)          |
+| Layer            | Modules                                      | Docs                                                                                                                           |
+| ---------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Public**       | types, viewport, scene, pick, input, light   | [API Contracts](reference-api)                                                                                                 |
+| **Interaction**  | Gizmo, Camera, Undo                          | [Gizmo](reference-gizmo), [Camera](reference-camera), [Undo](reference-undo)                                                   |
+| **Core**         | Lights, Overlays, Display, Pipeline          | [Light](reference-light), [Overlay](reference-overlay), [Display](reference-display), [Pipeline](reference-pipeline)           |
+| **Query**        | Scene query, Camera query, Snapshot, Spatial | [Query](reference-query), [Camera Query](reference-camera-query), [Snapshot](reference-snapshot), [Spatial](reference-spatial) |
+| **RHI**          | Device, Buffer, Framebuffer                  | [RHI](reference-rhi)                                                                                                           |
+| **CPU**          | Rasterizer, Backend                          | [CPU Backend](reference-backend-cpu)                                                                                           |
+| **OpenGL**       | Backend                                      | [OpenGL Backend](reference-backend-opengl)                                                                                     |
+| **Vulkan**       | Backend                                      | [Vulkan Backend](reference-backend-vulkan)                                                                                     |
+| **Math**         | Vec3, Mat4, transforms                       | [Math](reference-math)                                                                                                         |
+| **Picking**      | Object ID buffer                             | [Picking](reference-picking)                                                                                                   |
+| **Material**     | PBR-inspired materials                       | [Material System](reference-material)                                                                                          |
+| **Vertex**       | Flexible vertex format                       | [Vertex Format](reference-vertex-format)                                                                                       |
+| **Loading**      | OBJ, binary .mop format                      | [Loader](reference-loader), [Binary Format](reference-binary-format)                                                           |
+| **Particles**    | Emitters, presets                            | [Particle System](reference-particle)                                                                                          |
+| **Water**        | Procedural surface                           | [Water Surface](reference-water)                                                                                               |
+| **Post-Process** | Gamma, fog, vignette                         | [Post-Processing](reference-postprocess)                                                                                       |
+| **Config**       | Optional Lua scripting                       | [Configuration](reference-config)                                                                                              |
+| **Utility**      | Logging, profiling                           | [Log](reference-log), [Profile](reference-profile)                                                                             |
 
 ## Development
 
-| Page                                                 | Topic                                   |
-| ---------------------------------------------------- | --------------------------------------- |
-| [Build](development-build)                           | Make + Nix build system                 |
-| [Platform Behavior](development-platform)            | macOS and Linux specifics               |
-| [Backend Capabilities](development-capabilities)     | What each backend supports              |
-| [Contributing](development-contributing)             | How to add code and documentation       |
-| [Testing](development-testing)                       | Test framework and running tests        |
+| Page                                             | Topic                             |
+| ------------------------------------------------ | --------------------------------- |
+| [Build](development-build)                       | Make + Nix build system           |
+| [Platform Behavior](development-platform)        | macOS and Linux specifics         |
+| [Backend Capabilities](development-capabilities) | What each backend supports        |
+| [Contributing](development-contributing)         | How to add code and documentation |
+| [Testing](development-testing)                   | Test framework and running tests  |

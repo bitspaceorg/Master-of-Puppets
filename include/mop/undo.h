@@ -18,7 +18,7 @@
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
-typedef struct MopMesh     MopMesh;
+typedef struct MopMesh MopMesh;
 
 /* Record the current TRS state of a mesh as an undo snapshot.
  * Clears any pending redo history. */

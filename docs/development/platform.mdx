@@ -9,11 +9,11 @@ tags: ["development", "platform"]
 
 ## Supported Platforms
 
-| Platform       | CPU Backend | OpenGL Backend        | Vulkan Backend         |
-| -------------- | ----------- | --------------------- | ---------------------- |
-| macOS (arm64)  | Yes         | CGL offscreen context | MoltenVK               |
-| macOS (x86_64) | Yes         | CGL offscreen context | MoltenVK               |
-| Linux (x86_64) | Yes         | EGL offscreen context | Native Vulkan          |
+| Platform       | CPU Backend | OpenGL Backend        | Vulkan Backend |
+| -------------- | ----------- | --------------------- | -------------- |
+| macOS (arm64)  | Yes         | CGL offscreen context | MoltenVK       |
+| macOS (x86_64) | Yes         | CGL offscreen context | MoltenVK       |
+| Linux (x86_64) | Yes         | EGL offscreen context | Native Vulkan  |
 
 ## Compile-Time Platform Detection
 
@@ -43,4 +43,4 @@ These macros are set by the Makefile based on `uname -s`.
 
 ## CPU Backend
 
-The CPU backend has no platform dependencies.  It works identically on both platforms.  This makes it the reliable fallback for any environment.
+The CPU backend has no platform dependencies. It works identically on both platforms. This makes it the reliable fallback for any environment.

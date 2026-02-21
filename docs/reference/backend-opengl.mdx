@@ -9,7 +9,7 @@ tags: ["reference", "backend", "opengl"]
 
 ## Status
 
-**Not yet implemented.**  This document defines the contract for the OpenGL backend.  Enable with `make MOP_ENABLE_OPENGL=1` once implemented.
+**Not yet implemented.** This document defines the contract for the OpenGL backend. Enable with `make MOP_ENABLE_OPENGL=1` once implemented.
 
 ## Location
 
@@ -33,20 +33,22 @@ No window or display server connection is required.
 
 An FBO with three attachments:
 
-| Attachment | Format     | Purpose          |
-| ---------- | ---------- | ---------------- |
-| Color 0    | `RGBA8`    | Color output     |
-| Depth      | `DEPTH24`  | Depth testing    |
-| Color 1    | `R32UI`    | Object ID buffer |
+| Attachment | Format    | Purpose          |
+| ---------- | --------- | ---------------- |
+| Color 0    | `RGBA8`   | Color output     |
+| Depth      | `DEPTH24` | Depth testing    |
+| Color 1    | `R32UI`   | Object ID buffer |
 
 ### Shaders
 
 Vertex shader:
+
 - Inputs: `aPosition` (vec3), `aNormal` (vec3), `aColor` (vec4)
 - Uniforms: `uMVP` (mat4), `uModel` (mat4)
 - Outputs: `vNormal` (vec3), `vColor` (vec4)
 
 Fragment shader:
+
 - Computes flat shading: `ambient + diffuse * max(N·L, 0)`
 - Writes `fragColor` (vec4) to color 0
 - Writes `fragObjectId` (uint) to color 1
@@ -59,12 +61,12 @@ Fragment shader:
 
 ### Readback
 
-`glReadPixels` from the FBO.  Color is read as `GL_RGBA` / `GL_UNSIGNED_BYTE`.  Object ID is read as `GL_RED_INTEGER` / `GL_UNSIGNED_INT`.  Depth is read as `GL_DEPTH_COMPONENT` / `GL_FLOAT`.
+`glReadPixels` from the FBO. Color is read as `GL_RGBA` / `GL_UNSIGNED_BYTE`. Object ID is read as `GL_RED_INTEGER` / `GL_UNSIGNED_INT`. Depth is read as `GL_DEPTH_COMPONENT` / `GL_FLOAT`.
 
 ## RHI Handle Mapping
 
-| RHI Handle           | OpenGL Concrete Type                    |
-| -------------------- | --------------------------------------- |
-| `MopRhiDevice`       | GL context + shader program + VAO state |
-| `MopRhiBuffer`       | `GLuint` buffer object                  |
-| `MopRhiFramebuffer`  | FBO + texture/renderbuffer attachments   |
+| RHI Handle          | OpenGL Concrete Type                    |
+| ------------------- | --------------------------------------- |
+| `MopRhiDevice`      | GL context + shader program + VAO state |
+| `MopRhiBuffer`      | `GLuint` buffer object                  |
+| `MopRhiFramebuffer` | FBO + texture/renderbuffer attachments  |

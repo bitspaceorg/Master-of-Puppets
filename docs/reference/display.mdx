@@ -1,0 +1,152 @@
+---
+title: "Display Settings"
+description: "Per-viewport visual overlay and debug visualization controls"
+slug: "reference-display"
+author: "rahulmnavneeth"
+date: "21 FEB 2026"
+tags: ["reference", "display", "rendering"]
+---
+
+## Location
+
+```
+include/mop/display.h   — Public types and function declarations
+src/core/display.c       — Default construction and viewport get/set
+src/core/viewport.c      — pass_overlays() reads display settings each frame
+```
+
+## Overview
+
+`MopDisplaySettings` controls per-viewport debug visualizations: wireframe overlay, vertex normals, bounding boxes, vertex point display, and vertex map coloring. All overlays default to disabled, matching legacy behavior.
+
+## Types
+
+### MopVertexMapDisplay
+
+```c
+typedef enum MopVertexMapDisplay {
+    MOP_VTXMAP_NONE    = 0,
+    MOP_VTXMAP_UV      = 1,
+    MOP_VTXMAP_WEIGHTS = 2,
+    MOP_VTXMAP_NORMALS = 3,
+    MOP_VTXMAP_CUSTOM  = 4,
+} MopVertexMapDisplay;
+```
+
+| Value                | Description                                                 |
+| -------------------- | ----------------------------------------------------------- |
+| `MOP_VTXMAP_NONE`    | No vertex map coloring                                      |
+| `MOP_VTXMAP_UV`      | UV coordinates mapped to color (u=red, v=green)             |
+| `MOP_VTXMAP_WEIGHTS` | Bone weights rendered as a heatmap                          |
+| `MOP_VTXMAP_NORMALS` | Normal direction encoded as RGB color                       |
+| `MOP_VTXMAP_CUSTOM`  | Custom attribute channel (selected by `vertex_map_channel`) |
+
+### MopDisplaySettings
+
+```c
+typedef struct MopDisplaySettings {
+    /* Wireframe overlay */
+    bool     wireframe_overlay;
+    MopColor wireframe_color;
+    float    wireframe_opacity;
+
+    /* Vertex visualization */
+    bool     show_normals;
+    float    normal_display_length;
+    bool     show_bounds;
+    bool     show_vertices;
+    float    vertex_display_size;
+
+    /* Vertex map coloring */
+    MopVertexMapDisplay vertex_map_mode;
+    uint32_t            vertex_map_channel;
+} MopDisplaySettings;
+```
+
+| Field                   | Type                  | Default                         | Description                                                    |
+| ----------------------- | --------------------- | ------------------------------- | -------------------------------------------------------------- |
+| `wireframe_overlay`     | `bool`                | `false`                         | Enable wireframe edges on shaded geometry                      |
+| `wireframe_color`       | `MopColor`            | `(1.0, 0.6, 0.2, 1.0)` (orange) | Color of wireframe lines                                       |
+| `wireframe_opacity`     | `float`               | `0.15`                          | Opacity of wireframe lines (0..1)                              |
+| `show_normals`          | `bool`                | `false`                         | Draw vertex normal direction lines                             |
+| `normal_display_length` | `float`               | `0.1`                           | Length of normal lines in world units                          |
+| `show_bounds`           | `bool`                | `false`                         | Draw axis-aligned bounding boxes per mesh                      |
+| `show_vertices`         | `bool`                | `false`                         | Render vertex points as visible dots                           |
+| `vertex_display_size`   | `float`               | `3.0`                           | Size of vertex dots in pixels                                  |
+| `vertex_map_mode`       | `MopVertexMapDisplay` | `MOP_VTXMAP_NONE`               | Which vertex attribute to visualize as color                   |
+| `vertex_map_channel`    | `uint32_t`            | `0`                             | Custom attribute index (used when mode is `MOP_VTXMAP_CUSTOM`) |
+
+## Functions
+
+### mop_display_settings_default
+
+```c
+MopDisplaySettings mop_display_settings_default(void);
+```
+
+Returns a `MopDisplaySettings` value with all overlays disabled and all numeric fields set to their documented defaults. This is the initial state applied during `mop_viewport_create`. If `mop_viewport_get_display` is called on a NULL viewport, this function is used internally as the fallback.
+
+### mop_viewport_set_display
+
+```c
+void mop_viewport_set_display(MopViewport *vp, const MopDisplaySettings *ds);
+```
+
+Copies the provided display settings into the viewport. The settings take effect on the next `mop_viewport_render` call. Silently returns if either argument is NULL.
+
+### mop_viewport_get_display
+
+```c
+MopDisplaySettings mop_viewport_get_display(const MopViewport *vp);
+```
+
+Returns a copy of the viewport's current display settings. Returns `mop_display_settings_default()` if `vp` is NULL.
+
+## Visualization Modes
+
+### Wireframe Overlay
+
+When `wireframe_overlay` is `true` and the wireframe overlay is enabled in the overlay system, `mop_overlay_builtin_wireframe` draws triangle edges on top of the shaded scene. `wireframe_color` controls the line color and `wireframe_opacity` controls the blend factor. This is distinct from the `MOP_RENDER_WIREFRAME` render mode, which replaces solid shading entirely.
+
+### Normals
+
+When `show_normals` is `true`, vertex normal lines are drawn as line segments extending from each vertex position in the normal direction. `normal_display_length` controls the length of these lines in world units. Useful for debugging lighting issues and verifying model normals.
+
+### Bounding Boxes
+
+When `show_bounds` is `true`, an axis-aligned bounding box is drawn around each active mesh. The box is computed from the mesh's world-space vertex positions. Helpful for verifying spatial relationships and debugging culling.
+
+### Vertex Points
+
+When `show_vertices` is `true`, each vertex is rendered as a screen-space point with a diameter of `vertex_display_size` pixels. This mode aids in inspecting mesh density and vertex distribution.
+
+### Vertex Map Coloring
+
+The `vertex_map_mode` field selects which per-vertex attribute is visualized as surface color:
+
+| Mode                 | Source attribute    | Mapping                              |
+| -------------------- | ------------------- | ------------------------------------ |
+| `MOP_VTXMAP_UV`      | `TEXCOORD0`         | u mapped to red, v mapped to green   |
+| `MOP_VTXMAP_WEIGHTS` | `WEIGHTS`           | Bone weight sum as a heat ramp       |
+| `MOP_VTXMAP_NORMALS` | `NORMAL`            | XYZ direction remapped to 0..1 RGB   |
+| `MOP_VTXMAP_CUSTOM`  | `CUSTOM0 + channel` | Raw float4 interpreted as RGBA color |
+
+When `vertex_map_mode` is `MOP_VTXMAP_CUSTOM`, the `vertex_map_channel` field selects which custom attribute index to read (0 = `MOP_ATTRIB_CUSTOM0`, 1 = `MOP_ATTRIB_CUSTOM1`, etc.).
+
+## Usage
+
+```c
+/* Enable wireframe overlay with custom color */
+MopDisplaySettings ds = mop_viewport_get_display(vp);
+ds.wireframe_overlay = true;
+ds.wireframe_color   = (MopColor){ 0.0f, 1.0f, 0.5f, 1.0f };
+ds.wireframe_opacity = 0.3f;
+mop_viewport_set_display(vp, &ds);
+
+/* Also need to enable the overlay slot */
+mop_viewport_set_overlay_enabled(vp, MOP_OVERLAY_WIREFRAME, true);
+
+/* Visualize UV coordinates */
+ds.vertex_map_mode = MOP_VTXMAP_UV;
+mop_viewport_set_display(vp, &ds);
+```

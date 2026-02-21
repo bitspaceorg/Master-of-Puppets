@@ -20,19 +20,19 @@
  * ------------------------------------------------------------------------- */
 
 typedef enum MopAttribSemantic {
-    MOP_ATTRIB_POSITION  = 0,   /* float3, required */
-    MOP_ATTRIB_NORMAL    = 1,   /* float3 */
-    MOP_ATTRIB_COLOR     = 2,   /* float4 (RGBA) */
-    MOP_ATTRIB_TEXCOORD0 = 3,   /* float2 */
-    MOP_ATTRIB_TEXCOORD1 = 4,   /* float2 */
-    MOP_ATTRIB_TANGENT   = 5,   /* float4 (xyz + handedness w) */
-    MOP_ATTRIB_JOINTS    = 6,   /* ubyte4 (bone indices) */
-    MOP_ATTRIB_WEIGHTS   = 7,   /* float4 (bone weights) */
-    MOP_ATTRIB_CUSTOM0   = 8,   /* float4 (app-defined) */
-    MOP_ATTRIB_CUSTOM1   = 9,   /* float4 */
-    MOP_ATTRIB_CUSTOM2   = 10,  /* float4 */
-    MOP_ATTRIB_CUSTOM3   = 11,  /* float4 */
-    MOP_ATTRIB_COUNT     = 12
+  MOP_ATTRIB_POSITION = 0,  /* float3, required */
+  MOP_ATTRIB_NORMAL = 1,    /* float3 */
+  MOP_ATTRIB_COLOR = 2,     /* float4 (RGBA) */
+  MOP_ATTRIB_TEXCOORD0 = 3, /* float2 */
+  MOP_ATTRIB_TEXCOORD1 = 4, /* float2 */
+  MOP_ATTRIB_TANGENT = 5,   /* float4 (xyz + handedness w) */
+  MOP_ATTRIB_JOINTS = 6,    /* ubyte4 (bone indices) */
+  MOP_ATTRIB_WEIGHTS = 7,   /* float4 (bone weights) */
+  MOP_ATTRIB_CUSTOM0 = 8,   /* float4 (app-defined) */
+  MOP_ATTRIB_CUSTOM1 = 9,   /* float4 */
+  MOP_ATTRIB_CUSTOM2 = 10,  /* float4 */
+  MOP_ATTRIB_CUSTOM3 = 11,  /* float4 */
+  MOP_ATTRIB_COUNT = 12
 } MopAttribSemantic;
 
 /* -------------------------------------------------------------------------
@@ -40,11 +40,11 @@ typedef enum MopAttribSemantic {
  * ------------------------------------------------------------------------- */
 
 typedef enum MopAttribFormat {
-    MOP_FORMAT_FLOAT  = 0,   /*  4 bytes (1 float)  */
-    MOP_FORMAT_FLOAT2 = 1,   /*  8 bytes (2 floats) */
-    MOP_FORMAT_FLOAT3 = 2,   /* 12 bytes (3 floats) */
-    MOP_FORMAT_FLOAT4 = 3,   /* 16 bytes (4 floats) */
-    MOP_FORMAT_UBYTE4 = 4,   /*  4 bytes (packed)   */
+  MOP_FORMAT_FLOAT = 0,  /*  4 bytes (1 float)  */
+  MOP_FORMAT_FLOAT2 = 1, /*  8 bytes (2 floats) */
+  MOP_FORMAT_FLOAT3 = 2, /* 12 bytes (3 floats) */
+  MOP_FORMAT_FLOAT4 = 3, /* 16 bytes (4 floats) */
+  MOP_FORMAT_UBYTE4 = 4, /*  4 bytes (packed)   */
 } MopAttribFormat;
 
 /* -------------------------------------------------------------------------
@@ -52,9 +52,9 @@ typedef enum MopAttribFormat {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopVertexAttrib {
-    MopAttribSemantic semantic;
-    MopAttribFormat   format;
-    uint32_t          offset;   /* byte offset within one vertex */
+  MopAttribSemantic semantic;
+  MopAttribFormat format;
+  uint32_t offset; /* byte offset within one vertex */
 } MopVertexAttrib;
 
 /* -------------------------------------------------------------------------
@@ -64,9 +64,9 @@ typedef struct MopVertexAttrib {
 #define MOP_MAX_VERTEX_ATTRIBS 12
 
 typedef struct MopVertexFormat {
-    MopVertexAttrib attribs[MOP_MAX_VERTEX_ATTRIBS];
-    uint32_t        attrib_count;
-    uint32_t        stride;     /* bytes per vertex */
+  MopVertexAttrib attribs[MOP_MAX_VERTEX_ATTRIBS];
+  uint32_t attrib_count;
+  uint32_t stride; /* bytes per vertex */
 } MopVertexFormat;
 
 /* -------------------------------------------------------------------------
@@ -80,7 +80,7 @@ MopVertexFormat mop_vertex_format_standard(void);
 
 /* Find an attribute by semantic.  Returns NULL if not present. */
 const MopVertexAttrib *mop_vertex_format_find(const MopVertexFormat *fmt,
-                                               MopAttribSemantic sem);
+                                              MopAttribSemantic sem);
 
 /* Return the byte size of a given attribute format. */
 uint32_t mop_attrib_format_size(MopAttribFormat fmt);

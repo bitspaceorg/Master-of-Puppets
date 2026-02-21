@@ -8,20 +8,20 @@
 #ifndef MOP_SPATIAL_H
 #define MOP_SPATIAL_H
 
-#include "types.h"
 #include "camera_query.h"
+#include "types.h"
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
-typedef struct MopMesh     MopMesh;
+typedef struct MopMesh MopMesh;
 
 /* -------------------------------------------------------------------------
  * AABB — axis-aligned bounding box
  * ------------------------------------------------------------------------- */
 
 typedef struct MopAABB {
-    MopVec3 min;
-    MopVec3 max;
+  MopVec3 min;
+  MopVec3 max;
 } MopAABB;
 
 /* -------------------------------------------------------------------------
@@ -40,10 +40,10 @@ MopAABB mop_mesh_get_aabb_world(const MopMesh *mesh, const MopViewport *vp);
  * ------------------------------------------------------------------------- */
 
 MopAABB mop_aabb_union(MopAABB a, MopAABB b);
-bool    mop_aabb_overlaps(MopAABB a, MopAABB b);
+bool mop_aabb_overlaps(MopAABB a, MopAABB b);
 MopVec3 mop_aabb_center(MopAABB box);
 MopVec3 mop_aabb_extents(MopAABB box);
-float   mop_aabb_surface_area(MopAABB box);
+float mop_aabb_surface_area(MopAABB box);
 
 /* -------------------------------------------------------------------------
  * Frustum — 6 planes extracted from the view-projection matrix
@@ -53,7 +53,7 @@ float   mop_aabb_surface_area(MopAABB box);
  * ------------------------------------------------------------------------- */
 
 typedef struct MopFrustum {
-    MopVec4 planes[6];
+  MopVec4 planes[6];
 } MopFrustum;
 
 /* Extract frustum planes from the viewport's current VP matrix.
@@ -70,14 +70,13 @@ int mop_frustum_test_aabb(const MopFrustum *frustum, MopAABB box);
 
 /* Ray-AABB intersection (slab method).
  * Returns true if the ray hits the box.  t_near/t_far are entry/exit. */
-bool mop_ray_intersect_aabb(MopRay ray, MopAABB box,
-                             float *t_near, float *t_far);
+bool mop_ray_intersect_aabb(MopRay ray, MopAABB box, float *t_near,
+                            float *t_far);
 
 /* Ray-triangle intersection (Moller-Trumbore).
  * Returns true if hit.  t = distance, u/v = barycentric coords. */
-bool mop_ray_intersect_triangle(MopRay ray,
-                                 MopVec3 v0, MopVec3 v1, MopVec3 v2,
-                                 float *t, float *u, float *v);
+bool mop_ray_intersect_triangle(MopRay ray, MopVec3 v0, MopVec3 v1, MopVec3 v2,
+                                float *t, float *u, float *v);
 
 /* -------------------------------------------------------------------------
  * Scene-level spatial queries
@@ -94,18 +93,18 @@ uint32_t mop_viewport_visible_mesh_count(const MopViewport *vp);
  * ------------------------------------------------------------------------- */
 
 typedef struct MopRayHit {
-    bool     hit;
-    uint32_t object_id;
-    float    distance;
-    MopVec3  position;
-    MopVec3  normal;
-    float    u, v;
-    uint32_t triangle_index;
+  bool hit;
+  uint32_t object_id;
+  float distance;
+  MopVec3 position;
+  MopVec3 normal;
+  float u, v;
+  uint32_t triangle_index;
 } MopRayHit;
 
 /* Cast from a pixel position (top-left origin). */
-MopRayHit mop_viewport_raycast(const MopViewport *vp,
-                                float pixel_x, float pixel_y);
+MopRayHit mop_viewport_raycast(const MopViewport *vp, float pixel_x,
+                               float pixel_y);
 
 /* Cast an arbitrary world-space ray. */
 MopRayHit mop_viewport_raycast_ray(const MopViewport *vp, MopRay ray);

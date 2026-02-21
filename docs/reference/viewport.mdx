@@ -1,18 +1,24 @@
 ---
 title: "Viewport Core"
-description: "Scene management, camera, and render orchestration internals"
+description: "Scene management, camera, lighting, and render orchestration internals"
 slug: "reference-viewport"
 author: "rahulmnavneeth"
-date: "19 FEB 2026"
+date: "21 FEB 2026"
 tags: ["reference", "viewport"]
 ---
 
 ## Location
 
 ```
-src/viewport/
-  viewport.c            — Viewport lifecycle, scene, camera, rendering
+src/core/
+  viewport.c            — Viewport lifecycle, scene, rendering, passes
   viewport_internal.h   — Internal struct definitions
+  light.c               — Light management and light indicators
+  display.c             — Display settings
+  overlay.c             — Overlay system
+  overlay_builtin.c     — Built-in overlay implementations
+  vertex_format.c       — Flexible vertex format
+  subsystem.c           — Subsystem vtable dispatch
 ```
 
 ## Internal Structures
@@ -21,16 +27,18 @@ src/viewport/
 
 ```c
 struct MopViewport {
-    const MopRhiBackend *rhi;          /* Backend function table    */
-    MopRhiDevice        *device;       /* Backend device instance   */
-    MopRhiFramebuffer   *framebuffer;  /* Color+depth+ID targets    */
-    MopBackendType       backend_type; /* Active backend enum value */
+    const MopRhiBackend *rhi;          /* Backend function table        */
+    MopRhiDevice        *device;       /* Backend device instance       */
+    MopRhiFramebuffer   *framebuffer;  /* Color+depth+ID targets        */
+    MopBackendType       backend_type; /* Active backend enum value     */
 
-    int width, height;                 /* Framebuffer dimensions    */
-    MopColor      clear_color;         /* Per-frame clear value     */
-    MopRenderMode render_mode;         /* Solid or wireframe        */
+    int width, height;                 /* Framebuffer dimensions        */
+    MopColor      clear_color;         /* Per-frame clear value         */
+    MopRenderMode render_mode;         /* Solid or wireframe            */
+    MopShadingMode shading_mode;       /* Flat or smooth                */
 
     /* Camera */
+    MopOrbitCamera camera;             /* Orbit camera state            */
     MopVec3 cam_eye, cam_target, cam_up;
     float   cam_fov_radians, cam_near, cam_far;
     MopMat4 view_matrix, projection_matrix;
@@ -38,6 +46,41 @@ struct MopViewport {
     /* Scene — flat array with active flags */
     struct MopMesh meshes[MOP_MAX_MESHES];
     uint32_t       mesh_count;
+
+    /* Lights */
+    MopLight  lights[MOP_MAX_LIGHTS];  /* Up to 8 lights               */
+    uint32_t  light_count;
+    MopMesh  *light_indicators[MOP_MAX_LIGHTS]; /* Visual indicators   */
+
+    /* Interaction */
+    MopGizmo        *gizmo;            /* TRS manipulation gizmo       */
+    uint32_t         selected_id;      /* Currently selected object ID  */
+    MopInteractState interact_state;   /* State machine (idle, orbit..) */
+    MopGizmoAxis     drag_axis;        /* Active drag axis              */
+    float click_start_x, click_start_y;
+
+    /* Event queue */
+    MopEvent events[MOP_MAX_EVENTS];
+    int      event_head, event_tail;
+
+    /* Overlays */
+    MopOverlayEntry overlays[MOP_MAX_OVERLAYS];
+    uint32_t        overlay_count;
+
+    /* Display settings */
+    MopDisplaySettings display;
+
+    /* Post-processing */
+    uint32_t post_effects;             /* Bitmask of MopPostEffect      */
+
+    /* Undo/redo stacks */
+    /* ... */
+
+    /* Subsystems (particles, water) */
+    /* ... */
+
+    /* Timing */
+    float time, last_time;
 };
 ```
 
@@ -50,22 +93,40 @@ struct MopMesh {
     uint32_t      vertex_count, index_count;
     uint32_t      object_id;
     MopMat4       transform;
+    MopVec3       position, rotation, scale_val;
+    bool          use_trs;
     MopColor      base_color;
+    float         opacity;
+    MopBlendMode  blend_mode;
+    MopMaterial   material;
+    bool          has_material;
+    MopVertexFormat vertex_format;
+    MopMesh      *parent;
     bool          active;
 };
 ```
 
 ## Scene Management
 
-Meshes are stored in a flat array of `MOP_MAX_MESHES` (4096) entries.  Adding a mesh scans for an inactive slot or appends.  Removing a mesh marks it inactive and destroys its RHI buffers.  The viewport destroy function walks the entire array.
+Meshes are stored in a flat array of `MOP_MAX_MESHES` (4096) entries. Adding a mesh scans for an inactive slot or appends. Removing a mesh marks it inactive and destroys its RHI buffers. The viewport destroy function walks the entire array.
 
 ## Rendering Orchestration
 
-`mop_viewport_render` is the only function that calls into the RHI for drawing.  It:
+`mop_viewport_render` orchestrates multiple passes:
 
-1. Calls `frame_begin` to clear
-2. Iterates active meshes, computing MVP for each
-3. Calls `draw` for each mesh
-4. Calls `frame_end` to finalize
+1. **Frame begin** — clear color, depth, and object ID buffers
+2. **Light indicator update** — create/destroy/reposition indicator meshes for active lights
+3. **Gizmo update** — recompute handle positions and screen-space scale
+4. **Pass: scene** — draw all active meshes with `object_id < 0xFFFE0000` (depth test on, backface cull on)
+5. **Pass: gizmo + indicators** — draw gizmo handles (`object_id >= 0xFFFF0000`) and light indicators (`object_id >= 0xFFFE0000`) without depth test or backface cull
+6. **Pass: overlays** — wireframe, normals, bounds, selection highlight, custom overlays
+7. **Post-processing** — gamma, tonemapping, vignette, fog
+8. **Frame end** — finalize and make framebuffer readable
 
-No sorting is performed — meshes are drawn in array order.  Depth testing handles visibility.
+## Object ID Ranges
+
+| Range                       | Usage                                         |
+| --------------------------- | --------------------------------------------- |
+| `0x00000001` – `0xFFFDFFFF` | Scene meshes                                  |
+| `0xFFFE0000` – `0xFFFEFFFF` | Light indicators (`0xFFFE0000 + light_index`) |
+| `0xFFFF0000` – `0xFFFFFFFF` | Gizmo handles                                 |

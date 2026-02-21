@@ -11,10 +11,10 @@
 #ifndef MOP_SNAPSHOT_H
 #define MOP_SNAPSHOT_H
 
-#include "types.h"
-#include "material.h"
-#include "light.h"
 #include "camera_query.h"
+#include "light.h"
+#include "material.h"
+#include "types.h"
 
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
@@ -27,15 +27,15 @@ typedef struct MopViewport MopViewport;
  * ------------------------------------------------------------------------- */
 
 typedef struct MopMeshView {
-    uint32_t         object_id;
-    uint32_t         vertex_count;
-    uint32_t         index_count;
-    const MopVertex *vertices;
-    const uint32_t  *indices;
-    MopMat4          world_transform;
-    MopMaterial      material;
-    float            opacity;
-    MopBlendMode     blend_mode;
+  uint32_t object_id;
+  uint32_t vertex_count;
+  uint32_t index_count;
+  const MopVertex *vertices;
+  const uint32_t *indices;
+  MopMat4 world_transform;
+  MopMaterial material;
+  float opacity;
+  MopBlendMode blend_mode;
 } MopMeshView;
 
 /* -------------------------------------------------------------------------
@@ -43,20 +43,20 @@ typedef struct MopMeshView {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopSceneSnapshot {
-    /* Camera */
-    MopCameraState camera;
+  /* Camera */
+  MopCameraState camera;
 
-    /* Framebuffer dimensions */
-    int width;
-    int height;
+  /* Framebuffer dimensions */
+  int width;
+  int height;
 
-    /* Lights */
-    const MopLight *lights;
-    uint32_t        light_count;
+  /* Lights */
+  const MopLight *lights;
+  uint32_t light_count;
 
-    /* Iteration state (opaque — do not access directly) */
-    const MopViewport *_vp;
-    uint32_t           _mesh_idx;
+  /* Iteration state (opaque — do not access directly) */
+  const MopViewport *_vp;
+  uint32_t _mesh_idx;
 } MopSceneSnapshot;
 
 /* Take a snapshot of the current scene state.  The snapshot is valid
@@ -93,24 +93,24 @@ uint32_t mop_snapshot_mesh_count(const MopSceneSnapshot *snap);
  * ------------------------------------------------------------------------- */
 
 typedef struct MopTriangle {
-    MopVec3     p[3];          /* world-space positions */
-    MopVec3     n[3];          /* world-space normals */
-    MopColor    c[3];          /* vertex colors */
-    float       uv[3][2];     /* texture coordinates */
-    MopMaterial material;
-    uint32_t    object_id;
+  MopVec3 p[3];   /* world-space positions */
+  MopVec3 n[3];   /* world-space normals */
+  MopColor c[3];  /* vertex colors */
+  float uv[3][2]; /* texture coordinates */
+  MopMaterial material;
+  uint32_t object_id;
 } MopTriangle;
 
 typedef struct MopTriangleIter {
-    MopSceneSnapshot _snap;
-    MopMeshView      _current_mesh;
-    uint32_t         _tri_idx;
-    bool             _has_mesh;
-    MopMat4          _normal_matrix;
+  MopSceneSnapshot _snap;
+  MopMeshView _current_mesh;
+  uint32_t _tri_idx;
+  bool _has_mesh;
+  MopMat4 _normal_matrix;
 } MopTriangleIter;
 
 MopTriangleIter mop_triangle_iter_begin(const MopViewport *vp);
-bool            mop_triangle_iter_next(MopTriangleIter *iter, MopTriangle *out);
+bool mop_triangle_iter_next(MopTriangleIter *iter, MopTriangle *out);
 
 /* Total triangle count across all scene meshes (for BVH pre-allocation). */
 uint32_t mop_snapshot_triangle_count(const MopSceneSnapshot *snap);
