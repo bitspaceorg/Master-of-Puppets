@@ -35,8 +35,9 @@ typedef enum MopInputType {
     MOP_INPUT_SECONDARY_DOWN,
     MOP_INPUT_SECONDARY_UP,
 
-    /* Scroll wheel */
+    /* Scroll wheel / trackpad */
     MOP_INPUT_SCROLL,
+    MOP_INPUT_SCROLL_ORBIT,
 
     /* Gizmo mode actions */
     MOP_INPUT_MODE_TRANSLATE,
@@ -62,26 +63,27 @@ typedef enum MopInputType {
 } MopInputType;
 ```
 
-| Input Type                   | Required Fields      | Description                                |
-| ---------------------------- | -------------------- | ------------------------------------------ |
-| `MOP_INPUT_POINTER_DOWN`     | `x`, `y`             | Left mouse button pressed                  |
-| `MOP_INPUT_POINTER_UP`       | `x`, `y`             | Left mouse button released                 |
-| `MOP_INPUT_POINTER_MOVE`     | `x`, `y`, `dx`, `dy` | Mouse moved (absolute + delta)             |
-| `MOP_INPUT_SECONDARY_DOWN`   | --                   | Right mouse button pressed                 |
-| `MOP_INPUT_SECONDARY_UP`     | --                   | Right mouse button released                |
-| `MOP_INPUT_SCROLL`           | `scroll`             | Scroll wheel (positive = zoom in)          |
-| `MOP_INPUT_MODE_TRANSLATE`   | --                   | Switch gizmo to translate mode             |
-| `MOP_INPUT_MODE_ROTATE`      | --                   | Switch gizmo to rotate mode                |
-| `MOP_INPUT_MODE_SCALE`       | --                   | Switch gizmo to scale mode                 |
-| `MOP_INPUT_DESELECT`         | --                   | Clear selection                            |
-| `MOP_INPUT_TOGGLE_WIREFRAME` | --                   | Toggle solid/wireframe rendering           |
-| `MOP_INPUT_RESET_VIEW`       | --                   | Reset camera to defaults + deselect        |
-| `MOP_INPUT_UNDO`             | --                   | Undo last transform                        |
-| `MOP_INPUT_REDO`             | --                   | Redo last undone transform                 |
-| `MOP_INPUT_CAMERA_MOVE`      | `dx`, `dy`           | WASD-style movement (forward/right deltas) |
-| `MOP_INPUT_SET_SHADING`      | `value`              | Set shading mode                           |
-| `MOP_INPUT_SET_RENDER_MODE`  | `value`              | Set render mode                            |
-| `MOP_INPUT_SET_POST_EFFECTS` | `value`              | Set post-effect bitmask                    |
+| Input Type                   | Required Fields      | Description                                       |
+| ---------------------------- | -------------------- | ------------------------------------------------- |
+| `MOP_INPUT_POINTER_DOWN`     | `x`, `y`             | Left mouse button pressed                         |
+| `MOP_INPUT_POINTER_UP`       | `x`, `y`             | Left mouse button released                        |
+| `MOP_INPUT_POINTER_MOVE`     | `x`, `y`, `dx`, `dy` | Mouse moved (absolute + delta)                    |
+| `MOP_INPUT_SECONDARY_DOWN`   | --                   | Right mouse button pressed                        |
+| `MOP_INPUT_SECONDARY_UP`     | --                   | Right mouse button released                       |
+| `MOP_INPUT_SCROLL`           | `scroll`             | Scroll wheel / pinch-to-zoom (positive = zoom in) |
+| `MOP_INPUT_SCROLL_ORBIT`     | `dx`, `dy`           | Two-finger trackpad scroll → orbit camera         |
+| `MOP_INPUT_MODE_TRANSLATE`   | --                   | Switch gizmo to translate mode                    |
+| `MOP_INPUT_MODE_ROTATE`      | --                   | Switch gizmo to rotate mode                       |
+| `MOP_INPUT_MODE_SCALE`       | --                   | Switch gizmo to scale mode                        |
+| `MOP_INPUT_DESELECT`         | --                   | Clear selection                                   |
+| `MOP_INPUT_TOGGLE_WIREFRAME` | --                   | Toggle solid/wireframe rendering                  |
+| `MOP_INPUT_RESET_VIEW`       | --                   | Reset camera to defaults + deselect               |
+| `MOP_INPUT_UNDO`             | --                   | Undo last transform                               |
+| `MOP_INPUT_REDO`             | --                   | Redo last undone transform                        |
+| `MOP_INPUT_CAMERA_MOVE`      | `dx`, `dy`           | WASD-style movement (forward/right deltas)        |
+| `MOP_INPUT_SET_SHADING`      | `value`              | Set shading mode                                  |
+| `MOP_INPUT_SET_RENDER_MODE`  | `value`              | Set render mode                                   |
+| `MOP_INPUT_SET_POST_EFFECTS` | `value`              | Set post-effect bitmask                           |
 
 ### MopInputEvent
 
@@ -199,6 +201,13 @@ IDLE ─── SECONDARY_DOWN ──→ PANNING
 The click threshold is 5 pixels (`CLICK_THRESHOLD`). If the pointer moves more than 5 pixels from its down position before release, the interaction transitions from `CLICK_PENDING` to `ORBITING` instead of performing a selection click.
 
 Orbit sensitivity is fixed at `0.005` radians per pixel.
+
+### Trackpad Gesture Mapping
+
+On macOS, SDL3 reports trackpad gestures as mouse events:
+
+- **Two-finger scroll** → `MOP_INPUT_SCROLL_ORBIT` with `dx`/`dy` — orbits the camera on both axes
+- **Pinch-to-zoom** (Ctrl+scroll on macOS) → `MOP_INPUT_SCROLL` with `scroll` — zooms the camera
 
 ## Object ID Ranges
 

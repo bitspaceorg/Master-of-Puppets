@@ -33,13 +33,13 @@ typedef enum MopOverlayId {
 } MopOverlayId;
 ```
 
-| Value                       | Slot | Description                                     |
-| --------------------------- | ---- | ----------------------------------------------- |
-| `MOP_OVERLAY_WIREFRAME`     | 0    | Wireframe edges drawn on top of shaded geometry |
-| `MOP_OVERLAY_NORMALS`       | 1    | Vertex normal direction lines                   |
-| `MOP_OVERLAY_BOUNDS`        | 2    | Per-mesh axis-aligned bounding boxes            |
-| `MOP_OVERLAY_SELECTION`     | 3    | Highlight for the currently selected object     |
-| `MOP_OVERLAY_BUILTIN_COUNT` | 4    | Sentinel marking the end of the built-in range  |
+| Value                       | Slot | Description                                           |
+| --------------------------- | ---- | ----------------------------------------------------- |
+| `MOP_OVERLAY_WIREFRAME`     | 0    | Wireframe edges drawn on top of shaded geometry       |
+| `MOP_OVERLAY_NORMALS`       | 1    | Vertex normal direction lines                         |
+| `MOP_OVERLAY_BOUNDS`        | 2    | Per-mesh axis-aligned bounding boxes                  |
+| `MOP_OVERLAY_SELECTION`     | 3    | Face tint + outline for the currently selected object |
+| `MOP_OVERLAY_BUILTIN_COUNT` | 4    | Sentinel marking the end of the built-in range        |
 
 ### MopOverlayFn
 
@@ -113,7 +113,7 @@ Built-in overlays occupy slots 0 through 3. They are registered internally durin
 - `mop_overlay_builtin_wireframe` -- draws wireframe edges over shaded geometry. Controlled by `MopDisplaySettings.wireframe_overlay`.
 - `mop_overlay_builtin_normals` -- draws vertex normal lines. Controlled by `MopDisplaySettings.show_normals`.
 - `mop_overlay_builtin_bounds` -- draws axis-aligned bounding boxes. Controlled by `MopDisplaySettings.show_bounds`.
-- `mop_overlay_builtin_selection` -- highlights the selected object. Runs whenever the selection overlay is enabled, regardless of display settings.
+- `mop_overlay_builtin_selection` -- highlights the selected object with a face tint (alpha-blended overlay of the selection outline color at `face_select_opacity`). Runs whenever the selection overlay is enabled, regardless of display settings.
 
 Built-in overlays require both their `MopDisplaySettings` flag **and** their `overlay_enabled` flag to be true (except selection, which only checks `overlay_enabled`). At creation time all `overlay_enabled` flags default to false.
 

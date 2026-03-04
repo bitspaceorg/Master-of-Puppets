@@ -2,7 +2,7 @@
 
 Backend-agnostic viewport rendering engine in C11.
 
-Master of Puppets renders 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API with opaque handles.  Designed as reusable infrastructure for DCC tools and 3D applications.
+Master of Puppets renders 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API with opaque handles.  Designed as reusable infrastructure for DCC tools and 3D applications.  The Vulkan backend features 4x MSAA, reverse-Z depth, cascade shadow mapping, and FXAA.
 
 ## Usage
 
@@ -87,9 +87,9 @@ Examples live in `examples/` with their own Makefile and Nix flake.
 cd examples
 nix develop                        # Provides SDL3 + pkg-config
 make                               # Build all examples
-make run                           # Run interactive showcase (SDL3)
-make run-headless                  # Run headless PPM exporter
-MOP_BACKEND=vulkan ./build/mop_showcase  # Run with Vulkan
+make interactive && make run        # Run interactive viewport (SDL3)
+make headless && make run-headless # Run headless PPM exporter
+MOP_BACKEND=vulkan ./build/mop_viewport  # Run with Vulkan
 ```
 
 ## Switching Backends
@@ -97,7 +97,7 @@ MOP_BACKEND=vulkan ./build/mop_showcase  # Run with Vulkan
 ```c
 .backend = MOP_BACKEND_CPU      /* Always available, no GPU needed   */
 .backend = MOP_BACKEND_OPENGL   /* OpenGL 3.3 (compile with MOP_ENABLE_OPENGL=1) */
-.backend = MOP_BACKEND_VULKAN   /* Vulkan 1.0 headless (compile with MOP_ENABLE_VULKAN=1) */
+.backend = MOP_BACKEND_VULKAN   /* Vulkan 1.2 headless (compile with MOP_ENABLE_VULKAN=1) */
 .backend = MOP_BACKEND_AUTO     /* Platform default                  */
 ```
 
@@ -119,12 +119,12 @@ The application sees only opaque handles and value types.  The RHI is a function
 | **Gizmo** | Translate/rotate/scale handles with screen-space scaling |
 | **Input** | Event-driven interaction state machine (orbit, pan, select, drag) |
 | **Camera** | Orbit camera with pan, zoom, and WASD movement |
-| **Overlays** | Wireframe, normals, bounds, selection highlight (built-in + custom) |
+| **Overlays** | Wireframe, normals, bounds, selection highlight + face tint (built-in + custom) |
 | **Picking** | Object ID buffer — click to select meshes and lights |
 | **Undo/Redo** | Transform history stack |
 | **Particles** | Emitters with smoke, fire, sparks presets |
 | **Water** | Procedural sine-wave animated surface |
-| **Post-Process** | Gamma, tonemapping, vignette, fog |
+| **Post-Process** | Gamma, tonemapping, vignette, fog, FXAA |
 | **Spatial** | AABB, frustum culling, raycasting |
 | **Loaders** | OBJ and binary .mop format |
 

@@ -16,7 +16,8 @@ src/core/
   light.c               — Light management and light indicators
   display.c             — Display settings
   overlay.c             — Overlay system
-  overlay_builtin.c     — Built-in overlay implementations
+  overlay_builtin.c     — Built-in overlay implementations (selection face tint, outline, grid)
+  theme.c               — Default theme and accent color system
   vertex_format.c       — Flexible vertex format
   subsystem.c           — Subsystem vtable dispatch
 ```
@@ -114,12 +115,12 @@ Meshes are stored in a flat array of `MOP_MAX_MESHES` (4096) entries. Adding a m
 
 `mop_viewport_render` orchestrates multiple passes:
 
-1. **Frame begin** — clear color, depth, and object ID buffers
+1. **Frame begin** — clear color, depth, and object ID buffers (reverse-Z: depth cleared to 0.0 on Vulkan)
 2. **Light indicator update** — create/destroy/reposition indicator meshes for active lights
 3. **Gizmo update** — recompute handle positions and screen-space scale
 4. **Pass: scene** — draw all active meshes with `object_id < 0xFFFE0000` (depth test on, backface cull on)
 5. **Pass: gizmo + indicators** — draw gizmo handles (`object_id >= 0xFFFF0000`) and light indicators (`object_id >= 0xFFFE0000`) without depth test or backface cull
-6. **Pass: overlays** — wireframe, normals, bounds, selection highlight, custom overlays
+6. **Pass: overlays** — wireframe, normals, bounds, selection face tint + outline, custom overlays
 7. **Post-processing** — gamma, tonemapping, vignette, fog
 8. **Frame end** — finalize and make framebuffer readable
 

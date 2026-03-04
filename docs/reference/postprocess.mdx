@@ -28,7 +28,8 @@ typedef enum MopPostEffect {
     MOP_POST_GAMMA    = 1 << 0,
     MOP_POST_TONEMAP  = 1 << 1,
     MOP_POST_VIGNETTE = 1 << 2,
-    MOP_POST_FOG      = 1 << 3
+    MOP_POST_FOG      = 1 << 3,
+    MOP_POST_FXAA     = 1 << 4
 } MopPostEffect;
 ```
 
@@ -46,6 +47,7 @@ mop_viewport_set_post_effects(vp, MOP_POST_GAMMA | MOP_POST_TONEMAP);
 | `MOP_POST_TONEMAP`  | Reinhard: `c / (c + 1)`                                                                | Applied per-channel in linear space                               |
 | `MOP_POST_GAMMA`    | `pow(c, 1/2.2)`                                                                        | sRGB gamma correction                                             |
 | `MOP_POST_VIGNETTE` | Darkens edges based on distance from center                                            | Quadratic falloff, 20% darkening at corners                       |
+| `MOP_POST_FXAA`     | Fast Approximate Anti-Aliasing                                                         | Luma-based edge detection, GPU post-process (Vulkan only)         |
 
 ### Application Order
 
@@ -55,6 +57,7 @@ When multiple effects are enabled, they are applied in this order:
 2. **Tonemap** — compresses HDR to [0,1] range
 3. **Gamma** — converts linear to sRGB
 4. **Vignette** — artistic edge darkening
+5. **FXAA** — edge-aware anti-aliasing (Vulkan backend only, runs as a separate fullscreen pass)
 
 ## Functions
 
