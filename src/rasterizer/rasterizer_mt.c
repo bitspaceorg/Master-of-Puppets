@@ -142,7 +142,7 @@ static void process_tile(const MopSwTileWork *work, int tile_idx) {
           tri->vertices, tri->object_id, tri->wireframe, tri->depth_test,
           tri->cull_back, tri->light_dir, tri->ambient, tri->opacity,
           tri->smooth_shading, tri->blend_mode, tri->lights, tri->light_count,
-          tri->cam_eye, fb);
+          tri->cam_eye, tri->metallic, tri->roughness, fb);
     } else {
       mop_sw_rasterize_triangle(tri->vertices, tri->object_id, tri->wireframe,
                                 tri->depth_test, tri->cull_back, tri->light_dir,

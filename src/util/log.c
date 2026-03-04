@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <mop/log.h>
+#include <mop/util/log.h>
 #include <stdio.h>
 
 /* -------------------------------------------------------------------------

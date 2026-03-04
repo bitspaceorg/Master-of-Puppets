@@ -15,8 +15,8 @@
 #include "rasterizer/rasterizer_mt.h"
 #include "rhi/rhi.h"
 
-#include <mop/log.h>
-#include <mop/vertex_format.h>
+#include <mop/core/vertex_format.h>
+#include <mop/util/log.h>
 
 #include <math.h>
 #include <stdlib.h>
@@ -171,7 +171,6 @@ static void cpu_frame_begin(MopRhiDevice *device, MopRhiFramebuffer *fb,
 static void cpu_frame_end(MopRhiDevice *device, MopRhiFramebuffer *fb) {
   (void)device;
   (void)fb;
-  /* CPU backend: nothing to finalize */
 }
 
 /* -------------------------------------------------------------------------
@@ -196,6 +195,22 @@ static bool cpu_prepare_triangle(const MopRhiDrawCall *call,
   out->vertices[0].position = mop_mat4_mul_vec4(call->mvp, pos0);
   out->vertices[1].position = mop_mat4_mul_vec4(call->mvp, pos1);
   out->vertices[2].position = mop_mat4_mul_vec4(call->mvp, pos2);
+
+  /* Apply depth bias — push clip-space Z slightly farther to avoid Z-fighting
+   * with coplanar scene geometry (e.g. grid vs objects at Y=0). */
+  if (call->depth_bias != 0.0f) {
+    for (int k = 0; k < 3; k++)
+      out->vertices[k].position.z +=
+          call->depth_bias * out->vertices[k].position.w;
+  }
+
+  /* World-space positions for point/spot light attenuation */
+  MopVec4 wp0 = mop_mat4_mul_vec4(call->model, pos0);
+  MopVec4 wp1 = mop_mat4_mul_vec4(call->model, pos1);
+  MopVec4 wp2 = mop_mat4_mul_vec4(call->model, pos2);
+  out->vertices[0].world_pos = (MopVec3){wp0.x, wp0.y, wp0.z};
+  out->vertices[1].world_pos = (MopVec3){wp1.x, wp1.y, wp1.z};
+  out->vertices[2].world_pos = (MopVec3){wp2.x, wp2.y, wp2.z};
 
   /* Transform normals by model matrix (upper 3x3) */
   MopVec4 n0 = {v0->normal.x, v0->normal.y, v0->normal.z, 0.0f};
@@ -253,6 +268,7 @@ static bool cpu_prepare_triangle(const MopRhiDrawCall *call,
   out->object_id = call->object_id;
   out->wireframe = call->wireframe;
   out->depth_test = call->depth_test;
+  out->depth_write = call->depth_write;
   out->cull_back = call->backface_cull;
   out->light_dir = call->light_dir;
   out->ambient = call->ambient;
@@ -262,6 +278,10 @@ static bool cpu_prepare_triangle(const MopRhiDrawCall *call,
   out->lights = call->lights;
   out->light_count = call->light_count;
   out->cam_eye = call->cam_eye;
+  out->metallic = call->metallic;
+  out->roughness = call->roughness;
+  out->line_width = call->line_width;
+  out->depth_bias = call->depth_bias;
 
   return true;
 }
@@ -373,11 +393,16 @@ static bool cpu_prepare_triangle_ex(const MopRhiDrawCall *call,
       mop_vertex_format_find(fmt, MOP_ATTRIB_TEXCOORD0);
 
   for (int t = 0; t < 3; t++) {
-    /* Position → clip space */
+    /* Position → clip space + world space */
     float pos[3];
     read_attrib_float3(v[t], pos_attr->offset, pos_attr->format, pos);
     MopVec4 p = {pos[0], pos[1], pos[2], 1.0f};
     out->vertices[t].position = mop_mat4_mul_vec4(call->mvp, p);
+    if (call->depth_bias != 0.0f)
+      out->vertices[t].position.z +=
+          call->depth_bias * out->vertices[t].position.w;
+    MopVec4 wp = mop_mat4_mul_vec4(call->model, p);
+    out->vertices[t].world_pos = (MopVec3){wp.x, wp.y, wp.z};
 
     /* Normal → world space */
     if (nrm_attr) {
@@ -445,6 +470,7 @@ static bool cpu_prepare_triangle_ex(const MopRhiDrawCall *call,
   out->object_id = call->object_id;
   out->wireframe = call->wireframe;
   out->depth_test = call->depth_test;
+  out->depth_write = call->depth_write;
   out->cull_back = call->backface_cull;
   out->light_dir = call->light_dir;
   out->ambient = call->ambient;
@@ -454,6 +480,10 @@ static bool cpu_prepare_triangle_ex(const MopRhiDrawCall *call,
   out->lights = call->lights;
   out->light_count = call->light_count;
   out->cam_eye = call->cam_eye;
+  out->metallic = call->metallic;
+  out->roughness = call->roughness;
+  out->line_width = call->line_width;
+  out->depth_bias = call->depth_bias;
 
   return true;
 }
@@ -465,6 +495,16 @@ static void cpu_draw(MopRhiDevice *device, MopRhiFramebuffer *fb,
   const uint32_t *indices = (const uint32_t *)call->index_buffer->data;
   uint32_t tri_count = call->index_count / 3;
   bool use_flex = (call->vertex_format != NULL);
+
+  /* depth_write=false: save depth buffer, render, restore (read-only depth) */
+  float *saved_depth = NULL;
+  if (call->depth_test && !call->depth_write) {
+    size_t depth_size =
+        (size_t)fb->fb.width * (size_t)fb->fb.height * sizeof(float);
+    saved_depth = malloc(depth_size);
+    if (saved_depth)
+      memcpy(saved_depth, fb->fb.depth, depth_size);
+  }
 
   /* Use tiled path if threadpool exists and enough triangles */
   if (device->threadpool && tri_count > 100) {
@@ -495,6 +535,12 @@ static void cpu_draw(MopRhiDevice *device, MopRhiFramebuffer *fb,
       mop_sw_rasterize_tiled(device->threadpool, prepared, prepared_count,
                              &fb->fb);
       free(prepared);
+      if (saved_depth) {
+        size_t depth_size =
+            (size_t)fb->fb.width * (size_t)fb->fb.height * sizeof(float);
+        memcpy(fb->fb.depth, saved_depth, depth_size);
+        free(saved_depth);
+      }
       return;
     }
     /* malloc failed — fall through to single-threaded path */
@@ -527,13 +573,21 @@ static void cpu_draw(MopRhiDevice *device, MopRhiFramebuffer *fb,
           tri.vertices, tri.object_id, tri.wireframe, tri.depth_test,
           tri.cull_back, tri.light_dir, tri.ambient, tri.opacity,
           tri.smooth_shading, tri.blend_mode, tri.lights, tri.light_count,
-          tri.cam_eye, &fb->fb);
+          tri.cam_eye, tri.metallic, tri.roughness, &fb->fb);
     } else {
       mop_sw_rasterize_triangle(tri.vertices, tri.object_id, tri.wireframe,
                                 tri.depth_test, tri.cull_back, tri.light_dir,
                                 tri.ambient, tri.opacity, tri.smooth_shading,
                                 tri.blend_mode, &fb->fb);
     }
+  }
+
+  /* Restore depth buffer if read-only depth test was requested */
+  if (saved_depth) {
+    size_t depth_size =
+        (size_t)fb->fb.width * (size_t)fb->fb.height * sizeof(float);
+    memcpy(fb->fb.depth, saved_depth, depth_size);
+    free(saved_depth);
   }
 }
 
@@ -612,6 +666,38 @@ static const uint8_t *cpu_framebuffer_read_color(MopRhiDevice *device,
 }
 
 /* -------------------------------------------------------------------------
+ * Object-ID buffer readback
+ * ------------------------------------------------------------------------- */
+
+static const uint32_t *cpu_framebuffer_read_object_id(MopRhiDevice *device,
+                                                      MopRhiFramebuffer *fb,
+                                                      int *out_width,
+                                                      int *out_height) {
+  (void)device;
+  if (out_width)
+    *out_width = fb->fb.width;
+  if (out_height)
+    *out_height = fb->fb.height;
+  return fb->fb.object_id;
+}
+
+/* -------------------------------------------------------------------------
+ * Depth buffer readback
+ * ------------------------------------------------------------------------- */
+
+static const float *cpu_framebuffer_read_depth(MopRhiDevice *device,
+                                               MopRhiFramebuffer *fb,
+                                               int *out_width,
+                                               int *out_height) {
+  (void)device;
+  if (out_width)
+    *out_width = fb->fb.width;
+  if (out_height)
+    *out_height = fb->fb.height;
+  return fb->fb.depth;
+}
+
+/* -------------------------------------------------------------------------
  * Texture management
  * ------------------------------------------------------------------------- */
 
@@ -651,6 +737,11 @@ static const void *cpu_buffer_read(MopRhiBuffer *buffer) {
   return buffer ? buffer->data : NULL;
 }
 
+static float cpu_frame_gpu_time_ms(MopRhiDevice *device) {
+  (void)device;
+  return 0.0f;
+}
+
 /* -------------------------------------------------------------------------
  * Backend function table
  * ------------------------------------------------------------------------- */
@@ -670,11 +761,14 @@ static const MopRhiBackend CPU_BACKEND = {
     .pick_read_id = cpu_pick_read_id,
     .pick_read_depth = cpu_pick_read_depth,
     .framebuffer_read_color = cpu_framebuffer_read_color,
+    .framebuffer_read_object_id = cpu_framebuffer_read_object_id,
+    .framebuffer_read_depth = cpu_framebuffer_read_depth,
     .texture_create = cpu_texture_create,
     .texture_destroy = cpu_texture_destroy,
     .draw_instanced = cpu_draw_instanced,
     .buffer_update = cpu_buffer_update,
     .buffer_read = cpu_buffer_read,
+    .frame_gpu_time_ms = cpu_frame_gpu_time_ms,
 };
 
 const MopRhiBackend *mop_rhi_backend_cpu(void) { return &CPU_BACKEND; }

@@ -6,7 +6,7 @@
  */
 
 #include "core/subsystem.h"
-#include <mop/log.h>
+#include <mop/util/log.h>
 #include <stddef.h>
 #include <string.h>
 

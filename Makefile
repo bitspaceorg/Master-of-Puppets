@@ -17,13 +17,14 @@ AR       ?= ar
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-unused-parameter -Wno-missing-field-initializers \
             -fno-common \
-            -Iinclude -Isrc
+            -Iinclude -Isrc -Ithird_party/stb
 
-# Optimization
+# Optimization — -Og preserves debuggability while avoiding -O0's
+# catastrophic performance on math-heavy code (GGX specular, etc.)
 ifdef RELEASE
   CFLAGS += -O2 -DNDEBUG
 else
-  CFLAGS += -O0 -g
+  CFLAGS += -Og -g
 endif
 
 # Sanitizer support: make SANITIZE=asan  or  make SANITIZE=ubsan
@@ -58,17 +59,21 @@ CORE_SRCS := \
   src/rhi/rhi.c \
   src/core/viewport.c \
   src/core/vertex_format.c \
+  src/core/theme.c \
   src/core/light.c \
   src/core/display.c \
   src/core/overlay.c \
   src/core/overlay_builtin.c \
   src/core/subsystem.c \
+  src/core/camera_object.c \
   src/rasterizer/rasterizer.c \
   src/rasterizer/rasterizer_mt.c \
   src/interact/gizmo.c \
   src/interact/camera.c \
   src/interact/input.c \
   src/interact/undo.c \
+  src/interact/selection.c \
+  src/interact/mesh_edit.c \
   src/loader/obj_loader.c \
   src/loader/mop_loader.c \
   src/loader/loader.c \
@@ -81,6 +86,11 @@ CORE_SRCS := \
   src/query/camera_query.c \
   src/query/snapshot.c \
   src/query/spatial.c \
+  src/util/stb_impl.c \
+  src/export/image_export.c \
+  src/export/obj_export.c \
+  src/export/scene_export.c \
+  src/loader/mop_scene.c \
   src/backend/cpu/cpu_backend.c
 
 # Lua config support — auto-detected via pkg-config, disable with MOP_DISABLE_LUA=1
@@ -115,7 +125,11 @@ ifdef MOP_ENABLE_VULKAN
                src/backend/vulkan/vulkan_pipeline.c \
                src/backend/vulkan/vulkan_memory.c
   CFLAGS    += -DMOP_HAS_VULKAN=1
-  LDFLAGS   += -lvulkan
+  # Use pkg-config for Vulkan headers/libs if available (nix)
+  VK_CFLAGS  := $(shell pkg-config --cflags vulkan 2>/dev/null)
+  VK_LDFLAGS := $(shell pkg-config --libs vulkan 2>/dev/null)
+  CFLAGS     += $(VK_CFLAGS)
+  LDFLAGS    += $(if $(VK_LDFLAGS),$(VK_LDFLAGS),-lvulkan)
 endif
 
 # -----------------------------------------------------------------------------
@@ -131,7 +145,7 @@ LIB_OUT   := $(LIB_DIR)/libmop.a
 # -----------------------------------------------------------------------------
 # Default target — static library only
 # -----------------------------------------------------------------------------
-.PHONY: all lib clean install test tools
+.PHONY: all lib clean install test torture tools conformance conformance-tier1 conformance-tier2 conformance-tier3 conformance-tier4 conformance-update-golden
 
 all: lib
 
@@ -160,6 +174,7 @@ obj_dirs:
 	@mkdir -p $(OBJ_DIR)/util
 	@mkdir -p $(OBJ_DIR)/subsystem
 	@mkdir -p $(OBJ_DIR)/query
+	@mkdir -p $(OBJ_DIR)/export
 	@mkdir -p $(OBJ_DIR)/backend/cpu
 	@mkdir -p $(OBJ_DIR)/backend/opengl
 	@mkdir -p $(OBJ_DIR)/backend/vulkan
@@ -179,9 +194,9 @@ clean:
 PREFIX ?= /usr/local
 
 install: lib
-	install -d $(PREFIX)/lib $(PREFIX)/include/mop
-	install -m 644 $(LIB_OUT) $(PREFIX)/lib/
-	install -m 644 include/mop/*.h $(PREFIX)/include/mop/
+	install -d $(PREFIX)/lib
+	find include/mop -type d -exec sh -c 'install -d "$(PREFIX)/$${1}"' _ {} \;
+	find include/mop -name '*.h' -exec sh -c 'install -m 644 "$${1}" "$(PREFIX)/$${1}"' _ {} \;
 
 # -----------------------------------------------------------------------------
 # Tests
@@ -210,6 +225,40 @@ test: $(TEST_BINS)
 		if $$t; then :; else failed=1; fi; \
 	done; \
 	if [ $$failed -ne 0 ]; then exit 1; fi
+
+# Torture tests only (adversarial / long-running subset)
+TORTURE_SRCS := $(wildcard $(TEST_DIR)/test_torture_*.c)
+TORTURE_BINS := $(patsubst $(TEST_DIR)/%.c,$(TEST_BIN)/%,$(TORTURE_SRCS))
+
+torture: $(TORTURE_BINS)
+	@failed=0; \
+	for t in $(TORTURE_BINS); do \
+		if $$t; then :; else failed=1; fi; \
+	done; \
+	if [ $$failed -ne 0 ]; then exit 1; fi
+
+# -----------------------------------------------------------------------------
+# Conformance framework
+# -----------------------------------------------------------------------------
+conformance: lib
+	$(MAKE) -C conformance
+
+conformance-tier1: conformance
+	./build/conformance_runner --tier=1
+
+conformance-tier2: conformance
+	./build/conformance_runner --tier=2
+
+conformance-tier3: conformance
+	./build/conformance_runner --tier=3
+
+conformance-tier4: conformance
+	./build/conformance_runner --tier=4
+
+conformance-update-golden: conformance
+	python3 conformance/render_oracle.py --scene=torture --output=conformance/baselines --export-only
+	@echo "Golden baseline scene/camera exported to conformance/baselines/"
+	@echo "Run your reference renderer to generate frame PNGs."
 
 # -----------------------------------------------------------------------------
 # Tools

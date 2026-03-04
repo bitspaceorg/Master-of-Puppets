@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <mop/loader.h>
+#include <mop/loader/loader.h>
 #include <mop/types.h>
 
 #include <stdint.h>

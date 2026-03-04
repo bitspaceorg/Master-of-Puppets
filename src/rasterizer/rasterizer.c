@@ -17,9 +17,13 @@
 
 #include "rasterizer.h"
 #include <math.h>
-#include <mop/log.h>
+#include <mop/util/log.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* -------------------------------------------------------------------------
  * Framebuffer management
@@ -92,6 +96,221 @@ void mop_sw_framebuffer_clear(MopSwFramebuffer *fb, MopColor clear_color) {
 }
 
 /* -------------------------------------------------------------------------
+ * Shadow map state — set before the main render so that lighting functions
+ * can automatically test directional-light shadows.
+ * ------------------------------------------------------------------------- */
+
+static const float *s_shadow_depth = NULL;
+static int s_shadow_w = 0;
+static int s_shadow_h = 0;
+static MopMat4 s_shadow_vp;
+
+void mop_sw_shadow_set(const float *depth, int w, int h, MopMat4 light_vp) {
+  s_shadow_depth = depth;
+  s_shadow_w = w;
+  s_shadow_h = h;
+  s_shadow_vp = light_vp;
+}
+
+void mop_sw_shadow_clear(void) {
+  s_shadow_depth = NULL;
+  s_shadow_w = 0;
+  s_shadow_h = 0;
+}
+
+/* PCF (Percentage Closer Filtering) shadow test — 3x3 kernel for soft edges.
+ * Returns value in [0, 1]. */
+static float shadow_test_pcf(MopVec3 world_pos) {
+  if (!s_shadow_depth)
+    return 1.0f;
+
+  MopVec4 p = {world_pos.x, world_pos.y, world_pos.z, 1.0f};
+  MopVec4 lp = mop_mat4_mul_vec4(s_shadow_vp, p);
+
+  if (lp.w <= 0.0f)
+    return 1.0f;
+
+  float inv_w = 1.0f / lp.w;
+  float ndcx = lp.x * inv_w;
+  float ndcy = lp.y * inv_w;
+  float ndcz = (lp.z * inv_w + 1.0f) * 0.5f;
+
+  float u = (ndcx + 1.0f) * 0.5f * (float)s_shadow_w;
+  float v = (1.0f - ndcy) * 0.5f * (float)s_shadow_h;
+
+  int cx = (int)u;
+  int cy = (int)v;
+
+  float bias = 0.003f;
+  int lit = 0;
+  int total = 0;
+
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      int sx = cx + dx;
+      int sy = cy + dy;
+      if (sx < 0 || sx >= s_shadow_w || sy < 0 || sy >= s_shadow_h) {
+        lit++;
+        total++;
+        continue;
+      }
+      float shadow_z =
+          s_shadow_depth[(size_t)sy * (size_t)s_shadow_w + (size_t)sx];
+      if (ndcz <= shadow_z + bias)
+        lit++;
+      total++;
+    }
+  }
+
+  return (float)lit / (float)total;
+}
+
+/* -------------------------------------------------------------------------
+ * Shadow map depth-only rendering
+ *
+ * Rasterizes mesh geometry into a depth-only framebuffer from the light's
+ * perspective.  No color, no object ID, no shading — just depth writes.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_shadow_render_mesh(const MopVertex *vertices, uint32_t vertex_count,
+                               const uint32_t *indices, uint32_t index_count,
+                               MopMat4 model, MopMat4 light_vp,
+                               MopSwFramebuffer *shadow_fb) {
+  MopMat4 mvp = mop_mat4_multiply(light_vp, model);
+  float half_w = (float)shadow_fb->width * 0.5f;
+  float half_h = (float)shadow_fb->height * 0.5f;
+
+  for (uint32_t i = 0; i + 2 < index_count; i += 3) {
+    uint32_t i0 = indices[i + 0];
+    uint32_t i1 = indices[i + 1];
+    uint32_t i2 = indices[i + 2];
+    if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count)
+      continue;
+
+    MopVec4 p0 = {vertices[i0].position.x, vertices[i0].position.y,
+                  vertices[i0].position.z, 1.0f};
+    MopVec4 p1 = {vertices[i1].position.x, vertices[i1].position.y,
+                  vertices[i1].position.z, 1.0f};
+    MopVec4 p2 = {vertices[i2].position.x, vertices[i2].position.y,
+                  vertices[i2].position.z, 1.0f};
+
+    MopVec4 c0 = mop_mat4_mul_vec4(mvp, p0);
+    MopVec4 c1 = mop_mat4_mul_vec4(mvp, p1);
+    MopVec4 c2 = mop_mat4_mul_vec4(mvp, p2);
+
+    /* Trivial reject */
+    if ((c0.x < -c0.w && c1.x < -c1.w && c2.x < -c2.w) ||
+        (c0.x > c0.w && c1.x > c1.w && c2.x > c2.w) ||
+        (c0.y < -c0.w && c1.y < -c1.w && c2.y < -c2.w) ||
+        (c0.y > c0.w && c1.y > c1.w && c2.y > c2.w) ||
+        (c0.z < -c0.w && c1.z < -c1.w && c2.z < -c2.w) ||
+        (c0.z > c0.w && c1.z > c1.w && c2.z > c2.w))
+      continue;
+
+    /* W guard */
+    if (c0.w <= 1e-6f || c1.w <= 1e-6f || c2.w <= 1e-6f)
+      continue;
+
+    /* Perspective divide + viewport transform */
+    float inv0 = 1.0f / c0.w, inv1 = 1.0f / c1.w, inv2 = 1.0f / c2.w;
+
+    float sx0 = (c0.x * inv0 + 1.0f) * half_w;
+    float sy0 = (1.0f - c0.y * inv0) * half_h;
+    float sz0 = (c0.z * inv0 + 1.0f) * 0.5f;
+    float sx1 = (c1.x * inv1 + 1.0f) * half_w;
+    float sy1 = (1.0f - c1.y * inv1) * half_h;
+    float sz1 = (c1.z * inv1 + 1.0f) * 0.5f;
+    float sx2 = (c2.x * inv2 + 1.0f) * half_w;
+    float sy2 = (1.0f - c2.y * inv2) * half_h;
+    float sz2 = (c2.z * inv2 + 1.0f) * 0.5f;
+
+    /* Bounding box */
+    float fmin_x = sx0, fmin_y = sy0;
+    float fmax_x = sx0, fmax_y = sy0;
+    if (sx1 < fmin_x)
+      fmin_x = sx1;
+    if (sx1 > fmax_x)
+      fmax_x = sx1;
+    if (sx2 < fmin_x)
+      fmin_x = sx2;
+    if (sx2 > fmax_x)
+      fmax_x = sx2;
+    if (sy1 < fmin_y)
+      fmin_y = sy1;
+    if (sy1 > fmax_y)
+      fmax_y = sy1;
+    if (sy2 < fmin_y)
+      fmin_y = sy2;
+    if (sy2 > fmax_y)
+      fmax_y = sy2;
+
+    int min_x = (int)floorf(fmin_x), min_y = (int)floorf(fmin_y);
+    int max_x = (int)ceilf(fmax_x), max_y = (int)ceilf(fmax_y);
+    if (min_x < 0)
+      min_x = 0;
+    if (min_y < 0)
+      min_y = 0;
+    if (max_x >= shadow_fb->width)
+      max_x = shadow_fb->width - 1;
+    if (max_y >= shadow_fb->height)
+      max_y = shadow_fb->height - 1;
+    if (min_x > max_x || min_y > max_y)
+      continue;
+
+    float area = (sx1 - sx0) * (sy2 - sy0) - (sx2 - sx0) * (sy1 - sy0);
+    if (fabsf(area) < 1e-6f)
+      continue;
+    float inv_area = 1.0f / fabsf(area);
+
+    /* Edge function for depth-only rasterization (no winding cull) */
+    float e0_dx = sy1 - sy2, e0_dy = sx2 - sx1;
+    float e1_dx = sy2 - sy0, e1_dy = sx0 - sx2;
+    float e2_dx = sy0 - sy1, e2_dy = sx1 - sx0;
+
+    bool flip = (area < 0.0f);
+    if (flip) {
+      e0_dx = -e0_dx;
+      e0_dy = -e0_dy;
+      e1_dx = -e1_dx;
+      e1_dy = -e1_dy;
+      e2_dx = -e2_dx;
+      e2_dy = -e2_dy;
+    }
+
+    float px0 = (float)min_x + 0.5f;
+    float py0 = (float)min_y + 0.5f;
+    float w0_row = (sx2 - sx1) * (py0 - sy1) - (sy2 - sy1) * (px0 - sx1);
+    float w1_row = (sx0 - sx2) * (py0 - sy2) - (sy0 - sy2) * (px0 - sx2);
+    float w2_row = (sx1 - sx0) * (py0 - sy0) - (sy1 - sy0) * (px0 - sx0);
+    if (flip) {
+      w0_row = -w0_row;
+      w1_row = -w1_row;
+      w2_row = -w2_row;
+    }
+
+    int w = shadow_fb->width;
+    for (int y = min_y; y <= max_y; y++) {
+      float w0 = w0_row, w1 = w1_row, w2 = w2_row;
+      for (int x = min_x; x <= max_x; x++) {
+        if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+          float b0 = w0 * inv_area, b1 = w1 * inv_area, b2 = w2 * inv_area;
+          float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
+          size_t idx = (size_t)y * (size_t)w + (size_t)x;
+          if (z < shadow_fb->depth[idx])
+            shadow_fb->depth[idx] = z;
+        }
+        w0 += e0_dx;
+        w1 += e1_dx;
+        w2 += e2_dx;
+      }
+      w0_row += e0_dy;
+      w1_row += e1_dy;
+      w2_row += e2_dy;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Sutherland-Hodgman clipping against one plane
  *
  * A clip plane is defined by the condition:
@@ -134,6 +353,9 @@ static MopSwClipVertex lerp_vertex(MopSwClipVertex a, MopSwClipVertex b,
   result.normal.x = a.normal.x + t * (b.normal.x - a.normal.x);
   result.normal.y = a.normal.y + t * (b.normal.y - a.normal.y);
   result.normal.z = a.normal.z + t * (b.normal.z - a.normal.z);
+  result.world_pos.x = a.world_pos.x + t * (b.world_pos.x - a.world_pos.x);
+  result.world_pos.y = a.world_pos.y + t * (b.world_pos.y - a.world_pos.y);
+  result.world_pos.z = a.world_pos.z + t * (b.world_pos.z - a.world_pos.z);
   result.color.r = a.color.r + t * (b.color.r - a.color.r);
   result.color.g = a.color.g + t * (b.color.g - a.color.g);
   result.color.b = a.color.b + t * (b.color.b - a.color.b);
@@ -268,6 +490,187 @@ void mop_sw_draw_line(MopSwFramebuffer *fb, int x0, int y0, float z0, int x1,
 }
 
 /* -------------------------------------------------------------------------
+ * Anti-aliased line drawing (Xiaolin Wu algorithm)
+ *
+ * For thickness <= 1.0, uses Xiaolin Wu's algorithm with fractional
+ * coverage blending for smooth edges.
+ * For thickness > 1.0, expands the line into a quad and rasterizes with
+ * edge feathering for anti-aliased thick lines.
+ * ------------------------------------------------------------------------- */
+
+static inline void aa_plot(MopSwFramebuffer *fb, int x, int y, float z,
+                           uint8_t r, uint8_t g, uint8_t b, float coverage,
+                           uint32_t object_id, bool depth_test) {
+  if (x < 0 || x >= fb->width || y < 0 || y >= fb->height)
+    return;
+  if (coverage < 0.004f)
+    return;
+
+  size_t idx = (size_t)y * (size_t)fb->width + (size_t)x;
+
+  if (depth_test && z >= fb->depth[idx])
+    return;
+
+  /* Alpha-blend with existing pixel */
+  size_t ci = idx * 4;
+  uint8_t dr = fb->color[ci + 0];
+  uint8_t dg = fb->color[ci + 1];
+  uint8_t db = fb->color[ci + 2];
+
+  float inv = 1.0f - coverage;
+  fb->color[ci + 0] = (uint8_t)(r * coverage + dr * inv);
+  fb->color[ci + 1] = (uint8_t)(g * coverage + dg * inv);
+  fb->color[ci + 2] = (uint8_t)(b * coverage + db * inv);
+  fb->color[ci + 3] = 255;
+
+  if (coverage > 0.5f) {
+    fb->depth[idx] = z;
+    fb->object_id[idx] = object_id;
+  }
+}
+
+static float fpart(float x) { return x - floorf(x); }
+static float rfpart(float x) { return 1.0f - fpart(x); }
+
+/* Forward declaration — rasterize_filled_triangle is defined below */
+static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
+                                      float sy0, float sz0, float sx1,
+                                      float sy1, float sz1, float sx2,
+                                      float sy2, float sz2, uint8_t cr,
+                                      uint8_t cg, uint8_t cb, uint8_t ca,
+                                      uint32_t object_id, bool depth_test,
+                                      MopBlendMode blend_mode);
+
+void mop_sw_draw_line_aa(MopSwFramebuffer *fb, float x0, float y0, float z0,
+                         float x1, float y1, float z1, uint8_t r, uint8_t g,
+                         uint8_t b, uint32_t object_id, bool depth_test,
+                         float thickness) {
+  if (thickness > 1.5f) {
+    /* Thick line: expand to quad and draw as two triangles.
+     * Compute perpendicular direction in screen space. */
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.001f)
+      return;
+
+    float inv_len = 1.0f / len;
+    float px = -dy * inv_len * thickness * 0.5f;
+    float py = dx * inv_len * thickness * 0.5f;
+
+    /* 4 corners of the quad */
+    float qx0 = x0 + px, qy0 = y0 + py;
+    float qx1 = x0 - px, qy1 = y0 - py;
+    float qx2 = x1 - px, qy2 = y1 - py;
+    float qx3 = x1 + px, qy3 = y1 + py;
+
+    /* Rasterize as two filled triangles with alpha blending.
+     * Use the line color as a flat color and MOP_BLEND_OPAQUE. */
+    uint8_t ca = 255;
+    rasterize_filled_triangle(fb, qx0, qy0, z0, qx1, qy1, z0, qx2, qy2, z1, r,
+                              g, b, ca, object_id, depth_test,
+                              MOP_BLEND_OPAQUE);
+    rasterize_filled_triangle(fb, qx0, qy0, z0, qx2, qy2, z1, qx3, qy3, z1, r,
+                              g, b, ca, object_id, depth_test,
+                              MOP_BLEND_OPAQUE);
+    return;
+  }
+
+  /* Xiaolin Wu anti-aliased line algorithm */
+  bool steep = fabsf(y1 - y0) > fabsf(x1 - x0);
+
+  if (steep) {
+    /* Swap x and y coordinates */
+    float tmp;
+    tmp = x0;
+    x0 = y0;
+    y0 = tmp;
+    tmp = x1;
+    x1 = y1;
+    y1 = tmp;
+  }
+
+  if (x0 > x1) {
+    float tmp;
+    tmp = x0;
+    x0 = x1;
+    x1 = tmp;
+    tmp = y0;
+    y0 = y1;
+    y1 = tmp;
+    tmp = z0;
+    z0 = z1;
+    z1 = tmp;
+  }
+
+  float dx = x1 - x0;
+  float dy = y1 - y0;
+  float gradient = (dx < 0.001f) ? 1.0f : dy / dx;
+
+  /* First endpoint */
+  float xend = roundf(x0);
+  float yend = y0 + gradient * (xend - x0);
+  float xgap = rfpart(x0 + 0.5f);
+  int xpxl1 = (int)xend;
+  int ypxl1 = (int)floorf(yend);
+  float z_at = z0;
+
+  if (steep) {
+    aa_plot(fb, ypxl1, xpxl1, z_at, r, g, b, rfpart(yend) * xgap, object_id,
+            depth_test);
+    aa_plot(fb, ypxl1 + 1, xpxl1, z_at, r, g, b, fpart(yend) * xgap, object_id,
+            depth_test);
+  } else {
+    aa_plot(fb, xpxl1, ypxl1, z_at, r, g, b, rfpart(yend) * xgap, object_id,
+            depth_test);
+    aa_plot(fb, xpxl1, ypxl1 + 1, z_at, r, g, b, fpart(yend) * xgap, object_id,
+            depth_test);
+  }
+
+  float intery = yend + gradient;
+
+  /* Second endpoint */
+  xend = roundf(x1);
+  yend = y1 + gradient * (xend - x1);
+  xgap = fpart(x1 + 0.5f);
+  int xpxl2 = (int)xend;
+  int ypxl2 = (int)floorf(yend);
+  float z_end = z1;
+
+  if (steep) {
+    aa_plot(fb, ypxl2, xpxl2, z_end, r, g, b, rfpart(yend) * xgap, object_id,
+            depth_test);
+    aa_plot(fb, ypxl2 + 1, xpxl2, z_end, r, g, b, fpart(yend) * xgap, object_id,
+            depth_test);
+  } else {
+    aa_plot(fb, xpxl2, ypxl2, z_end, r, g, b, rfpart(yend) * xgap, object_id,
+            depth_test);
+    aa_plot(fb, xpxl2, ypxl2 + 1, z_end, r, g, b, fpart(yend) * xgap, object_id,
+            depth_test);
+  }
+
+  /* Main loop */
+  float total_steps = (float)(xpxl2 - xpxl1);
+  if (total_steps < 1.0f)
+    total_steps = 1.0f;
+
+  for (int x = xpxl1 + 1; x < xpxl2; x++) {
+    float t = (float)(x - xpxl1) / total_steps;
+    float z = z0 + t * (z1 - z0);
+    int iy = (int)floorf(intery);
+
+    if (steep) {
+      aa_plot(fb, iy, x, z, r, g, b, rfpart(intery), object_id, depth_test);
+      aa_plot(fb, iy + 1, x, z, r, g, b, fpart(intery), object_id, depth_test);
+    } else {
+      aa_plot(fb, x, iy, z, r, g, b, rfpart(intery), object_id, depth_test);
+      aa_plot(fb, x, iy + 1, z, r, g, b, fpart(intery), object_id, depth_test);
+    }
+    intery += gradient;
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Half-space triangle rasterization
  *
  * After perspective division and viewport transform, the three vertices
@@ -378,7 +781,9 @@ static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
   int width = fb->width;
 
   if (blend_mode == MOP_BLEND_OPAQUE && ca == 255) {
-    /* ── Opaque fast path ── */
+    /* ── Opaque path — strict interior test ──
+     * No per-triangle edge AA; FXAA post-process handles silhouette
+     * anti-aliasing.  This avoids seam artifacts at shared mesh edges. */
     for (int y = min_y; y <= max_y; y++) {
       float w0 = w0_row, w1 = w1_row, w2 = w2_row;
       float z = z_row;
@@ -566,9 +971,12 @@ void mop_sw_rasterize_triangle(const MopSwClipVertex vertices[3],
     /* Smooth shading path — dispatch to per-pixel normal interpolation */
     if (smooth_shading && !wireframe) {
       MopSwScreenVertex sv[3] = {
-          {sx0, sy0, sz0, v0->normal, v0->color, v0->u, v0->v, v0->tangent},
-          {sx1, sy1, sz1, v1->normal, v1->color, v1->u, v1->v, v1->tangent},
-          {sx2, sy2, sz2, v2->normal, v2->color, v2->u, v2->v, v2->tangent},
+          {sx0, sy0, sz0, inv_w0, v0->normal, v0->world_pos, v0->color, v0->u,
+           v0->v, v0->tangent},
+          {sx1, sy1, sz1, inv_w1, v1->normal, v1->world_pos, v1->color, v1->u,
+           v1->v, v1->tangent},
+          {sx2, sy2, sz2, inv_w2, v2->normal, v2->world_pos, v2->color, v2->u,
+           v2->v, v2->tangent},
       };
       mop_sw_rasterize_triangle_smooth(sv, object_id, depth_test, light_dir,
                                        ambient, opacity, blend_mode, fb);
@@ -595,12 +1003,12 @@ void mop_sw_rasterize_triangle(const MopSwClipVertex vertices[3],
     uint8_t cb = (uint8_t)(clamp01(avg_b * lighting) * 255.0f);
 
     if (wireframe) {
-      mop_sw_draw_line(fb, (int)sx0, (int)sy0, sz0, (int)sx1, (int)sy1, sz1, cr,
-                       cg, cb, object_id, depth_test);
-      mop_sw_draw_line(fb, (int)sx1, (int)sy1, sz1, (int)sx2, (int)sy2, sz2, cr,
-                       cg, cb, object_id, depth_test);
-      mop_sw_draw_line(fb, (int)sx2, (int)sy2, sz2, (int)sx0, (int)sy0, sz0, cr,
-                       cg, cb, object_id, depth_test);
+      mop_sw_draw_line_aa(fb, sx0, sy0, sz0, sx1, sy1, sz1, cr, cg, cb,
+                          object_id, depth_test, 1.0f);
+      mop_sw_draw_line_aa(fb, sx1, sy1, sz1, sx2, sy2, sz2, cr, cg, cb,
+                          object_id, depth_test, 1.0f);
+      mop_sw_draw_line_aa(fb, sx2, sy2, sz2, sx0, sy0, sz0, cr, cg, cb,
+                          object_id, depth_test, 1.0f);
     } else {
       rasterize_filled_triangle(fb, sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2,
                                 cr, cg, cb, ca, object_id, depth_test,
@@ -610,10 +1018,12 @@ void mop_sw_rasterize_triangle(const MopSwClipVertex vertices[3],
 }
 
 /* -------------------------------------------------------------------------
- * Smooth-shaded triangle rasterization (Gouraud)
+ * Smooth-shaded triangle rasterization (Phong)
  *
- * Like rasterize_filled_triangle but interpolates normals and colors
- * per-pixel using barycentric coordinates.
+ * Per-pixel lighting with:
+ *   - Perspective-correct interpolation of normals, colors, UVs
+ *   - Edge anti-aliasing (coverage-based blend at triangle edges)
+ *   - Blinn-Phong specular highlights
  * ------------------------------------------------------------------------- */
 
 void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
@@ -684,6 +1094,14 @@ void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
     e2_dy = -e2_dy;
   }
 
+  /* Edge-distance scaling for AA */
+  float e0_len = sqrtf(e0_dx * e0_dx + e0_dy * e0_dy);
+  float e1_len = sqrtf(e1_dx * e1_dx + e1_dy * e1_dy);
+  float e2_len = sqrtf(e2_dx * e2_dx + e2_dy * e2_dy);
+  float inv_e0 = (e0_len > 1e-6f) ? 1.0f / e0_len : 0.0f;
+  float inv_e1 = (e1_len > 1e-6f) ? 1.0f / e1_len : 0.0f;
+  float inv_e2 = (e2_len > 1e-6f) ? 1.0f / e2_len : 0.0f;
+
   float px0 = (float)min_x + 0.5f;
   float py0 = (float)min_y + 0.5f;
 
@@ -698,84 +1116,135 @@ void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
   }
 
   MopVec3 nl = mop_vec3_normalize(light_dir);
-  uint8_t ca = (uint8_t)(clamp01(opacity) * 255.0f);
-  float a_f = (float)ca / 255.0f;
-  float inv_a = 1.0f - a_f;
+  float op = clamp01(opacity);
   int width = fb->width;
+
+  /* Per-vertex 1/w for perspective-correct interpolation */
+  float iw0 = verts[0].inv_w, iw1 = verts[1].inv_w, iw2 = verts[2].inv_w;
 
   for (int y = min_y; y <= max_y; y++) {
     float w0 = w0_row, w1 = w1_row, w2 = w2_row;
 
     for (int x = min_x; x <= max_x; x++) {
       if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
-        float b0 = w0 * inv_area;
-        float b1 = w1 * inv_area;
-        float b2 = w2 * inv_area;
+        /* Compute edge distances for AA */
+        float d0 = w0 * inv_e0;
+        float d1 = w1 * inv_e1;
+        float d2 = w2 * inv_e2;
+        float min_d = d0;
+        if (d1 < min_d)
+          min_d = d1;
+        if (d2 < min_d)
+          min_d = d2;
 
-        float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
-        size_t idx = (size_t)y * (size_t)width + (size_t)x;
+        if (min_d >= 0.0f) {
+          float b0 = w0 * inv_area;
+          float b1 = w1 * inv_area;
+          float b2 = w2 * inv_area;
 
-        if (!depth_test || z < fb->depth[idx]) {
-          /* Interpolate normal */
-          MopVec3 n = {b0 * verts[0].normal.x + b1 * verts[1].normal.x +
-                           b2 * verts[2].normal.x,
-                       b0 * verts[0].normal.y + b1 * verts[1].normal.y +
-                           b2 * verts[2].normal.y,
-                       b0 * verts[0].normal.z + b1 * verts[1].normal.z +
-                           b2 * verts[2].normal.z};
-          n = mop_vec3_normalize(n);
+          /* Depth (screen-space linear is correct for z/w) */
+          float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
+          size_t idx = (size_t)y * (size_t)width + (size_t)x;
 
-          /* Interpolate color */
-          float cr = b0 * verts[0].color.r + b1 * verts[1].color.r +
-                     b2 * verts[2].color.r;
-          float cg = b0 * verts[0].color.g + b1 * verts[1].color.g +
-                     b2 * verts[2].color.g;
-          float cb = b0 * verts[0].color.b + b1 * verts[1].color.b +
-                     b2 * verts[2].color.b;
+          if (!depth_test || z < fb->depth[idx]) {
+            /* Perspective-correct barycentric weights */
+            float pc0 = b0 * iw0;
+            float pc1 = b1 * iw1;
+            float pc2 = b2 * iw2;
+            float inv_pc = 1.0f / (pc0 + pc1 + pc2);
+            pc0 *= inv_pc;
+            pc1 *= inv_pc;
+            pc2 *= inv_pc;
 
-          float ndotl = mop_vec3_dot(n, nl);
-          if (ndotl < 0.0f)
-            ndotl = 0.0f;
-          float lit = clamp01(ambient + (1.0f - ambient) * ndotl);
+            /* Interpolate normal (perspective-correct) */
+            MopVec3 n = {pc0 * verts[0].normal.x + pc1 * verts[1].normal.x +
+                             pc2 * verts[2].normal.x,
+                         pc0 * verts[0].normal.y + pc1 * verts[1].normal.y +
+                             pc2 * verts[2].normal.y,
+                         pc0 * verts[0].normal.z + pc1 * verts[1].normal.z +
+                             pc2 * verts[2].normal.z};
+            n = mop_vec3_normalize(n);
 
-          uint8_t pr = (uint8_t)(clamp01(cr * lit) * 255.0f);
-          uint8_t pg = (uint8_t)(clamp01(cg * lit) * 255.0f);
-          uint8_t pb = (uint8_t)(clamp01(cb * lit) * 255.0f);
+            /* Interpolate color (perspective-correct) */
+            float fr = pc0 * verts[0].color.r + pc1 * verts[1].color.r +
+                       pc2 * verts[2].color.r;
+            float fg = pc0 * verts[0].color.g + pc1 * verts[1].color.g +
+                       pc2 * verts[2].color.g;
+            float fb_ = pc0 * verts[0].color.b + pc1 * verts[1].color.b +
+                        pc2 * verts[2].color.b;
 
-          size_t ci = idx * 4;
-          if (blend_mode == MOP_BLEND_OPAQUE && ca == 255) {
-            fb->color[ci + 0] = pr;
-            fb->color[ci + 1] = pg;
-            fb->color[ci + 2] = pb;
-            fb->color[ci + 3] = 255;
-            fb->depth[idx] = z;
-            fb->object_id[idx] = object_id;
-          } else {
-            uint8_t dr = fb->color[ci + 0];
-            uint8_t dg = fb->color[ci + 1];
-            uint8_t db = fb->color[ci + 2];
-            switch (blend_mode) {
-            case MOP_BLEND_ADDITIVE: {
-              int ar = (int)dr + (int)(pr * a_f);
-              int ag = (int)dg + (int)(pg * a_f);
-              int ab = (int)db + (int)(pb * a_f);
-              fb->color[ci + 0] = (uint8_t)(ar > 255 ? 255 : ar);
-              fb->color[ci + 1] = (uint8_t)(ag > 255 ? 255 : ag);
-              fb->color[ci + 2] = (uint8_t)(ab > 255 ? 255 : ab);
-              break;
+            /* Diffuse lighting */
+            float ndotl = mop_vec3_dot(n, nl);
+            if (ndotl < 0.0f)
+              ndotl = 0.0f;
+            float lit = ambient + (1.0f - ambient) * ndotl;
+
+            /* Blinn-Phong specular (view-independent approximation:
+             * half-vector between light and up/view) */
+            MopVec3 half_v =
+                mop_vec3_normalize((MopVec3){nl.x, nl.y + 1.0f, nl.z});
+            float ndoth = mop_vec3_dot(n, half_v);
+            if (ndoth < 0.0f)
+              ndoth = 0.0f;
+            /* Specular power 32, intensity 0.25 */
+            float spec = ndoth * ndoth;
+            spec *= spec; /* ^4 */
+            spec *= spec; /* ^8 */
+            spec *= spec; /* ^16 */
+            spec *= spec; /* ^32 */
+            spec *= 0.25f;
+
+            float pr = clamp01(fr * lit + spec);
+            float pg = clamp01(fg * lit + spec);
+            float pb = clamp01(fb_ * lit + spec);
+
+            /* Edge AA coverage — suppress at interior mesh edges to
+             * avoid seam artifacts (only blend at silhouette edges). */
+            float existing_z = fb->depth[idx];
+            bool silhouette = (existing_z - z) > 0.005f;
+            float cov = (min_d < 1.0f && silhouette) ? min_d : 1.0f;
+            float final_alpha = op * cov;
+
+            size_t ci = idx * 4;
+            if (blend_mode == MOP_BLEND_OPAQUE && final_alpha >= 1.0f) {
+              fb->color[ci + 0] = (uint8_t)(pr * 255.0f);
+              fb->color[ci + 1] = (uint8_t)(pg * 255.0f);
+              fb->color[ci + 2] = (uint8_t)(pb * 255.0f);
+              fb->color[ci + 3] = 255;
+              fb->depth[idx] = z;
+              fb->object_id[idx] = object_id;
+            } else {
+              float inv_fa = 1.0f - final_alpha;
+              float dr = (float)fb->color[ci + 0] / 255.0f;
+              float dg = (float)fb->color[ci + 1] / 255.0f;
+              float db = (float)fb->color[ci + 2] / 255.0f;
+
+              switch (blend_mode) {
+              case MOP_BLEND_ADDITIVE:
+                pr = clamp01(dr + pr * final_alpha);
+                pg = clamp01(dg + pg * final_alpha);
+                pb = clamp01(db + pb * final_alpha);
+                break;
+              case MOP_BLEND_MULTIPLY:
+                pr = dr * pr;
+                pg = dg * pg;
+                pb = db * pb;
+                break;
+              default: /* ALPHA / OPAQUE with edge AA */
+                pr = pr * final_alpha + dr * inv_fa;
+                pg = pg * final_alpha + dg * inv_fa;
+                pb = pb * final_alpha + db * inv_fa;
+                break;
+              }
+              fb->color[ci + 0] = (uint8_t)(clamp01(pr) * 255.0f);
+              fb->color[ci + 1] = (uint8_t)(clamp01(pg) * 255.0f);
+              fb->color[ci + 2] = (uint8_t)(clamp01(pb) * 255.0f);
+              fb->color[ci + 3] = 255;
+              if (final_alpha > 0.5f) {
+                fb->depth[idx] = z;
+                fb->object_id[idx] = object_id;
+              }
             }
-            case MOP_BLEND_MULTIPLY:
-              fb->color[ci + 0] = (uint8_t)((dr * pr) / 255);
-              fb->color[ci + 1] = (uint8_t)((dg * pg) / 255);
-              fb->color[ci + 2] = (uint8_t)((db * pb) / 255);
-              break;
-            default:
-              fb->color[ci + 0] = (uint8_t)(pr * a_f + dr * inv_a);
-              fb->color[ci + 1] = (uint8_t)(pg * a_f + dg * inv_a);
-              fb->color[ci + 2] = (uint8_t)(pb * a_f + db * inv_a);
-              break;
-            }
-            fb->color[ci + 3] = 255;
           }
         }
       }
@@ -831,8 +1300,11 @@ static float compute_multi_light(MopVec3 normal, MopVec3 world_pos,
           attenuation = 0.0f;
         attenuation *= attenuation;
       } else {
-        /* Inverse-square falloff */
-        attenuation = 1.0f / (1.0f + dist * dist);
+        /* Physical inverse-square falloff */
+        float d2 = dist * dist;
+        if (d2 < 0.01f)
+          d2 = 0.01f;
+        attenuation = 1.0f / d2;
       }
       break;
     }
@@ -852,7 +1324,8 @@ static float compute_multi_light(MopVec3 normal, MopVec3 world_pos,
       } else if (cos_angle < lights[i].spot_inner_cos) {
         float range = lights[i].spot_inner_cos - lights[i].spot_outer_cos;
         if (range > 1e-6f) {
-          spot_factor = (cos_angle - lights[i].spot_outer_cos) / range;
+          float t = (cos_angle - lights[i].spot_outer_cos) / range;
+          spot_factor = t * t * (3.0f - 2.0f * t); /* smoothstep */
         }
       }
 
@@ -872,23 +1345,254 @@ static float compute_multi_light(MopVec3 normal, MopVec3 world_pos,
 
     if (ndotl < 0.0f)
       ndotl = 0.0f;
-    total += ndotl * lights[i].intensity * attenuation * spot_factor;
+
+    /* Shadow test for directional lights */
+    float shadow = 1.0f;
+    if (lights[i].type == MOP_LIGHT_DIRECTIONAL && s_shadow_depth)
+      shadow = shadow_test_pcf(world_pos);
+
+    total += ndotl * lights[i].intensity * attenuation * spot_factor * shadow;
   }
 
   return clamp01(total);
 }
 
 /* -------------------------------------------------------------------------
- * Smooth-shaded triangle rasterization with multi-light support
+ * Per-channel multi-light diffuse (applies light color per RGB channel).
+ * Used by the smooth per-pixel shading path for accurate color tinting.
  * ------------------------------------------------------------------------- */
 
-void mop_sw_rasterize_triangle_smooth_ml(const MopSwScreenVertex verts[3],
-                                         uint32_t object_id, bool depth_test,
-                                         MopVec3 light_dir, float ambient,
-                                         float opacity, MopBlendMode blend_mode,
-                                         const MopLight *lights,
-                                         uint32_t light_count, MopVec3 cam_eye,
-                                         MopSwFramebuffer *fb) {
+static void compute_multi_light_rgb(MopVec3 normal, MopVec3 world_pos,
+                                    const MopLight *lights,
+                                    uint32_t light_count, float ambient,
+                                    float *out_r, float *out_g, float *out_b) {
+  *out_r = ambient;
+  *out_g = ambient;
+  *out_b = ambient;
+
+  for (uint32_t i = 0; i < light_count; i++) {
+    if (!lights[i].active)
+      continue;
+
+    float ndotl = 0.0f;
+    float attenuation = 1.0f;
+    float spot_factor = 1.0f;
+
+    switch (lights[i].type) {
+    case MOP_LIGHT_DIRECTIONAL: {
+      MopVec3 dir = mop_vec3_normalize(lights[i].direction);
+      ndotl = mop_vec3_dot(normal, dir);
+      break;
+    }
+    case MOP_LIGHT_POINT: {
+      MopVec3 to_light = mop_vec3_sub(lights[i].position, world_pos);
+      float dist = mop_vec3_length(to_light);
+      if (dist < 1e-6f)
+        dist = 1e-6f;
+      MopVec3 dir = mop_vec3_scale(to_light, 1.0f / dist);
+      ndotl = mop_vec3_dot(normal, dir);
+      if (lights[i].range > 0.0f) {
+        float r = dist / lights[i].range;
+        attenuation = 1.0f - r;
+        if (attenuation < 0.0f)
+          attenuation = 0.0f;
+        attenuation *= attenuation;
+      } else {
+        float d2 = dist * dist;
+        if (d2 < 0.01f)
+          d2 = 0.01f;
+        attenuation = 1.0f / d2;
+      }
+      break;
+    }
+    case MOP_LIGHT_SPOT: {
+      MopVec3 to_light = mop_vec3_sub(lights[i].position, world_pos);
+      float dist = mop_vec3_length(to_light);
+      if (dist < 1e-6f)
+        dist = 1e-6f;
+      MopVec3 dir = mop_vec3_scale(to_light, 1.0f / dist);
+      ndotl = mop_vec3_dot(normal, dir);
+      MopVec3 spot_dir = mop_vec3_normalize(lights[i].direction);
+      float cos_angle = -mop_vec3_dot(dir, spot_dir);
+      if (cos_angle < lights[i].spot_outer_cos) {
+        spot_factor = 0.0f;
+      } else if (cos_angle < lights[i].spot_inner_cos) {
+        float range_s = lights[i].spot_inner_cos - lights[i].spot_outer_cos;
+        if (range_s > 1e-6f) {
+          float t = (cos_angle - lights[i].spot_outer_cos) / range_s;
+          spot_factor = t * t * (3.0f - 2.0f * t); /* smoothstep */
+        }
+      }
+      if (lights[i].range > 0.0f) {
+        float r = dist / lights[i].range;
+        attenuation = 1.0f - r;
+        if (attenuation < 0.0f)
+          attenuation = 0.0f;
+        attenuation *= attenuation;
+      } else {
+        float d2 = dist * dist;
+        if (d2 < 0.01f)
+          d2 = 0.01f;
+        attenuation = 1.0f / d2;
+      }
+      break;
+    }
+    }
+
+    if (ndotl < 0.0f)
+      ndotl = 0.0f;
+
+    /* Shadow test for directional lights */
+    float shadow = 1.0f;
+    if (lights[i].type == MOP_LIGHT_DIRECTIONAL && s_shadow_depth)
+      shadow = shadow_test_pcf(world_pos);
+
+    float contrib =
+        ndotl * lights[i].intensity * attenuation * spot_factor * shadow;
+    *out_r += contrib * lights[i].color.r;
+    *out_g += contrib * lights[i].color.g;
+    *out_b += contrib * lights[i].color.b;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Multi-light GGX specular helper (Cook-Torrance microfacet model)
+ *
+ * Accumulates physically-based specular from all active lights using:
+ *   - GGX normal distribution function (Trowbridge-Reitz)
+ *   - Smith-Schlick geometry term
+ *   - Schlick Fresnel approximation
+ *
+ * Returns per-channel specular via output pointers (includes Fresnel/F0).
+ * ------------------------------------------------------------------------- */
+
+static void compute_multi_specular_ggx(MopVec3 normal, MopVec3 world_pos,
+                                       MopVec3 view_dir, const MopLight *lights,
+                                       uint32_t light_count, float roughness,
+                                       float metallic, float base_r,
+                                       float base_g, float base_b,
+                                       float *out_spec_r, float *out_spec_g,
+                                       float *out_spec_b) {
+  *out_spec_r = *out_spec_g = *out_spec_b = 0.0f;
+
+  float alpha = roughness * roughness;
+  float alpha2 = alpha * alpha;
+  if (alpha2 < 1e-7f)
+    alpha2 = 1e-7f;
+
+  float ndotv = mop_vec3_dot(normal, view_dir);
+  if (ndotv < 1e-4f)
+    ndotv = 1e-4f;
+
+  /* F0: dielectric=0.04, metallic=base_color */
+  float f0_r = 0.04f * (1.0f - metallic) + base_r * metallic;
+  float f0_g = 0.04f * (1.0f - metallic) + base_g * metallic;
+  float f0_b = 0.04f * (1.0f - metallic) + base_b * metallic;
+
+  /* Smith-Schlick G1 for view direction (constant across lights) */
+  float k = alpha * 0.5f;
+  float g1v = ndotv / (ndotv * (1.0f - k) + k);
+
+  for (uint32_t i = 0; i < light_count; i++) {
+    if (!lights[i].active)
+      continue;
+
+    MopVec3 l_dir = {0, 0, 0};
+    float attenuation = 1.0f;
+
+    switch (lights[i].type) {
+    case MOP_LIGHT_DIRECTIONAL:
+      l_dir = mop_vec3_normalize(lights[i].direction);
+      break;
+    case MOP_LIGHT_POINT:
+    case MOP_LIGHT_SPOT: {
+      MopVec3 to_light = mop_vec3_sub(lights[i].position, world_pos);
+      float dist = mop_vec3_length(to_light);
+      if (dist < 1e-6f)
+        dist = 1e-6f;
+      l_dir = mop_vec3_scale(to_light, 1.0f / dist);
+      if (lights[i].range > 0.0f) {
+        float r = dist / lights[i].range;
+        attenuation = 1.0f - r;
+        if (attenuation < 0.0f)
+          attenuation = 0.0f;
+        attenuation *= attenuation;
+      } else {
+        float d2 = dist * dist;
+        if (d2 < 0.01f)
+          d2 = 0.01f;
+        attenuation = 1.0f / d2;
+      }
+      break;
+    }
+    }
+
+    float ndotl = mop_vec3_dot(normal, l_dir);
+    if (ndotl <= 0.0f)
+      continue;
+
+    /* Half vector */
+    MopVec3 h = mop_vec3_normalize(mop_vec3_add(l_dir, view_dir));
+    float ndoth = mop_vec3_dot(normal, h);
+    if (ndoth < 0.0f)
+      ndoth = 0.0f;
+    float vdoth = mop_vec3_dot(view_dir, h);
+    if (vdoth < 0.0f)
+      vdoth = 0.0f;
+
+    /* GGX Normal Distribution (Trowbridge-Reitz) */
+    float ndoth2 = ndoth * ndoth;
+    float denom_d = ndoth2 * (alpha2 - 1.0f) + 1.0f;
+    float D = alpha2 / ((float)M_PI * denom_d * denom_d);
+
+    /* Smith-Schlick Geometry: G = G1(v) * G1(l) */
+    float g1l = ndotl / (ndotl * (1.0f - k) + k);
+    float G = g1v * g1l;
+
+    /* Schlick Fresnel: F = F0 + (1 - F0)(1 - VdotH)^5 */
+    float omv = 1.0f - vdoth;
+    float omv2 = omv * omv;
+    float omv5 = omv2 * omv2 * omv;
+    float fr_r = f0_r + (1.0f - f0_r) * omv5;
+    float fr_g = f0_g + (1.0f - f0_g) * omv5;
+    float fr_b = f0_b + (1.0f - f0_b) * omv5;
+
+    /* Cook-Torrance: D * G * F / (4 * NdotL * NdotV)
+       Multiply by π to match energy scale: MOP's diffuse omits the 1/π
+       Lambertian factor, so the scene intensity is π× physical irradiance.
+       Diffuse absorbs this, but specular (no 1/π) needs explicit π. */
+    float spec_denom = 4.0f * ndotl * ndotv;
+    if (spec_denom < 1e-6f)
+      spec_denom = 1e-6f;
+    float spec_term = D * G / spec_denom;
+    /* Shadow test for directional lights */
+    float shadow = 1.0f;
+    if (lights[i].type == MOP_LIGHT_DIRECTIONAL && s_shadow_depth)
+      shadow = shadow_test_pcf(world_pos);
+
+    float weight = spec_term * lights[i].intensity * attenuation * ndotl *
+                   shadow * (float)M_PI;
+
+    *out_spec_r += weight * fr_r * lights[i].color.r;
+    *out_spec_g += weight * fr_g * lights[i].color.g;
+    *out_spec_b += weight * fr_b * lights[i].color.b;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Smooth-shaded triangle rasterization with multi-light support
+ *
+ * Per-pixel lighting with:
+ *   - Perspective-correct interpolation
+ *   - Edge anti-aliasing
+ *   - Multi-light diffuse + GGX Cook-Torrance specular
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_rasterize_triangle_smooth_ml(
+    const MopSwScreenVertex verts[3], uint32_t object_id, bool depth_test,
+    MopVec3 light_dir, float ambient, float opacity, MopBlendMode blend_mode,
+    const MopLight *lights, uint32_t light_count, MopVec3 cam_eye,
+    float metallic, float roughness, MopSwFramebuffer *fb) {
   /* If no multi-light, fall back to standard smooth */
   if (!lights || light_count == 0) {
     mop_sw_rasterize_triangle_smooth(verts, object_id, depth_test, light_dir,
@@ -958,6 +1662,14 @@ void mop_sw_rasterize_triangle_smooth_ml(const MopSwScreenVertex verts[3],
     e2_dy = -e2_dy;
   }
 
+  /* Edge-distance scaling for AA */
+  float e0_len = sqrtf(e0_dx * e0_dx + e0_dy * e0_dy);
+  float e1_len = sqrtf(e1_dx * e1_dx + e1_dy * e1_dy);
+  float e2_len = sqrtf(e2_dx * e2_dx + e2_dy * e2_dy);
+  float inv_e0 = (e0_len > 1e-6f) ? 1.0f / e0_len : 0.0f;
+  float inv_e1 = (e1_len > 1e-6f) ? 1.0f / e1_len : 0.0f;
+  float inv_e2 = (e2_len > 1e-6f) ? 1.0f / e2_len : 0.0f;
+
   float px0 = (float)min_x + 0.5f;
   float py0 = (float)min_y + 0.5f;
 
@@ -971,87 +1683,196 @@ void mop_sw_rasterize_triangle_smooth_ml(const MopSwScreenVertex verts[3],
     w2_row = -w2_row;
   }
 
-  uint8_t ca = (uint8_t)(clamp01(opacity) * 255.0f);
-  float a_f = (float)ca / 255.0f;
-  float inv_a = 1.0f - a_f;
+  float op = clamp01(opacity);
   int width = fb->width;
 
-  (void)cam_eye; /* reserved for specular in Phase 2 */
+  /* Per-vertex 1/w for perspective-correct interpolation */
+  float iw0 = verts[0].inv_w, iw1 = verts[1].inv_w, iw2 = verts[2].inv_w;
 
   for (int y = min_y; y <= max_y; y++) {
     float w0 = w0_row, w1 = w1_row, w2 = w2_row;
 
     for (int x = min_x; x <= max_x; x++) {
       if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
-        float b0 = w0 * inv_area;
-        float b1 = w1 * inv_area;
-        float b2 = w2 * inv_area;
+        float d0 = w0 * inv_e0;
+        float d1 = w1 * inv_e1;
+        float d2 = w2 * inv_e2;
+        float min_d = d0;
+        if (d1 < min_d)
+          min_d = d1;
+        if (d2 < min_d)
+          min_d = d2;
 
-        float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
-        size_t idx = (size_t)y * (size_t)width + (size_t)x;
+        if (min_d >= 0.0f) {
+          float b0 = w0 * inv_area;
+          float b1 = w1 * inv_area;
+          float b2 = w2 * inv_area;
 
-        if (!depth_test || z < fb->depth[idx]) {
-          /* Interpolate normal */
-          MopVec3 n = {b0 * verts[0].normal.x + b1 * verts[1].normal.x +
-                           b2 * verts[2].normal.x,
-                       b0 * verts[0].normal.y + b1 * verts[1].normal.y +
-                           b2 * verts[2].normal.y,
-                       b0 * verts[0].normal.z + b1 * verts[1].normal.z +
-                           b2 * verts[2].normal.z};
-          n = mop_vec3_normalize(n);
+          float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
+          size_t idx = (size_t)y * (size_t)width + (size_t)x;
 
-          /* Interpolate color */
-          float cr = b0 * verts[0].color.r + b1 * verts[1].color.r +
-                     b2 * verts[2].color.r;
-          float cg = b0 * verts[0].color.g + b1 * verts[1].color.g +
-                     b2 * verts[2].color.g;
-          float cb = b0 * verts[0].color.b + b1 * verts[1].color.b +
-                     b2 * verts[2].color.b;
+          if (!depth_test || z < fb->depth[idx]) {
+            /* Perspective-correct weights */
+            float pc0 = b0 * iw0;
+            float pc1 = b1 * iw1;
+            float pc2 = b2 * iw2;
+            float inv_pc = 1.0f / (pc0 + pc1 + pc2);
+            pc0 *= inv_pc;
+            pc1 *= inv_pc;
+            pc2 *= inv_pc;
 
-          /* Multi-light accumulation */
-          MopVec3 world_pos = {0, 0,
-                               0}; /* approximate — fine for directional */
-          float lit =
-              compute_multi_light(n, world_pos, lights, light_count, ambient);
+            /* Interpolate normal */
+            MopVec3 n = {pc0 * verts[0].normal.x + pc1 * verts[1].normal.x +
+                             pc2 * verts[2].normal.x,
+                         pc0 * verts[0].normal.y + pc1 * verts[1].normal.y +
+                             pc2 * verts[2].normal.y,
+                         pc0 * verts[0].normal.z + pc1 * verts[1].normal.z +
+                             pc2 * verts[2].normal.z};
+            n = mop_vec3_normalize(n);
 
-          uint8_t pr = (uint8_t)(clamp01(cr * lit) * 255.0f);
-          uint8_t pg = (uint8_t)(clamp01(cg * lit) * 255.0f);
-          uint8_t pb = (uint8_t)(clamp01(cb * lit) * 255.0f);
+            /* Interpolate color */
+            float fr = pc0 * verts[0].color.r + pc1 * verts[1].color.r +
+                       pc2 * verts[2].color.r;
+            float fg = pc0 * verts[0].color.g + pc1 * verts[1].color.g +
+                       pc2 * verts[2].color.g;
+            float fb_ = pc0 * verts[0].color.b + pc1 * verts[1].color.b +
+                        pc2 * verts[2].color.b;
 
-          size_t ci = idx * 4;
-          if (blend_mode == MOP_BLEND_OPAQUE && ca == 255) {
-            fb->color[ci + 0] = pr;
-            fb->color[ci + 1] = pg;
-            fb->color[ci + 2] = pb;
-            fb->color[ci + 3] = 255;
-            fb->depth[idx] = z;
-            fb->object_id[idx] = object_id;
-          } else {
-            uint8_t dr = fb->color[ci + 0];
-            uint8_t dg = fb->color[ci + 1];
-            uint8_t db = fb->color[ci + 2];
-            switch (blend_mode) {
-            case MOP_BLEND_ADDITIVE: {
-              int ar = (int)dr + (int)(pr * a_f);
-              int ag = (int)dg + (int)(pg * a_f);
-              int ab = (int)db + (int)(pb * a_f);
-              fb->color[ci + 0] = (uint8_t)(ar > 255 ? 255 : ar);
-              fb->color[ci + 1] = (uint8_t)(ag > 255 ? 255 : ag);
-              fb->color[ci + 2] = (uint8_t)(ab > 255 ? 255 : ab);
-              break;
+            /* Interpolate world position for point/spot light attenuation */
+            MopVec3 world_pos = {
+                pc0 * verts[0].world_pos.x + pc1 * verts[1].world_pos.x +
+                    pc2 * verts[2].world_pos.x,
+                pc0 * verts[0].world_pos.y + pc1 * verts[1].world_pos.y +
+                    pc2 * verts[2].world_pos.y,
+                pc0 * verts[0].world_pos.z + pc1 * verts[1].world_pos.z +
+                    pc2 * verts[2].world_pos.z};
+
+            /* Per-pixel view direction for specular */
+            MopVec3 view_dir =
+                mop_vec3_normalize(mop_vec3_sub(cam_eye, world_pos));
+
+            /* Per-channel diffuse (applies light color per RGB) */
+            float lit_r, lit_g, lit_b;
+            compute_multi_light_rgb(n, world_pos, lights, light_count, ambient,
+                                    &lit_r, &lit_g, &lit_b);
+
+            /* GGX specular (includes light color and π energy correction) */
+            float spec_r, spec_g, spec_b;
+            compute_multi_specular_ggx(n, world_pos, view_dir, lights,
+                                       light_count, roughness, metallic, fr, fg,
+                                       fb_, &spec_r, &spec_g, &spec_b);
+
+            /* PBR energy balance */
+            float diffuse_scale = 1.0f - metallic;
+
+            /* Environment reflection for metallic surfaces.
+             * Approximate IBL with a hemisphere gradient: the reflected
+             * view direction samples a simple sky (bright) / ground (dark)
+             * environment.  This replaces the flat `ambient * metallic`
+             * term with a directionally-varying reflection. */
+            float env_r = 0.0f, env_g = 0.0f, env_b = 0.0f;
+            if (metallic > 0.01f) {
+              /* Reflect view direction around normal */
+              float vdn = mop_vec3_dot(view_dir, n);
+              MopVec3 refl = {2.0f * vdn * n.x - view_dir.x,
+                              2.0f * vdn * n.y - view_dir.y,
+                              2.0f * vdn * n.z - view_dir.z};
+
+              /* Hemisphere gradient: sky color for up, ground for down.
+               * Blend factor based on reflected Y component. */
+              float sky_t = refl.y * 0.5f + 0.5f; /* 0=down, 1=up */
+              if (sky_t < 0.0f)
+                sky_t = 0.0f;
+              if (sky_t > 1.0f)
+                sky_t = 1.0f;
+
+              /* Sky: warm neutral (matching typical EEVEE environment)
+               * Ground: dark warm (floor bounce) */
+              float sky_r = 0.35f, sky_g = 0.38f, sky_b = 0.45f;
+              float gnd_r = 0.08f, gnd_g = 0.07f, gnd_b = 0.06f;
+              float he_r = gnd_r + sky_t * (sky_r - gnd_r);
+              float he_g = gnd_g + sky_t * (sky_g - gnd_g);
+              float he_b = gnd_b + sky_t * (sky_b - gnd_b);
+
+              /* Roughness reduces reflection clarity (blur = average) */
+              float rough_mix = roughness * roughness;
+              float avg_env = (he_r + he_g + he_b) * (1.0f / 3.0f);
+              he_r = he_r + rough_mix * (avg_env - he_r);
+              he_g = he_g + rough_mix * (avg_env - he_g);
+              he_b = he_b + rough_mix * (avg_env - he_b);
+
+              /* Fresnel at normal incidence (F0) for environment */
+              float f0_r = 0.04f * (1.0f - metallic) + fr * metallic;
+              float f0_g = 0.04f * (1.0f - metallic) + fg * metallic;
+              float f0_b = 0.04f * (1.0f - metallic) + fb_ * metallic;
+
+              /* Schlick Fresnel for environment (use NdotV) */
+              float ndv = mop_vec3_dot(n, view_dir);
+              if (ndv < 0.0f)
+                ndv = 0.0f;
+              float om = 1.0f - ndv;
+              float om2 = om * om;
+              float om5 = om2 * om2 * om;
+              float fe_r = f0_r + (1.0f - f0_r) * om5;
+              float fe_g = f0_g + (1.0f - f0_g) * om5;
+              float fe_b = f0_b + (1.0f - f0_b) * om5;
+
+              env_r = he_r * fe_r * ambient * 3.0f;
+              env_g = he_g * fe_g * ambient * 3.0f;
+              env_b = he_b * fe_b * ambient * 3.0f;
             }
-            case MOP_BLEND_MULTIPLY:
-              fb->color[ci + 0] = (uint8_t)((dr * pr) / 255);
-              fb->color[ci + 1] = (uint8_t)((dg * pg) / 255);
-              fb->color[ci + 2] = (uint8_t)((db * pb) / 255);
-              break;
-            default:
-              fb->color[ci + 0] = (uint8_t)(pr * a_f + dr * inv_a);
-              fb->color[ci + 1] = (uint8_t)(pg * a_f + dg * inv_a);
-              fb->color[ci + 2] = (uint8_t)(pb * a_f + db * inv_a);
-              break;
+
+            float pr = clamp01(fr * lit_r * diffuse_scale + env_r + spec_r);
+            float pg = clamp01(fg * lit_g * diffuse_scale + env_g + spec_g);
+            float pb = clamp01(fb_ * lit_b * diffuse_scale + env_b + spec_b);
+
+            /* Edge AA coverage — disabled for opaque geometry to avoid
+             * seam artifacts at shared mesh edges.  FXAA post-process
+             * handles silhouette anti-aliasing instead. */
+            float cov =
+                (min_d < 1.0f && blend_mode != MOP_BLEND_OPAQUE) ? min_d : 1.0f;
+            float final_alpha = op * cov;
+
+            size_t ci = idx * 4;
+            if (blend_mode == MOP_BLEND_OPAQUE && final_alpha >= 1.0f) {
+              fb->color[ci + 0] = (uint8_t)(pr * 255.0f);
+              fb->color[ci + 1] = (uint8_t)(pg * 255.0f);
+              fb->color[ci + 2] = (uint8_t)(pb * 255.0f);
+              fb->color[ci + 3] = 255;
+              fb->depth[idx] = z;
+              fb->object_id[idx] = object_id;
+            } else {
+              float inv_fa = 1.0f - final_alpha;
+              float dr = (float)fb->color[ci + 0] / 255.0f;
+              float dg = (float)fb->color[ci + 1] / 255.0f;
+              float db = (float)fb->color[ci + 2] / 255.0f;
+
+              switch (blend_mode) {
+              case MOP_BLEND_ADDITIVE:
+                pr = clamp01(dr + pr * final_alpha);
+                pg = clamp01(dg + pg * final_alpha);
+                pb = clamp01(db + pb * final_alpha);
+                break;
+              case MOP_BLEND_MULTIPLY:
+                pr = dr * pr;
+                pg = dg * pg;
+                pb = db * pb;
+                break;
+              default:
+                pr = pr * final_alpha + dr * inv_fa;
+                pg = pg * final_alpha + dg * inv_fa;
+                pb = pb * final_alpha + db * inv_fa;
+                break;
+              }
+              fb->color[ci + 0] = (uint8_t)(clamp01(pr) * 255.0f);
+              fb->color[ci + 1] = (uint8_t)(clamp01(pg) * 255.0f);
+              fb->color[ci + 2] = (uint8_t)(clamp01(pb) * 255.0f);
+              fb->color[ci + 3] = 255;
+              if (final_alpha > 0.5f) {
+                fb->depth[idx] = z;
+                fb->object_id[idx] = object_id;
+              }
             }
-            fb->color[ci + 3] = 255;
           }
         }
       }
@@ -1068,9 +1889,11 @@ void mop_sw_rasterize_triangle_smooth_ml(const MopSwScreenVertex verts[3],
 /* -------------------------------------------------------------------------
  * Smooth-shaded triangle rasterization with normal mapping
  *
- * Same as mop_sw_rasterize_triangle_smooth, but additionally constructs
- * a TBN (tangent-bitangent-normal) matrix per pixel, samples the normal
- * map, and transforms the tangent-space normal to world space for lighting.
+ * Per-pixel lighting with:
+ *   - Perspective-correct interpolation
+ *   - Edge anti-aliasing
+ *   - TBN normal mapping
+ *   - Blinn-Phong specular
  * ------------------------------------------------------------------------- */
 
 void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
@@ -1148,6 +1971,14 @@ void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
     e2_dy = -e2_dy;
   }
 
+  /* Edge-distance scaling for AA */
+  float e0_len = sqrtf(e0_dx * e0_dx + e0_dy * e0_dy);
+  float e1_len = sqrtf(e1_dx * e1_dx + e1_dy * e1_dy);
+  float e2_len = sqrtf(e2_dx * e2_dx + e2_dy * e2_dy);
+  float inv_e0 = (e0_len > 1e-6f) ? 1.0f / e0_len : 0.0f;
+  float inv_e1 = (e1_len > 1e-6f) ? 1.0f / e1_len : 0.0f;
+  float inv_e2 = (e2_len > 1e-6f) ? 1.0f / e2_len : 0.0f;
+
   float px0 = (float)min_x + 0.5f;
   float py0 = (float)min_y + 0.5f;
 
@@ -1162,130 +1993,176 @@ void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
   }
 
   MopVec3 nl = mop_vec3_normalize(light_dir);
-  uint8_t ca = (uint8_t)(clamp01(opacity) * 255.0f);
-  float a_f = (float)ca / 255.0f;
-  float inv_a = 1.0f - a_f;
+  float op = clamp01(opacity);
   int width = fb->width;
   int nm_w = normal_map->width;
   int nm_h = normal_map->height;
+
+  /* Per-vertex 1/w for perspective-correct interpolation */
+  float iw0 = verts[0].inv_w, iw1 = verts[1].inv_w, iw2 = verts[2].inv_w;
 
   for (int y = min_y; y <= max_y; y++) {
     float w0 = w0_row, w1 = w1_row, w2 = w2_row;
 
     for (int x = min_x; x <= max_x; x++) {
       if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
-        float b0 = w0 * inv_area;
-        float b1 = w1 * inv_area;
-        float b2 = w2 * inv_area;
+        float d0 = w0 * inv_e0;
+        float d1 = w1 * inv_e1;
+        float d2 = w2 * inv_e2;
+        float min_d = d0;
+        if (d1 < min_d)
+          min_d = d1;
+        if (d2 < min_d)
+          min_d = d2;
 
-        float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
-        size_t idx = (size_t)y * (size_t)width + (size_t)x;
+        if (min_d >= 0.0f) {
+          float b0 = w0 * inv_area;
+          float b1 = w1 * inv_area;
+          float b2 = w2 * inv_area;
 
-        if (!depth_test || z < fb->depth[idx]) {
-          /* Interpolate normal */
-          MopVec3 n = {b0 * verts[0].normal.x + b1 * verts[1].normal.x +
-                           b2 * verts[2].normal.x,
-                       b0 * verts[0].normal.y + b1 * verts[1].normal.y +
-                           b2 * verts[2].normal.y,
-                       b0 * verts[0].normal.z + b1 * verts[1].normal.z +
-                           b2 * verts[2].normal.z};
-          n = mop_vec3_normalize(n);
+          float z = b0 * sz0 + b1 * sz1 + b2 * sz2;
+          size_t idx = (size_t)y * (size_t)width + (size_t)x;
 
-          /* Interpolate tangent */
-          MopVec3 t_vec = {b0 * verts[0].tangent.x + b1 * verts[1].tangent.x +
-                               b2 * verts[2].tangent.x,
-                           b0 * verts[0].tangent.y + b1 * verts[1].tangent.y +
-                               b2 * verts[2].tangent.y,
-                           b0 * verts[0].tangent.z + b1 * verts[1].tangent.z +
-                               b2 * verts[2].tangent.z};
-          t_vec = mop_vec3_normalize(t_vec);
+          if (!depth_test || z < fb->depth[idx]) {
+            /* Perspective-correct weights */
+            float pc0 = b0 * iw0;
+            float pc1 = b1 * iw1;
+            float pc2 = b2 * iw2;
+            float inv_pc = 1.0f / (pc0 + pc1 + pc2);
+            pc0 *= inv_pc;
+            pc1 *= inv_pc;
+            pc2 *= inv_pc;
 
-          /* Compute bitangent = cross(normal, tangent) */
-          MopVec3 bitan = mop_vec3_cross(n, t_vec);
-          bitan = mop_vec3_normalize(bitan);
+            /* Interpolate normal (perspective-correct) */
+            MopVec3 n = {pc0 * verts[0].normal.x + pc1 * verts[1].normal.x +
+                             pc2 * verts[2].normal.x,
+                         pc0 * verts[0].normal.y + pc1 * verts[1].normal.y +
+                             pc2 * verts[2].normal.y,
+                         pc0 * verts[0].normal.z + pc1 * verts[1].normal.z +
+                             pc2 * verts[2].normal.z};
+            n = mop_vec3_normalize(n);
 
-          /* Sample normal map at interpolated UV */
-          float uv_u = b0 * verts[0].u + b1 * verts[1].u + b2 * verts[2].u;
-          float uv_v = b0 * verts[0].v + b1 * verts[1].v + b2 * verts[2].v;
-          uv_u = uv_u - floorf(uv_u);
-          uv_v = uv_v - floorf(uv_v);
+            /* Interpolate tangent (perspective-correct) */
+            MopVec3 t_vec = {
+                pc0 * verts[0].tangent.x + pc1 * verts[1].tangent.x +
+                    pc2 * verts[2].tangent.x,
+                pc0 * verts[0].tangent.y + pc1 * verts[1].tangent.y +
+                    pc2 * verts[2].tangent.y,
+                pc0 * verts[0].tangent.z + pc1 * verts[1].tangent.z +
+                    pc2 * verts[2].tangent.z};
+            t_vec = mop_vec3_normalize(t_vec);
 
-          int nm_x = (int)(uv_u * (float)(nm_w - 1) + 0.5f);
-          int nm_y = (int)(uv_v * (float)(nm_h - 1) + 0.5f);
-          if (nm_x < 0)
-            nm_x = 0;
-          if (nm_x >= nm_w)
-            nm_x = nm_w - 1;
-          if (nm_y < 0)
-            nm_y = 0;
-          if (nm_y >= nm_h)
-            nm_y = nm_h - 1;
+            /* Bitangent = cross(normal, tangent) */
+            MopVec3 bitan = mop_vec3_cross(n, t_vec);
+            bitan = mop_vec3_normalize(bitan);
 
-          size_t nm_idx = ((size_t)nm_y * (size_t)nm_w + (size_t)nm_x) * 4;
-          /* Decode normal map: [0,255] -> [-1,1] */
-          float nm_nx = (float)normal_map->data[nm_idx + 0] / 127.5f - 1.0f;
-          float nm_ny = (float)normal_map->data[nm_idx + 1] / 127.5f - 1.0f;
-          float nm_nz = (float)normal_map->data[nm_idx + 2] / 127.5f - 1.0f;
+            /* Sample normal map at perspective-correct UV */
+            float uv_u = pc0 * verts[0].u + pc1 * verts[1].u + pc2 * verts[2].u;
+            float uv_v = pc0 * verts[0].v + pc1 * verts[1].v + pc2 * verts[2].v;
+            uv_u = uv_u - floorf(uv_u);
+            uv_v = uv_v - floorf(uv_v);
 
-          /* Transform tangent-space normal to world space via TBN matrix
-           * world_normal = T * nm_nx + B * nm_ny + N * nm_nz */
-          MopVec3 perturbed = {t_vec.x * nm_nx + bitan.x * nm_ny + n.x * nm_nz,
-                               t_vec.y * nm_nx + bitan.y * nm_ny + n.y * nm_nz,
-                               t_vec.z * nm_nx + bitan.z * nm_ny + n.z * nm_nz};
-          perturbed = mop_vec3_normalize(perturbed);
+            int nm_x = (int)(uv_u * (float)(nm_w - 1) + 0.5f);
+            int nm_y = (int)(uv_v * (float)(nm_h - 1) + 0.5f);
+            if (nm_x < 0)
+              nm_x = 0;
+            if (nm_x >= nm_w)
+              nm_x = nm_w - 1;
+            if (nm_y < 0)
+              nm_y = 0;
+            if (nm_y >= nm_h)
+              nm_y = nm_h - 1;
 
-          /* Interpolate color */
-          float cr = b0 * verts[0].color.r + b1 * verts[1].color.r +
-                     b2 * verts[2].color.r;
-          float cg = b0 * verts[0].color.g + b1 * verts[1].color.g +
-                     b2 * verts[2].color.g;
-          float cb = b0 * verts[0].color.b + b1 * verts[1].color.b +
-                     b2 * verts[2].color.b;
+            size_t nm_idx = ((size_t)nm_y * (size_t)nm_w + (size_t)nm_x) * 4;
+            float nm_nx = (float)normal_map->data[nm_idx + 0] / 127.5f - 1.0f;
+            float nm_ny = (float)normal_map->data[nm_idx + 1] / 127.5f - 1.0f;
+            float nm_nz = (float)normal_map->data[nm_idx + 2] / 127.5f - 1.0f;
 
-          /* Lighting with perturbed normal */
-          float ndotl = mop_vec3_dot(perturbed, nl);
-          if (ndotl < 0.0f)
-            ndotl = 0.0f;
-          float lit = clamp01(ambient + (1.0f - ambient) * ndotl);
+            /* TBN transform */
+            MopVec3 perturbed = {
+                t_vec.x * nm_nx + bitan.x * nm_ny + n.x * nm_nz,
+                t_vec.y * nm_nx + bitan.y * nm_ny + n.y * nm_nz,
+                t_vec.z * nm_nx + bitan.z * nm_ny + n.z * nm_nz};
+            perturbed = mop_vec3_normalize(perturbed);
 
-          uint8_t pr = (uint8_t)(clamp01(cr * lit) * 255.0f);
-          uint8_t pg = (uint8_t)(clamp01(cg * lit) * 255.0f);
-          uint8_t pb = (uint8_t)(clamp01(cb * lit) * 255.0f);
+            /* Interpolate color (perspective-correct) */
+            float fr = pc0 * verts[0].color.r + pc1 * verts[1].color.r +
+                       pc2 * verts[2].color.r;
+            float fg = pc0 * verts[0].color.g + pc1 * verts[1].color.g +
+                       pc2 * verts[2].color.g;
+            float fb_ = pc0 * verts[0].color.b + pc1 * verts[1].color.b +
+                        pc2 * verts[2].color.b;
 
-          size_t ci = idx * 4;
-          if (blend_mode == MOP_BLEND_OPAQUE && ca == 255) {
-            fb->color[ci + 0] = pr;
-            fb->color[ci + 1] = pg;
-            fb->color[ci + 2] = pb;
-            fb->color[ci + 3] = 255;
-            fb->depth[idx] = z;
-            fb->object_id[idx] = object_id;
-          } else {
-            uint8_t dr = fb->color[ci + 0];
-            uint8_t dg = fb->color[ci + 1];
-            uint8_t db = fb->color[ci + 2];
-            switch (blend_mode) {
-            case MOP_BLEND_ADDITIVE: {
-              int ar = (int)dr + (int)(pr * a_f);
-              int ag = (int)dg + (int)(pg * a_f);
-              int ab = (int)db + (int)(pb * a_f);
-              fb->color[ci + 0] = (uint8_t)(ar > 255 ? 255 : ar);
-              fb->color[ci + 1] = (uint8_t)(ag > 255 ? 255 : ag);
-              fb->color[ci + 2] = (uint8_t)(ab > 255 ? 255 : ab);
-              break;
+            /* Diffuse lighting with perturbed normal */
+            float ndotl = mop_vec3_dot(perturbed, nl);
+            if (ndotl < 0.0f)
+              ndotl = 0.0f;
+            float lit = ambient + (1.0f - ambient) * ndotl;
+
+            /* Specular */
+            MopVec3 half_v =
+                mop_vec3_normalize((MopVec3){nl.x, nl.y + 1.0f, nl.z});
+            float ndoth = mop_vec3_dot(perturbed, half_v);
+            if (ndoth < 0.0f)
+              ndoth = 0.0f;
+            float spec = ndoth * ndoth;
+            spec *= spec;
+            spec *= spec;
+            spec *= spec;
+            spec *= spec;
+            spec *= 0.25f;
+
+            float pr = clamp01(fr * lit + spec);
+            float pg = clamp01(fg * lit + spec);
+            float pb = clamp01(fb_ * lit + spec);
+
+            /* Edge AA coverage — disabled for opaque geometry to avoid
+             * seam artifacts at shared mesh edges.  FXAA post-process
+             * handles silhouette anti-aliasing instead. */
+            float cov =
+                (min_d < 1.0f && blend_mode != MOP_BLEND_OPAQUE) ? min_d : 1.0f;
+            float final_alpha = op * cov;
+
+            size_t ci = idx * 4;
+            if (blend_mode == MOP_BLEND_OPAQUE && final_alpha >= 1.0f) {
+              fb->color[ci + 0] = (uint8_t)(pr * 255.0f);
+              fb->color[ci + 1] = (uint8_t)(pg * 255.0f);
+              fb->color[ci + 2] = (uint8_t)(pb * 255.0f);
+              fb->color[ci + 3] = 255;
+              fb->depth[idx] = z;
+              fb->object_id[idx] = object_id;
+            } else {
+              float inv_fa = 1.0f - final_alpha;
+              float dr = (float)fb->color[ci + 0] / 255.0f;
+              float dg = (float)fb->color[ci + 1] / 255.0f;
+              float db = (float)fb->color[ci + 2] / 255.0f;
+
+              switch (blend_mode) {
+              case MOP_BLEND_ADDITIVE:
+                pr = clamp01(dr + pr * final_alpha);
+                pg = clamp01(dg + pg * final_alpha);
+                pb = clamp01(db + pb * final_alpha);
+                break;
+              case MOP_BLEND_MULTIPLY:
+                pr = dr * pr;
+                pg = dg * pg;
+                pb = db * pb;
+                break;
+              default:
+                pr = pr * final_alpha + dr * inv_fa;
+                pg = pg * final_alpha + dg * inv_fa;
+                pb = pb * final_alpha + db * inv_fa;
+                break;
+              }
+              fb->color[ci + 0] = (uint8_t)(clamp01(pr) * 255.0f);
+              fb->color[ci + 1] = (uint8_t)(clamp01(pg) * 255.0f);
+              fb->color[ci + 2] = (uint8_t)(clamp01(pb) * 255.0f);
+              fb->color[ci + 3] = 255;
+              if (final_alpha > 0.5f) {
+                fb->depth[idx] = z;
+                fb->object_id[idx] = object_id;
+              }
             }
-            case MOP_BLEND_MULTIPLY:
-              fb->color[ci + 0] = (uint8_t)((dr * pr) / 255);
-              fb->color[ci + 1] = (uint8_t)((dg * pg) / 255);
-              fb->color[ci + 2] = (uint8_t)((db * pb) / 255);
-              break;
-            default:
-              fb->color[ci + 0] = (uint8_t)(pr * a_f + dr * inv_a);
-              fb->color[ci + 1] = (uint8_t)(pg * a_f + dg * inv_a);
-              fb->color[ci + 2] = (uint8_t)(pb * a_f + db * inv_a);
-              break;
-            }
-            fb->color[ci + 3] = 255;
           }
         }
       }
@@ -1312,7 +2189,7 @@ void mop_sw_rasterize_triangle_full(
     bool depth_test, bool cull_back, MopVec3 light_dir, float ambient,
     float opacity, bool smooth_shading, MopBlendMode blend_mode,
     const MopLight *lights, uint32_t light_count, MopVec3 cam_eye,
-    MopSwFramebuffer *fb) {
+    float metallic, float roughness, MopSwFramebuffer *fb) {
   MopVec4 a = vertices[0].position;
   MopVec4 b = vertices[1].position;
   MopVec4 c = vertices[2].position;
@@ -1392,13 +2269,16 @@ void mop_sw_rasterize_triangle_full(
     /* Smooth shading with multi-light */
     if (smooth_shading && !wireframe) {
       MopSwScreenVertex sv[3] = {
-          {sx0, sy0, sz0, v0->normal, v0->color, v0->u, v0->v, v0->tangent},
-          {sx1, sy1, sz1, v1->normal, v1->color, v1->u, v1->v, v1->tangent},
-          {sx2, sy2, sz2, v2->normal, v2->color, v2->u, v2->v, v2->tangent},
+          {sx0, sy0, sz0, inv_w0, v0->normal, v0->world_pos, v0->color, v0->u,
+           v0->v, v0->tangent},
+          {sx1, sy1, sz1, inv_w1, v1->normal, v1->world_pos, v1->color, v1->u,
+           v1->v, v1->tangent},
+          {sx2, sy2, sz2, inv_w2, v2->normal, v2->world_pos, v2->color, v2->u,
+           v2->v, v2->tangent},
       };
-      mop_sw_rasterize_triangle_smooth_ml(sv, object_id, depth_test, light_dir,
-                                          ambient, opacity, blend_mode, lights,
-                                          light_count, cam_eye, fb);
+      mop_sw_rasterize_triangle_smooth_ml(
+          sv, object_id, depth_test, light_dir, ambient, opacity, blend_mode,
+          lights, light_count, cam_eye, metallic, roughness, fb);
       continue;
     }
 
@@ -1410,7 +2290,11 @@ void mop_sw_rasterize_triangle_full(
 
     float lighting;
     if (lights && light_count > 0) {
-      MopVec3 world_pos = {0, 0, 0}; /* approximate for flat */
+      /* Use triangle centroid for flat-shaded world position */
+      MopVec3 world_pos = {
+          (v0->world_pos.x + v1->world_pos.x + v2->world_pos.x) / 3.0f,
+          (v0->world_pos.y + v1->world_pos.y + v2->world_pos.y) / 3.0f,
+          (v0->world_pos.z + v1->world_pos.z + v2->world_pos.z) / 3.0f};
       lighting = compute_multi_light(face_normal, world_pos, lights,
                                      light_count, ambient);
     } else {
@@ -1424,21 +2308,182 @@ void mop_sw_rasterize_triangle_full(
     float avg_g = (v0->color.g + v1->color.g + v2->color.g) * (1.0f / 3.0f);
     float avg_b = (v0->color.b + v1->color.b + v2->color.b) * (1.0f / 3.0f);
 
-    uint8_t cr = (uint8_t)(clamp01(avg_r * lighting) * 255.0f);
-    uint8_t cg = (uint8_t)(clamp01(avg_g * lighting) * 255.0f);
-    uint8_t cb = (uint8_t)(clamp01(avg_b * lighting) * 255.0f);
+    /* PBR metallic: reduce diffuse, add environment reflection */
+    float diffuse_scale = 1.0f - metallic;
+    float env_flat =
+        ambient * metallic * 0.3f; /* simplified env for flat path */
+    uint8_t cr =
+        (uint8_t)(clamp01(avg_r * (lighting * diffuse_scale + env_flat)) *
+                  255.0f);
+    uint8_t cg =
+        (uint8_t)(clamp01(avg_g * (lighting * diffuse_scale + env_flat)) *
+                  255.0f);
+    uint8_t cb =
+        (uint8_t)(clamp01(avg_b * (lighting * diffuse_scale + env_flat)) *
+                  255.0f);
 
     if (wireframe) {
-      mop_sw_draw_line(fb, (int)sx0, (int)sy0, sz0, (int)sx1, (int)sy1, sz1, cr,
-                       cg, cb, object_id, depth_test);
-      mop_sw_draw_line(fb, (int)sx1, (int)sy1, sz1, (int)sx2, (int)sy2, sz2, cr,
-                       cg, cb, object_id, depth_test);
-      mop_sw_draw_line(fb, (int)sx2, (int)sy2, sz2, (int)sx0, (int)sy0, sz0, cr,
-                       cg, cb, object_id, depth_test);
+      mop_sw_draw_line_aa(fb, sx0, sy0, sz0, sx1, sy1, sz1, cr, cg, cb,
+                          object_id, depth_test, 1.0f);
+      mop_sw_draw_line_aa(fb, sx1, sy1, sz1, sx2, sy2, sz2, cr, cg, cb,
+                          object_id, depth_test, 1.0f);
+      mop_sw_draw_line_aa(fb, sx2, sy2, sz2, sx0, sy0, sz0, cr, cg, cb,
+                          object_id, depth_test, 1.0f);
     } else {
       rasterize_filled_triangle(fb, sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2,
                                 cr, cg, cb, ca, object_id, depth_test,
                                 blend_mode);
     }
   }
+}
+
+/* -------------------------------------------------------------------------
+ * FXAA post-process pass (Fast Approximate Anti-Aliasing)
+ *
+ * Simplified FXAA 3.11 quality preset.  Operates in-place on the color
+ * buffer.  Detects high-contrast edges via luma comparison and blends
+ * along the dominant gradient direction.
+ *
+ * Applied once after all geometry is rendered, smoothing all remaining
+ * aliased edges in the final image.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_fxaa(MopSwFramebuffer *fb) {
+  int w = fb->width;
+  int h = fb->height;
+  if (w < 3 || h < 3)
+    return;
+
+  /* Allocate temporary copy of color buffer */
+  size_t buf_size = (size_t)w * (size_t)h * 4;
+  uint8_t *src = malloc(buf_size);
+  if (!src)
+    return;
+  memcpy(src, fb->color, buf_size);
+
+  /* FXAA constants */
+  const float EDGE_THRESHOLD = 0.0625f;    /* 1/16 — minimum contrast */
+  const float EDGE_THRESHOLD_MIN = 0.004f; /* skip very dark areas */
+  const float SUBPIX_QUALITY = 0.75f;      /* sub-pixel AA strength */
+
+/* Luma from RGBA8 at (bx,by) in the source buffer */
+#define FXAA_LUMA(bx, by)                                                      \
+  (0.299f * (float)src[((size_t)(by) * (size_t)w + (size_t)(bx)) * 4 + 0] +    \
+   0.587f * (float)src[((size_t)(by) * (size_t)w + (size_t)(bx)) * 4 + 1] +    \
+   0.114f * (float)src[((size_t)(by) * (size_t)w + (size_t)(bx)) * 4 + 2])
+
+  for (int y = 1; y < h - 1; y++) {
+    for (int x = 1; x < w - 1; x++) {
+      /* Sample luma in 3x3 neighborhood */
+      float lM = FXAA_LUMA(x, y);
+      float lN = FXAA_LUMA(x, y - 1);
+      float lS = FXAA_LUMA(x, y + 1);
+      float lW = FXAA_LUMA(x - 1, y);
+      float lE = FXAA_LUMA(x + 1, y);
+
+      /* Range (max - min) of local contrast */
+      float range_min = lM;
+      if (lN < range_min)
+        range_min = lN;
+      if (lS < range_min)
+        range_min = lS;
+      if (lW < range_min)
+        range_min = lW;
+      if (lE < range_min)
+        range_min = lE;
+
+      float range_max = lM;
+      if (lN > range_max)
+        range_max = lN;
+      if (lS > range_max)
+        range_max = lS;
+      if (lW > range_max)
+        range_max = lW;
+      if (lE > range_max)
+        range_max = lE;
+
+      float range = range_max - range_min;
+
+      /* Skip if contrast is below threshold */
+      if (range < EDGE_THRESHOLD * range_max + EDGE_THRESHOLD_MIN) {
+        continue;
+      }
+
+      /* Diagonal lumas for sub-pixel filter */
+      float lNW = FXAA_LUMA(x - 1, y - 1);
+      float lNE = FXAA_LUMA(x + 1, y - 1);
+      float lSW = FXAA_LUMA(x - 1, y + 1);
+      float lSE = FXAA_LUMA(x + 1, y + 1);
+
+      /* Sub-pixel amount: lowpass filter vs center */
+      float luma_avg = (lN + lS + lW + lE) * (2.0f / 12.0f) +
+                       (lNW + lNE + lSW + lSE) * (1.0f / 12.0f);
+      float subpix = fabsf(luma_avg - lM);
+      subpix = subpix / range;
+      if (subpix > 1.0f)
+        subpix = 1.0f;
+      /* Smooth step */
+      subpix = subpix * subpix * (3.0f - 2.0f * subpix);
+      subpix *= SUBPIX_QUALITY;
+
+      /* Determine edge orientation: horizontal or vertical */
+      float edge_h = fabsf(-2.0f * lW + lNW + lSW) +
+                     fabsf(-2.0f * lM + lN + lS) * 2.0f +
+                     fabsf(-2.0f * lE + lNE + lSE);
+      float edge_v = fabsf(-2.0f * lN + lNW + lNE) +
+                     fabsf(-2.0f * lM + lW + lE) * 2.0f +
+                     fabsf(-2.0f * lS + lSW + lSE);
+      bool is_horiz = (edge_h >= edge_v);
+
+      /* Step direction perpendicular to edge */
+      int step_x = is_horiz ? 0 : 1;
+      int step_y = is_horiz ? 1 : 0;
+
+      /* Choose positive or negative direction */
+      float luma_pos = is_horiz ? lS : lE;
+      float luma_neg = is_horiz ? lN : lW;
+      float grad_pos = fabsf(luma_pos - lM);
+      float grad_neg = fabsf(luma_neg - lM);
+
+      int off_x, off_y;
+      if (grad_pos >= grad_neg) {
+        off_x = step_x;
+        off_y = step_y;
+      } else {
+        off_x = -step_x;
+        off_y = -step_y;
+      }
+
+      /* Blend factor based on sub-pixel AA */
+      float blend = subpix;
+
+      /* Fetch neighbor pixel */
+      int nx = x + off_x;
+      int ny = y + off_y;
+      if (nx < 0)
+        nx = 0;
+      if (nx >= w)
+        nx = w - 1;
+      if (ny < 0)
+        ny = 0;
+      if (ny >= h)
+        ny = h - 1;
+
+      /* Blend current pixel with neighbor */
+      size_t ci = ((size_t)y * (size_t)w + (size_t)x) * 4;
+      size_t ni = ((size_t)ny * (size_t)w + (size_t)nx) * 4;
+      float inv_blend = 1.0f - blend;
+
+      fb->color[ci + 0] =
+          (uint8_t)(src[ci + 0] * inv_blend + src[ni + 0] * blend);
+      fb->color[ci + 1] =
+          (uint8_t)(src[ci + 1] * inv_blend + src[ni + 1] * blend);
+      fb->color[ci + 2] =
+          (uint8_t)(src[ci + 2] * inv_blend + src[ni + 2] * blend);
+    }
+  }
+
+#undef FXAA_LUMA
+
+  free(src);
 }

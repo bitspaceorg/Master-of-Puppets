@@ -19,7 +19,7 @@
 #pragma GCC diagnostic pop
 
 #include "rhi/rhi.h"
-#include <mop/log.h>
+#include <mop/util/log.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -39,11 +39,11 @@
  *
  * Must be kept in sync with mop_solid.frag / mop_wireframe.frag.
  * std140 alignment: vec4=16, float=4 (pad to 4), uint=4, int=4
- * Total: 304 bytes (48 base + 4 lights * 64).
+ * Total: 576 bytes (64 base + 8 lights * 64).
  * Padded to device alignment at runtime.
  * ------------------------------------------------------------------------- */
 
-#define MOP_VK_MAX_FRAG_LIGHTS 4
+#define MOP_VK_MAX_FRAG_LIGHTS 8
 
 typedef struct MopVkLight {
   float position[4];  /* vec4: xyz + type (0=dir, 1=point, 2=spot) */
@@ -60,10 +60,18 @@ typedef struct MopVkFragUniforms {
   int32_t blend_mode;  /* int                          (offset 28) */
   int32_t has_texture; /* int                          (offset 32) */
   int32_t num_lights;  /* int                          (offset 36) */
-  float _pad1;         /*                              (offset 40) */
-  float _pad2;         /*                              (offset 44) */
-  MopVkLight lights[MOP_VK_MAX_FRAG_LIGHTS]; /* 4 * 64 = 256 bytes   */
-} MopVkFragUniforms;                         /* Total: 304 bytes */
+  float metallic;      /* float                        (offset 40) */
+  float roughness;     /* float                        (offset 44) */
+  float cam_pos[4];    /* vec4: xyz + padding          (offset 48) */
+  MopVkLight lights[MOP_VK_MAX_FRAG_LIGHTS]; /* 8 * 64 = 512 bytes   */
+
+  /* Shadow mapping (cascade) */
+  int32_t shadows_enabled; /* bool: 1 = shadows active */
+  int32_t cascade_count;   /* number of active cascades */
+  float _pad_shadow[2];    /* align to vec4 boundary */
+  float cascade_vp[4][16]; /* 4 x mat4 (column-major) = 256 bytes */
+  float cascade_splits[4]; /* view-space Z split distances */
+} MopVkFragUniforms;       /* Total: 576 + 16 + 256 + 16 = 864 bytes */
 
 /* -------------------------------------------------------------------------
  * Pipeline cache key
@@ -87,12 +95,28 @@ static inline uint32_t mop_vk_pipeline_key(bool wireframe, bool depth_test,
  * MopRhiDevice — Vulkan device and shared resources
  * ------------------------------------------------------------------------- */
 
+/* GPU timing result — populated after frame_end, read via frame_gpu_time_ms */
+typedef struct MopGpuTimingResult {
+  double gpu_frame_ms;
+  double cpu_submit_ms;
+  double cpu_readback_ms;
+  double total_frame_ms;
+} MopGpuTimingResult;
+
+/* Validation callback function pointers (set by conformance runner) */
+typedef void (*MopVkValidationCallback)(void);
+extern MopVkValidationCallback mop_vk_on_validation_error;
+extern MopVkValidationCallback mop_vk_on_sync_hazard;
+
 struct MopRhiDevice {
   VkInstance instance;
   VkPhysicalDevice physical_device;
   VkDevice device;
   VkQueue queue;
   uint32_t queue_family;
+
+  /* Debug messenger (VK_EXT_debug_utils) */
+  VkDebugUtilsMessengerEXT debug_messenger;
 
   VkPhysicalDeviceMemoryProperties mem_props;
   VkPhysicalDeviceProperties dev_props;
@@ -104,6 +128,7 @@ struct MopRhiDevice {
 
   /* Shader modules */
   VkShaderModule solid_vert;
+  VkShaderModule instanced_vert;
   VkShaderModule solid_frag;
   VkShaderModule wireframe_frag;
 
@@ -116,6 +141,10 @@ struct MopRhiDevice {
   VkPipeline pipelines[MOP_VK_MAX_PIPELINES];
   uint32_t
       pipeline_strides[MOP_VK_MAX_PIPELINES]; /* stride used when created */
+
+  /* Instanced pipeline (single variant — solid, depth-test, backface-cull) */
+  VkPipeline instanced_pipeline;
+  uint32_t instanced_pipeline_stride;
 
   /* Descriptor pool (reset per frame) */
   VkDescriptorPool desc_pool;
@@ -133,11 +162,47 @@ struct MopRhiDevice {
   VkDeviceMemory staging_mem;
   void *staging_mapped;
 
+  /* GPU timestamp queries */
+  VkQueryPool timestamp_pool;
+  float timestamp_period_ns;
+  MopGpuTimingResult last_timing;
+
   /* Device limits */
   VkDeviceSize min_ubo_alignment;
 
   /* Feature flags */
   bool has_fill_mode_non_solid;
+  bool has_timestamp_queries;
+  bool reverse_z;
+  VkSampleCountFlagBits msaa_samples;
+
+  /* Shadow mapping */
+#define MOP_VK_SHADOW_MAP_SIZE 2048
+#define MOP_VK_CASCADE_COUNT 4
+
+  VkImage shadow_image; /* D32_SFLOAT, 2048x2048, 4 array layers */
+  VkDeviceMemory shadow_memory;
+  VkImageView shadow_views[MOP_VK_CASCADE_COUNT]; /* per-layer views */
+  VkImageView shadow_array_view;                  /* array view for sampling */
+  VkSampler shadow_sampler; /* comparison sampler with PCF */
+  VkFramebuffer shadow_fbs[MOP_VK_CASCADE_COUNT];
+  VkRenderPass shadow_render_pass;
+  VkPipeline shadow_pipeline;
+  VkPipelineLayout shadow_pipeline_layout;
+  VkShaderModule shadow_vert;
+  VkShaderModule shadow_frag;
+  MopMat4 cascade_vp[MOP_VK_CASCADE_COUNT]; /* light-space VP per cascade */
+  float cascade_splits[MOP_VK_CASCADE_COUNT + 1]; /* frustum split distances */
+  bool shadows_enabled;
+
+  /* Post-processing */
+  VkRenderPass postprocess_render_pass;
+  VkPipeline postprocess_pipeline;
+  VkPipelineLayout postprocess_pipeline_layout;
+  VkDescriptorSetLayout postprocess_desc_layout;
+  VkShaderModule fullscreen_vert;
+  VkShaderModule fxaa_frag;
+  bool postprocess_enabled; /* controlled by MOP_POST_FXAA flag */
 };
 
 /* -------------------------------------------------------------------------
@@ -162,6 +227,19 @@ struct MopRhiFramebuffer {
   VkImage depth_image;
   VkDeviceMemory depth_memory;
   VkImageView depth_view;
+
+  /* MSAA render targets (4x, only when msaa_samples > 1) */
+  VkImage msaa_color_image;
+  VkDeviceMemory msaa_color_memory;
+  VkImageView msaa_color_view;
+
+  VkImage msaa_pick_image;
+  VkDeviceMemory msaa_pick_memory;
+  VkImageView msaa_pick_view;
+
+  VkImage msaa_depth_image;
+  VkDeviceMemory msaa_depth_memory;
+  VkImageView msaa_depth_view;
 
   VkFramebuffer framebuffer;
 
@@ -188,6 +266,13 @@ struct MopRhiFramebuffer {
   VkDeviceMemory ubo_mem;
   void *ubo_mapped;
   VkDeviceSize ubo_offset; /* current write offset */
+
+  /* Per-frame instance buffer (host-visible, used as vertex buffer) */
+  VkBuffer instance_buf;
+  VkDeviceMemory instance_mem;
+  void *instance_mapped;
+  VkDeviceSize instance_buf_size; /* allocated size in bytes */
+  VkDeviceSize instance_offset;   /* current write offset */
 };
 
 /* -------------------------------------------------------------------------
@@ -233,6 +318,7 @@ VkResult mop_vk_create_buffer(VkDevice device,
 VkResult mop_vk_create_image(VkDevice device,
                              const VkPhysicalDeviceMemoryProperties *props,
                              uint32_t width, uint32_t height, VkFormat format,
+                             VkSampleCountFlagBits samples,
                              VkImageUsageFlags usage, VkImage *out_image,
                              VkDeviceMemory *out_memory);
 
@@ -245,8 +331,11 @@ VkResult mop_vk_create_image_view(VkDevice device, VkImage image,
  * Helper declarations — vulkan_pipeline.c
  * ------------------------------------------------------------------------- */
 
-/* Create the render pass with color + picking + depth attachments. */
-VkResult mop_vk_create_render_pass(VkDevice device, VkRenderPass *out);
+/* Create the render pass with color + picking + depth attachments.
+ * When samples > 1, uses VkRenderPassCreateInfo2 with MSAA resolve. */
+VkResult mop_vk_create_render_pass(VkDevice device,
+                                   VkSampleCountFlagBits samples,
+                                   VkRenderPass *out);
 
 /* Create the descriptor set layout (UBO + combined image sampler). */
 VkResult mop_vk_create_desc_set_layout(VkDevice device,
@@ -260,6 +349,27 @@ VkResult mop_vk_create_pipeline_layout(VkDevice device,
 /* Get or lazily create a pipeline for the given state key. */
 VkPipeline mop_vk_get_pipeline(struct MopRhiDevice *dev, uint32_t key,
                                uint32_t vertex_stride);
+
+/* Get or lazily create the instanced rendering pipeline. */
+VkPipeline mop_vk_get_instanced_pipeline(struct MopRhiDevice *dev,
+                                         uint32_t vertex_stride);
+
+/* Compute cascade shadow map split distances and light VP matrices. */
+void vk_compute_cascades(struct MopRhiDevice *dev, const MopMat4 *view,
+                         const MopMat4 *proj, MopVec3 light_dir);
+
+/* Create the shadow-only render pass (depth-only, single attachment). */
+VkResult mop_vk_create_shadow_render_pass(VkDevice device, VkRenderPass *out);
+
+/* Create the shadow pipeline (depth-only with bias). */
+VkPipeline mop_vk_create_shadow_pipeline(struct MopRhiDevice *dev);
+
+/* Create the post-process render pass (single color attachment). */
+VkResult mop_vk_create_postprocess_render_pass(VkDevice device,
+                                               VkRenderPass *out);
+
+/* Create the FXAA post-process pipeline. */
+VkPipeline mop_vk_create_postprocess_pipeline(struct MopRhiDevice *dev);
 
 /* -------------------------------------------------------------------------
  * Utility: one-shot command buffer for upload/transition

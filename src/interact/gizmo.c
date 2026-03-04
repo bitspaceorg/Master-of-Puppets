@@ -18,6 +18,10 @@
 
 /* -------------------------------------------------------------------------
  * Constants
+ *
+ * Ultra-thin solid geometry (4-sided square tubes).  With chrome unlit
+ * rendering (ambient=1.0, no lights), these read as clean 2D lines from
+ * every viewing angle — no Z-fighting, no edge-on disappearing.
  * ------------------------------------------------------------------------- */
 
 #define PI 3.14159265358979323846f
@@ -25,30 +29,30 @@
 /* Handle IDs start high to avoid collision with scene object IDs. */
 #define MOP_GIZMO_ID_BASE 0xFFFF0000u
 
-/* Geometry parameters */
-#define RING_SEGS 128
-#define CYL_SEGS 12
-#define TORUS_MINOR_SEGS 8
+/* Geometry parameters — very thin for a 2D UI feel */
+#define RING_SEGS 48
+#define CYL_SEGS 4
+#define TORUS_MINOR_SEGS 4
 
 /* Primitive vertex / index counts */
-#define CYL_VERTS (2 * CYL_SEGS)                 /*   24 */
-#define CYL_IDXS (CYL_SEGS * 6)                  /*   72 */
-#define CONE_VERTS (2 * CYL_SEGS + 1 + CYL_SEGS) /*   37 */
-#define CONE_IDXS (CYL_SEGS * 3 + CYL_SEGS * 3)  /*   72 */
+#define CYL_VERTS (2 * CYL_SEGS)                 /*    8 */
+#define CYL_IDXS (CYL_SEGS * 6)                  /*   24 */
+#define CONE_VERTS (2 * CYL_SEGS + 1 + CYL_SEGS) /*   13 */
+#define CONE_IDXS (CYL_SEGS * 3 + CYL_SEGS * 3)  /*   24 */
 #define CUBE_VERTS 24
 #define CUBE_IDXS 36
-#define TORUS_VERTS (RING_SEGS * TORUS_MINOR_SEGS)    /* 1024 */
-#define TORUS_IDXS (RING_SEGS * TORUS_MINOR_SEGS * 6) /* 6144 */
+#define TORUS_VERTS (RING_SEGS * TORUS_MINOR_SEGS)    /*  192 */
+#define TORUS_IDXS (RING_SEGS * TORUS_MINOR_SEGS * 6) /* 1152 */
 #define OCTA_VERTS 24
 #define OCTA_IDXS 24
 #define QUAD_VERTS 4
 #define QUAD_IDXS 12
 
 /* Composite handle counts */
-#define TRANSLATE_VERTS (CYL_VERTS + CONE_VERTS)   /*   61 */
-#define TRANSLATE_IDXS (CYL_IDXS + CONE_IDXS)      /*  144 */
-#define SCALE_VERTS (CYL_VERTS + CUBE_VERTS)       /*   48 */
-#define SCALE_IDXS (CYL_IDXS + CUBE_IDXS)          /*  108 */
+#define TRANSLATE_VERTS (CYL_VERTS + CONE_VERTS)   /*   21 */
+#define TRANSLATE_IDXS (CYL_IDXS + CONE_IDXS)      /*   48 */
+#define SCALE_VERTS (CYL_VERTS + CUBE_VERTS)       /*   32 */
+#define SCALE_IDXS (CYL_IDXS + CUBE_IDXS)          /*   60 */
 #define CENTER_VERTS (OCTA_VERTS + 3 * QUAD_VERTS) /*   36 */
 #define CENTER_IDXS (OCTA_IDXS + 3 * QUAD_IDXS)    /*   60 */
 
@@ -59,9 +63,6 @@ static uint32_t gizmo_instance_counter = 0;
  * Gizmo structure
  * ------------------------------------------------------------------------- */
 
-/* Default opacity applied to the target mesh when the gizmo is shown */
-#define GIZMO_SELECTION_OPACITY 0.4f
-
 struct MopGizmo {
   MopViewport *viewport;
   MopGizmoMode mode;
@@ -71,18 +72,42 @@ struct MopGizmo {
   MopMesh *handles[4];    /* X, Y, Z, Center */
   uint32_t handle_ids[4]; /* unique per gizmo instance */
   MopMesh *target;        /* mesh made transparent on show */
+  MopGizmoAxis hover_axis;
 };
 
 /* -------------------------------------------------------------------------
- * Handle colors:  X=red, Y=green, Z=blue, Center=yellow
+ * Handle colors — read from viewport theme with hover highlighting
  * ------------------------------------------------------------------------- */
 
-static const float GIZMO_COLORS[4][3] = {
-    {0.9f, 0.15f, 0.15f}, /* X — red    */
-    {0.15f, 0.9f, 0.15f}, /* Y — green  */
-    {0.15f, 0.15f, 0.9f}, /* Z — blue   */
-    {0.95f, 0.85f, 0.15f} /* Center — yellow */
-};
+static void get_handle_color(const MopGizmo *g, int axis, float *cr, float *cg,
+                             float *cb) {
+  const MopTheme *theme = &g->viewport->theme;
+  MopColor c;
+  switch (axis) {
+  case 0:
+    c = theme->gizmo_x;
+    break;
+  case 1:
+    c = theme->gizmo_y;
+    break;
+  case 2:
+    c = theme->gizmo_z;
+    break;
+  default:
+    c = theme->gizmo_center;
+    break;
+  }
+  *cr = c.r;
+  *cg = c.g;
+  *cb = c.b;
+  if (g->hover_axis == (MopGizmoAxis)axis) {
+    MopColor hover = theme->gizmo_hover;
+    float t = 0.5f;
+    *cr = *cr + (hover.r - *cr) * t;
+    *cg = *cg + (hover.g - *cg) * t;
+    *cb = *cb + (hover.b - *cb) * t;
+  }
+}
 
 /* -------------------------------------------------------------------------
  * Rotation helpers
@@ -112,7 +137,11 @@ static MopVec3 rotated_axis_dir(int axis, MopVec3 rot) {
 }
 
 /* -------------------------------------------------------------------------
- * Geometry helpers (all static)
+ * Geometry helpers — ultra-thin solid (4-sided square tubes)
+ *
+ * 4-sided cross-section gives clean solid lines with no Z-fighting and
+ * no edge-on disappearing.  Combined with chrome unlit rendering
+ * (ambient=1.0, no scene lights), these read as crisp 2D UI lines.
  * ------------------------------------------------------------------------- */
 
 /* Map (along-axis, cross-section u, cross-section v) to world XYZ */
@@ -124,13 +153,13 @@ static MopVec3 on_axis(int axis, float along, float u, float w) {
   return (MopVec3){u, w, along};
 }
 
-/* Smooth-shaded cylinder (no caps), CYL_SEGS sides */
+/* Thin 4-sided tube (no caps) */
 static void gen_cylinder(MopVertex *verts, uint32_t *idx, int axis,
                          float radius, float start, float end, float cr,
                          float cg, float cb) {
   MopColor col = {cr, cg, cb, 1};
   for (int i = 0; i < CYL_SEGS; i++) {
-    float a = i * 2.0f * PI / CYL_SEGS;
+    float a = (float)i * 2.0f * PI / CYL_SEGS;
     float ca = cosf(a), sa = sinf(a);
     MopVec3 n = on_axis(axis, 0, ca, sa);
     verts[i] = (MopVertex){on_axis(axis, start, radius * ca, radius * sa), n,
@@ -150,19 +179,17 @@ static void gen_cylinder(MopVertex *verts, uint32_t *idx, int axis,
   }
 }
 
-/* Cone with base cap, CYL_SEGS sides */
+/* Thin 4-sided cone with base cap */
 static void gen_cone(MopVertex *verts, uint32_t *idx, int axis, float base_r,
                      float start, float end, float cr, float cg, float cb) {
   MopColor col = {cr, cg, cb, 1};
   float h = end - start;
   float slant = sqrtf(h * h + base_r * base_r);
-  float na = base_r / slant; /* axial  component of surface normal */
-  float nr = h / slant;      /* radial component of surface normal */
-
-  /* Side: base ring + per-triangle apex vertices */
+  float na = base_r / slant;
+  float nr = h / slant;
   for (int i = 0; i < CYL_SEGS; i++) {
-    float a = i * 2.0f * PI / CYL_SEGS;
-    float am = (i + 0.5f) * 2.0f * PI / CYL_SEGS;
+    float a = (float)i * 2.0f * PI / CYL_SEGS;
+    float am = ((float)i + 0.5f) * 2.0f * PI / CYL_SEGS;
     float ca = cosf(a), sa = sinf(a);
     float cm = cosf(am), sm = sinf(am);
     verts[i] = (MopVertex){on_axis(axis, start, base_r * ca, base_r * sa),
@@ -178,14 +205,12 @@ static void gen_cone(MopVertex *verts, uint32_t *idx, int axis, float base_r,
     idx[ii++] = nx;
     idx[ii++] = i + CYL_SEGS;
   }
-
-  /* Base cap */
   int vi = 2 * CYL_SEGS;
   MopVec3 cap_n = on_axis(axis, -1, 0, 0);
   verts[vi] = (MopVertex){on_axis(axis, start, 0, 0), cap_n, col, 0, 0};
   int ci = vi++;
   for (int i = 0; i < CYL_SEGS; i++) {
-    float a = i * 2.0f * PI / CYL_SEGS;
+    float a = (float)i * 2.0f * PI / CYL_SEGS;
     verts[vi + i] =
         (MopVertex){on_axis(axis, start, base_r * cosf(a), base_r * sinf(a)),
                     cap_n, col, 0, 0};
@@ -226,16 +251,16 @@ static void gen_cube(MopVertex *verts, uint32_t *idx, float cx, float cy,
   }
 }
 
-/* Smooth-shaded torus ring */
+/* Thin 4-minor-segment torus ring */
 static void gen_torus(MopVertex *verts, uint32_t *idx, int axis, float major_r,
                       float minor_r, float cr, float cg, float cb) {
   MopColor col = {cr, cg, cb, 1};
   int vi = 0;
   for (int i = 0; i < RING_SEGS; i++) {
-    float theta = i * 2.0f * PI / RING_SEGS;
+    float theta = (float)i * 2.0f * PI / RING_SEGS;
     float ct = cosf(theta), st = sinf(theta);
     for (int j = 0; j < TORUS_MINOR_SEGS; j++) {
-      float phi = j * 2.0f * PI / TORUS_MINOR_SEGS;
+      float phi = (float)j * 2.0f * PI / TORUS_MINOR_SEGS;
       float cp = cosf(phi), sp = sinf(phi);
       float r = major_r + minor_r * cp;
       verts[vi++] = (MopVertex){on_axis(axis, minor_r * sp, r * ct, r * st),
@@ -249,13 +274,13 @@ static void gen_torus(MopVertex *verts, uint32_t *idx, int axis, float major_r,
       int jnx = (j + 1) % TORUS_MINOR_SEGS;
       int a = i * TORUS_MINOR_SEGS + j;
       int b = i * TORUS_MINOR_SEGS + jnx;
-      int c = inx * TORUS_MINOR_SEGS + jnx;
+      int cc = inx * TORUS_MINOR_SEGS + jnx;
       int d = inx * TORUS_MINOR_SEGS + j;
       idx[ii++] = a;
       idx[ii++] = d;
-      idx[ii++] = c;
+      idx[ii++] = cc;
       idx[ii++] = a;
-      idx[ii++] = c;
+      idx[ii++] = cc;
       idx[ii++] = b;
     }
   }
@@ -276,11 +301,11 @@ static void gen_octahedron(MopVertex *verts, uint32_t *idx, float radius,
     MopVec3 n = mop_vec3_normalize(
         mop_vec3_cross(mop_vec3_sub(p1, p0), mop_vec3_sub(p2, p0)));
     verts[vi] = (MopVertex){p0, n, col, 0, 0};
-    idx[ii++] = vi++;
+    idx[ii++] = (uint32_t)vi++;
     verts[vi] = (MopVertex){p1, n, col, 0, 0};
-    idx[ii++] = vi++;
+    idx[ii++] = (uint32_t)vi++;
     verts[vi] = (MopVertex){p2, n, col, 0, 0};
-    idx[ii++] = vi++;
+    idx[ii++] = (uint32_t)vi++;
   }
 }
 
@@ -315,14 +340,12 @@ static void gen_plane_quad(MopVertex *verts, uint32_t *idx, int axis_u,
       p.z = coords[i][1];
     verts[i] = (MopVertex){p, n, col, 0, 0};
   }
-  /* Front face */
   idx[0] = 0;
   idx[1] = 1;
   idx[2] = 2;
   idx[3] = 2;
   idx[4] = 3;
   idx[5] = 0;
-  /* Back face */
   idx[6] = 0;
   idx[7] = 3;
   idx[8] = 2;
@@ -335,8 +358,8 @@ static void gen_plane_quad(MopVertex *verts, uint32_t *idx, int axis_u,
 
 static void gen_translate_handle(MopVertex *v, uint32_t *idx, int axis,
                                  float cr, float cg, float cb) {
-  gen_cylinder(v, idx, axis, 0.018f, 0.20f, 1.05f, cr, cg, cb);
-  gen_cone(v + CYL_VERTS, idx + CYL_IDXS, axis, 0.05f, 1.05f, 1.25f, cr, cg,
+  gen_cylinder(v, idx, axis, 0.006f, 0.20f, 1.05f, cr, cg, cb);
+  gen_cone(v + CYL_VERTS, idx + CYL_IDXS, axis, 0.025f, 1.05f, 1.20f, cr, cg,
            cb);
   for (int i = CYL_IDXS; i < TRANSLATE_IDXS; i++)
     idx[i] += CYL_VERTS;
@@ -344,10 +367,10 @@ static void gen_translate_handle(MopVertex *v, uint32_t *idx, int axis,
 
 static void gen_scale_handle(MopVertex *v, uint32_t *idx, int axis, float cr,
                              float cg, float cb) {
-  gen_cylinder(v, idx, axis, 0.018f, 0.20f, 1.05f, cr, cg, cb);
+  gen_cylinder(v, idx, axis, 0.006f, 0.20f, 1.05f, cr, cg, cb);
   float ec[3] = {0, 0, 0};
-  ec[axis] = 1.15f;
-  gen_cube(v + CYL_VERTS, idx + CYL_IDXS, ec[0], ec[1], ec[2], 0.04f, cr, cg,
+  ec[axis] = 1.12f;
+  gen_cube(v + CYL_VERTS, idx + CYL_IDXS, ec[0], ec[1], ec[2], 0.025f, cr, cg,
            cb);
   for (int i = CYL_IDXS; i < SCALE_IDXS; i++)
     idx[i] += CYL_VERTS;
@@ -355,7 +378,7 @@ static void gen_scale_handle(MopVertex *v, uint32_t *idx, int axis, float cr,
 
 static void gen_rotate_handle(MopVertex *v, uint32_t *idx, int axis, float cr,
                               float cg, float cb) {
-  gen_torus(v, idx, axis, 1.0f, 0.018f, cr, cg, cb);
+  gen_torus(v, idx, axis, 1.0f, 0.006f, cr, cg, cb);
 }
 
 /* -------------------------------------------------------------------------
@@ -393,14 +416,9 @@ static MopVec3 axis_screen_dir(MopVec3 origin, int axis, MopVec3 rot,
  * ------------------------------------------------------------------------- */
 
 static void update_handle_transforms(MopGizmo *g) {
-  /* Scale gizmo to maintain roughly constant screen size.
-   * Base geometry was designed for camera distance ~4.5 units. */
-  MopViewport *vp = g->viewport;
-  MopVec3 to_gizmo = mop_vec3_sub(g->position, vp->cam_eye);
-  float dist = mop_vec3_length(to_gizmo);
-  float s = dist * 0.18f;
-  if (s < 0.05f)
-    s = 0.05f;
+  /* Fixed world-size — gizmo scales with the scene like regular objects */
+  (void)g->viewport;
+  float s = 1.2f;
 
   MopMat4 sc = mop_mat4_scale((MopVec3){s, s, s});
   MopMat4 r = gizmo_rotation_matrix(g->rotation);
@@ -420,7 +438,8 @@ static void create_handles(MopGizmo *g) {
 
   /* Axis handles (X, Y, Z) */
   for (int a = 0; a < 3; a++) {
-    const float *clr = GIZMO_COLORS[a];
+    float clr[3];
+    get_handle_color(g, a, &clr[0], &clr[1], &clr[2]);
     if (g->mode == MOP_GIZMO_TRANSLATE) {
       MopVertex verts[TRANSLATE_VERTS];
       uint32_t indices[TRANSLATE_IDXS];
@@ -454,25 +473,29 @@ static void create_handles(MopGizmo *g) {
     }
   }
 
-  /* Center handle — yellow octahedron + 3 semi-transparent plane quads */
+  /* Center handle — octahedron + 3 semi-transparent plane quads */
   {
+    float cc[3];
+    get_handle_color(g, 3, &cc[0], &cc[1], &cc[2]);
     MopVertex cv[CENTER_VERTS];
     uint32_t ci[CENTER_IDXS];
-    gen_octahedron(cv, ci, 0.12f, GIZMO_COLORS[3][0], GIZMO_COLORS[3][1],
-                   GIZMO_COLORS[3][2]);
-    /* XY plane quad (yellow: red+green blend) */
+    gen_octahedron(cv, ci, 0.08f, cc[0], cc[1], cc[2]);
+    /* XY plane quad — blend of X and Y axis colors */
+    float xy_r = (cc[0] + cc[0]) * 0.5f;
+    float xy_g = (cc[1] + cc[1]) * 0.5f;
+    float xy_b = (cc[2] + cc[2]) * 0.5f;
     int v1 = OCTA_VERTS, i1 = OCTA_IDXS;
-    gen_plane_quad(cv + v1, ci + i1, 0, 1, 0.25f, 0.20f, 0.9f, 0.9f, 0.15f);
+    gen_plane_quad(cv + v1, ci + i1, 0, 1, 0.25f, 0.20f, xy_r, xy_g, xy_b);
     for (int i = i1; i < i1 + QUAD_IDXS; i++)
       ci[i] += v1;
-    /* XZ plane quad (magenta: red+blue blend) */
+    /* XZ plane quad */
     int v2 = v1 + QUAD_VERTS, i2 = i1 + QUAD_IDXS;
-    gen_plane_quad(cv + v2, ci + i2, 0, 2, 0.25f, 0.20f, 0.9f, 0.15f, 0.9f);
+    gen_plane_quad(cv + v2, ci + i2, 0, 2, 0.25f, 0.20f, xy_r, xy_g, xy_b);
     for (int i = i2; i < i2 + QUAD_IDXS; i++)
       ci[i] += v2;
-    /* YZ plane quad (cyan: green+blue blend) */
+    /* YZ plane quad */
     int v3 = v2 + QUAD_VERTS, i3 = i2 + QUAD_IDXS;
-    gen_plane_quad(cv + v3, ci + i3, 1, 2, 0.25f, 0.20f, 0.15f, 0.9f, 0.9f);
+    gen_plane_quad(cv + v3, ci + i3, 1, 2, 0.25f, 0.20f, xy_r, xy_g, xy_b);
     for (int i = i3; i < i3 + QUAD_IDXS; i++)
       ci[i] += v3;
     g->handles[3] = mop_viewport_add_mesh(
@@ -511,6 +534,7 @@ MopGizmo *mop_gizmo_create(MopViewport *viewport) {
   g->viewport = viewport;
   g->mode = MOP_GIZMO_TRANSLATE;
   g->visible = false;
+  g->hover_axis = MOP_GIZMO_AXIS_NONE;
 
   /* Allocate unique handle IDs for this instance */
   uint32_t base = MOP_GIZMO_ID_BASE + gizmo_instance_counter * 8;
@@ -546,7 +570,7 @@ void mop_gizmo_show(MopGizmo *gizmo, MopVec3 position, MopMesh *target) {
   gizmo->target = target;
   gizmo->visible = true;
   if (target)
-    mop_mesh_set_opacity(target, GIZMO_SELECTION_OPACITY);
+    mop_mesh_set_opacity(target, gizmo->viewport->theme.gizmo_target_opacity);
   create_handles(gizmo);
 }
 
@@ -598,7 +622,23 @@ void mop_gizmo_set_rotation(MopGizmo *gizmo, MopVec3 rotation) {
 void mop_gizmo_update(MopGizmo *gizmo) {
   if (!gizmo || !gizmo->visible)
     return;
+  /* Sync position/rotation with target mesh (handles animation/scripted moves)
+   */
+  if (gizmo->target && gizmo->target->active) {
+    gizmo->position = gizmo->target->position;
+    gizmo->rotation = gizmo->target->rotation;
+  }
   update_handle_transforms(gizmo);
+}
+
+void mop_gizmo_set_hover(MopGizmo *gizmo, MopGizmoAxis axis) {
+  if (!gizmo || gizmo->hover_axis == axis)
+    return;
+  gizmo->hover_axis = axis;
+  if (gizmo->visible) {
+    destroy_handles(gizmo);
+    create_handles(gizmo);
+  }
 }
 
 /* -------------------------------------------------------------------------
@@ -694,4 +734,53 @@ MopGizmoDelta mop_gizmo_drag(const MopGizmo *gizmo, MopGizmoAxis axis,
   }
 
   return d;
+}
+
+/* -------------------------------------------------------------------------
+ * Internal accessors — used by the 2D overlay renderer
+ *
+ * The 2D overlay in overlay_builtin.c needs to read gizmo state without
+ * exposing the struct definition outside this TU.
+ * ------------------------------------------------------------------------- */
+
+bool mop_gizmo_is_visible(const MopGizmo *gizmo) {
+  return gizmo && gizmo->visible;
+}
+
+MopVec3 mop_gizmo_get_position_internal(const MopGizmo *gizmo) {
+  return gizmo ? gizmo->position : (MopVec3){0, 0, 0};
+}
+
+MopVec3 mop_gizmo_get_rotation_internal(const MopGizmo *gizmo) {
+  return gizmo ? gizmo->rotation : (MopVec3){0, 0, 0};
+}
+
+MopGizmoAxis mop_gizmo_get_hover_axis(const MopGizmo *gizmo) {
+  return gizmo ? gizmo->hover_axis : MOP_GIZMO_AXIS_NONE;
+}
+
+MopVec3 mop_gizmo_get_axis_dir(const MopGizmo *gizmo, int axis) {
+  if (!gizmo)
+    return (MopVec3){0, 0, 0};
+  return rotated_axis_dir(axis, gizmo->rotation);
+}
+
+uint32_t mop_gizmo_get_handle_id(const MopGizmo *gizmo, int axis) {
+  if (!gizmo || axis < 0 || axis > 3)
+    return 0;
+  return gizmo->handle_ids[axis];
+}
+
+void mop_gizmo_set_handles_opacity(MopGizmo *gizmo, float opacity) {
+  if (!gizmo)
+    return;
+  for (int a = 0; a < 4; a++) {
+    if (gizmo->handles[a]) {
+      gizmo->handles[a]->opacity = opacity;
+      /* Alpha blend so opacity=0 is truly invisible (no color write).
+       * Object_id attachment has no blending → still written for picking. */
+      if (opacity < 0.01f)
+        gizmo->handles[a]->blend_mode = MOP_BLEND_ALPHA;
+    }
+  }
 }

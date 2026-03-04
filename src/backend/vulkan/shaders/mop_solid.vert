@@ -28,10 +28,12 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec3 v_normal;
 layout(location = 1) out vec4 v_color;
 layout(location = 2) out vec2 v_texcoord;
+layout(location = 3) out vec3 v_world_pos;
 
 void main() {
     gl_Position = pc.mvp * vec4(a_position, 1.0);
     v_normal    = mat3(pc.model) * a_normal;
     v_color     = a_color;
     v_texcoord  = a_texcoord;
+    v_world_pos = (pc.model * vec4(a_position, 1.0)).xyz;
 }

@@ -9,7 +9,7 @@
 #include "rhi/rhi.h"
 
 #include <math.h>
-#include <mop/log.h>
+#include <mop/util/log.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -70,6 +70,8 @@ void mop_viewport_set_frame_callback(MopViewport *vp, MopFrameCallbackFn fn,
 }
 
 #define MOP_INITIAL_MESH_CAPACITY 64
+#define MOP_GRID_ID                                                            \
+  0xFFFD0001u /* chrome range — outline overlay ignores this */
 
 /* -------------------------------------------------------------------------
  * Ground grid generation
@@ -78,20 +80,14 @@ void mop_viewport_set_frame_callback(MopViewport *vp, MopFrameCallbackFn fn,
  *   - Center axis lines: X = red, Z = blue (wider)
  *   - Major lines every 5 units (medium brightness, medium width)
  *   - Minor lines at every 1 unit (dim, thin)
- *   object_id = 0 so the grid is not pickable.
  * ------------------------------------------------------------------------- */
 
-#define GRID_EXTENT 20
-#define GRID_HW_AXIS 0.008f
-#define GRID_HW_MAJOR 0.006f
-#define GRID_HW_MINOR 0.004f
-
 static MopMesh *create_grid(MopViewport *vp) {
-  const int ext = GRID_EXTENT;
-  const int lines_per_axis = 2 * ext + 1;     /* -20 … +20 = 41 */
-  const int total_lines = lines_per_axis * 2; /* X + Z      = 82 */
-  const int vert_count = total_lines * 4;     /*              328 */
-  const int idx_count = total_lines * 6;      /*              492 */
+  const int ext = 20;
+  const int lines_per_axis = 2 * ext + 1;
+  const int total_lines = lines_per_axis * 2;
+  const int vert_count = total_lines * 4;
+  const int idx_count = total_lines * 6;
 
   MopVertex *v = malloc((size_t)vert_count * sizeof(MopVertex));
   uint32_t *ix = malloc((size_t)idx_count * sizeof(uint32_t));
@@ -102,81 +98,58 @@ static MopMesh *create_grid(MopViewport *vp) {
   }
 
   MopVec3 n = {0, 1, 0};
-  MopColor c_minor = {0.18f, 0.18f, 0.21f, 1.0f};
-  MopColor c_major = {0.28f, 0.28f, 0.32f, 1.0f};
-  MopColor c_x = {0.55f, 0.15f, 0.15f, 1.0f}; /* red  — X axis */
-  MopColor c_z = {0.15f, 0.15f, 0.55f, 1.0f}; /* blue — Z axis */
+  MopColor c_minor = vp->theme.grid_minor;
+  MopColor c_major = vp->theme.grid_major;
+  MopColor c_x = vp->theme.grid_axis_x;
+  MopColor c_z = vp->theme.grid_axis_z;
 
   int vi = 0, ii = 0;
   float fext = (float)ext;
+  float hw_axis = 0.025f, hw_major = 0.018f, hw_minor = 0.012f;
 
-  /* Z-parallel lines (one per integer x, extending along z) */
-  for (int i = 0; i < lines_per_axis; i++) {
-    float x = -fext + (float)i;
-    int ix_val = i - ext; /* signed offset from center */
-    MopColor c;
-    float hw;
-    if (ix_val == 0) {
-      c = c_z;
-      hw = GRID_HW_AXIS;
-    } else if (ix_val % 5 == 0) {
-      c = c_major;
-      hw = GRID_HW_MAJOR;
-    } else {
-      c = c_minor;
-      hw = GRID_HW_MINOR;
+  for (int a = 0; a < 2; a++) {
+    for (int i = 0; i < lines_per_axis; i++) {
+      float coord = -fext + (float)i;
+      int offset = i - ext;
+      MopColor c;
+      float hw;
+      if (offset == 0) {
+        c = (a == 0) ? c_z : c_x;
+        hw = hw_axis;
+      } else if (offset % 5 == 0) {
+        c = c_major;
+        hw = hw_major;
+      } else {
+        c = c_minor;
+        hw = hw_minor;
+      }
+      int b = vi;
+      if (a == 0) { /* Z-parallel */
+        v[vi++] = (MopVertex){{coord - hw, 0, -fext}, n, c, 0, 0};
+        v[vi++] = (MopVertex){{coord + hw, 0, -fext}, n, c, 0, 0};
+        v[vi++] = (MopVertex){{coord + hw, 0, fext}, n, c, 0, 0};
+        v[vi++] = (MopVertex){{coord - hw, 0, fext}, n, c, 0, 0};
+      } else { /* X-parallel */
+        v[vi++] = (MopVertex){{-fext, 0, coord - hw}, n, c, 0, 0};
+        v[vi++] = (MopVertex){{fext, 0, coord - hw}, n, c, 0, 0};
+        v[vi++] = (MopVertex){{fext, 0, coord + hw}, n, c, 0, 0};
+        v[vi++] = (MopVertex){{-fext, 0, coord + hw}, n, c, 0, 0};
+      }
+      ix[ii++] = (uint32_t)b;
+      ix[ii++] = (uint32_t)(b + 2);
+      ix[ii++] = (uint32_t)(b + 1);
+      ix[ii++] = (uint32_t)b;
+      ix[ii++] = (uint32_t)(b + 3);
+      ix[ii++] = (uint32_t)(b + 2);
     }
-    int b = vi;
-    v[vi++] = (MopVertex){{x - hw, 0.0f, -fext}, n, c, 0, 0};
-    v[vi++] = (MopVertex){{x + hw, 0.0f, -fext}, n, c, 0, 0};
-    v[vi++] = (MopVertex){{x + hw, 0.0f, fext}, n, c, 0, 0};
-    v[vi++] = (MopVertex){{x - hw, 0.0f, fext}, n, c, 0, 0};
-    ix[ii++] = (uint32_t)b;
-    ix[ii++] = (uint32_t)(b + 1);
-    ix[ii++] = (uint32_t)(b + 2);
-    ix[ii++] = (uint32_t)(b + 2);
-    ix[ii++] = (uint32_t)(b + 3);
-    ix[ii++] = (uint32_t)b;
   }
 
-  /* X-parallel lines (one per integer z, extending along x) */
-  for (int i = 0; i < lines_per_axis; i++) {
-    float z = -fext + (float)i;
-    int iz_val = i - ext;
-    MopColor c;
-    float hw;
-    if (iz_val == 0) {
-      c = c_x;
-      hw = GRID_HW_AXIS;
-    } else if (iz_val % 5 == 0) {
-      c = c_major;
-      hw = GRID_HW_MAJOR;
-    } else {
-      c = c_minor;
-      hw = GRID_HW_MINOR;
-    }
-    int b = vi;
-    v[vi++] = (MopVertex){{-fext, 0.0f, z - hw}, n, c, 0, 0};
-    v[vi++] = (MopVertex){{fext, 0.0f, z - hw}, n, c, 0, 0};
-    v[vi++] = (MopVertex){{fext, 0.0f, z + hw}, n, c, 0, 0};
-    v[vi++] = (MopVertex){{-fext, 0.0f, z + hw}, n, c, 0, 0};
-    ix[ii++] = (uint32_t)b;
-    ix[ii++] = (uint32_t)(b + 1);
-    ix[ii++] = (uint32_t)(b + 2);
-    ix[ii++] = (uint32_t)(b + 2);
-    ix[ii++] = (uint32_t)(b + 3);
-    ix[ii++] = (uint32_t)b;
-  }
-
-  MopMesh *grid =
-      mop_viewport_add_mesh(vp, &(MopMeshDesc){
-                                    .vertices = v,
-                                    .vertex_count = (uint32_t)vert_count,
-                                    .indices = ix,
-                                    .index_count = (uint32_t)idx_count,
-                                    .object_id = 0 /* not pickable */
-                                });
-
+  MopMesh *grid = mop_viewport_add_mesh(
+      vp, &(MopMeshDesc){.vertices = v,
+                         .vertex_count = (uint32_t)vert_count,
+                         .indices = ix,
+                         .index_count = (uint32_t)idx_count,
+                         .object_id = MOP_GRID_ID});
   free(v);
   free(ix);
   return grid;
@@ -192,8 +165,8 @@ static MopMesh *create_grid(MopViewport *vp) {
  * ------------------------------------------------------------------------- */
 
 static void create_gradient_bg(MopViewport *vp) {
-  MopColor c_top = {0.22f, 0.22f, 0.25f, 1.0f};
-  MopColor c_bot = {0.11f, 0.11f, 0.13f, 1.0f};
+  MopColor c_top = vp->theme.bg_top;
+  MopColor c_bot = vp->theme.bg_bottom;
   MopVec3 n = {0, 0, 1};
 
   MopVertex verts[4] = {
@@ -381,14 +354,11 @@ static void create_one_axis(MopViewport *vp, int idx, MopVec3 dir,
 
 static void create_axis_indicator(MopViewport *vp) {
   create_one_axis(vp, 0, (MopVec3){1, 0, 0}, (MopVec3){0, 1, 0},
-                  (MopVec3){0, 0, 1},
-                  (MopColor){0.85f, 0.20f, 0.20f, 1.0f}); /* X = red */
+                  (MopVec3){0, 0, 1}, vp->theme.axis_x); /* X = red */
   create_one_axis(vp, 1, (MopVec3){0, 1, 0}, (MopVec3){1, 0, 0},
-                  (MopVec3){0, 0, 1},
-                  (MopColor){0.30f, 0.75f, 0.30f, 1.0f}); /* Y = green */
+                  (MopVec3){0, 0, 1}, vp->theme.axis_y); /* Y = green */
   create_one_axis(vp, 2, (MopVec3){0, 0, 1}, (MopVec3){1, 0, 0},
-                  (MopVec3){0, 1, 0},
-                  (MopColor){0.25f, 0.40f, 0.90f, 1.0f}); /* Z = blue */
+                  (MopVec3){0, 1, 0}, vp->theme.axis_z); /* Z = blue */
 }
 
 /* -------------------------------------------------------------------------
@@ -413,8 +383,9 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
     return NULL;
   }
 
-  MopRhiFramebufferDesc fb_desc = {.width = desc->width,
-                                   .height = desc->height};
+  const int ssaa = 2; /* 2x supersampling for smooth edges */
+  MopRhiFramebufferDesc fb_desc = {.width = desc->width * ssaa,
+                                   .height = desc->height * ssaa};
   MopRhiFramebuffer *fb = rhi->framebuffer_create(device, &fb_desc);
   if (!fb) {
     rhi->device_destroy(device);
@@ -458,13 +429,29 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
                                                          : desc->backend;
   vp->width = desc->width;
   vp->height = desc->height;
-  vp->clear_color = (MopColor){0.11f, 0.11f, 0.13f, 1.0f};
+  vp->ssaa_factor = ssaa;
+  vp->ssaa_color_buf =
+      calloc((size_t)desc->width * desc->height * 4, sizeof(uint8_t));
+  if (!vp->ssaa_color_buf) {
+    free(vp->instanced_meshes);
+    free(vp->meshes);
+    rhi->framebuffer_destroy(device, fb);
+    rhi->device_destroy(device);
+    free(vp);
+    return NULL;
+  }
   vp->render_mode = MOP_RENDER_SOLID;
   vp->light_dir = (MopVec3){0.3f, 1.0f, 0.5f};
   vp->ambient = 0.25f;
   vp->shading_mode = MOP_SHADING_SMOOTH;
-  vp->post_effects = MOP_POST_GAMMA;
+  vp->post_effects = MOP_POST_GAMMA | MOP_POST_FXAA;
   vp->mesh_count = 0;
+
+  /* Theme: MOP design language — must be initialized before visual resource
+   * creation so that create_gradient_bg, create_grid, and create_axis_indicator
+   * can read from vp->theme. */
+  vp->theme = mop_theme_default();
+  vp->clear_color = vp->theme.bg_bottom;
 
   /* Multi-light: lights[0] mirrors legacy light_dir + ambient */
   memset(vp->lights, 0, sizeof(vp->lights));
@@ -476,12 +463,14 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
       .active = true,
   };
   vp->light_count = 1;
+  vp->default_light_active = true;
 
-  /* Display settings + overlays: all disabled by default */
+  /* Display settings + overlays: all disabled by default except outline */
   vp->display = mop_display_settings_default();
   vp->overlay_count = MOP_OVERLAY_BUILTIN_COUNT;
   memset(vp->overlays, 0, sizeof(vp->overlays));
   memset(vp->overlay_enabled, 0, sizeof(vp->overlay_enabled));
+  vp->overlay_enabled[MOP_OVERLAY_OUTLINE] = true; /* always-on by default */
 
   /* Owned subsystems */
   vp->camera = mop_orbit_camera_default();
@@ -492,6 +481,10 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
 
   /* Chrome defaults to visible */
   vp->show_chrome = true;
+
+  /* Reversed-Z depth — always enabled for Vulkan (hardware support) */
+  vp->reverse_z =
+      (vp->backend_type == MOP_BACKEND_VULKAN) ? true : desc->reverse_z;
 
   /* Register built-in subsystems */
   mop_postprocess_register(vp);
@@ -512,6 +505,18 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
 void mop_viewport_destroy(MopViewport *viewport) {
   if (!viewport) {
     return;
+  }
+
+  /* Destroy camera object meshes (Phase 5) */
+  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+    struct MopCameraObject *cam = &viewport->cameras[i];
+    if (cam->active) {
+      if (cam->frustum_mesh)
+        mop_viewport_remove_mesh(viewport, cam->frustum_mesh);
+      if (cam->icon_mesh)
+        mop_viewport_remove_mesh(viewport, cam->icon_mesh);
+      cam->active = false;
+    }
   }
 
   /* Destroy light indicators */
@@ -586,6 +591,8 @@ void mop_viewport_destroy(MopViewport *viewport) {
     viewport->rhi->device_destroy(viewport->device);
   }
 
+  free(viewport->ssaa_color_buf);
+  mop_sw_framebuffer_free(&viewport->shadow_fb);
   free(viewport->instanced_meshes);
   free(viewport->meshes);
   free(viewport);
@@ -602,13 +609,26 @@ void mop_viewport_resize(MopViewport *viewport, int width, int height) {
   viewport->width = width;
   viewport->height = height;
 
+  /* Resize the RHI framebuffer at SSAA resolution */
+  int sf = viewport->ssaa_factor;
   viewport->rhi->framebuffer_resize(viewport->device, viewport->framebuffer,
-                                    width, height);
+                                    width * sf, height * sf);
+
+  /* Reallocate the downsample buffer for the new presentation size */
+  free(viewport->ssaa_color_buf);
+  viewport->ssaa_color_buf =
+      calloc((size_t)width * height * 4, sizeof(uint8_t));
 
   /* Recompute projection matrix */
   float aspect = (float)width / (float)height;
-  viewport->projection_matrix = mop_mat4_perspective(
-      viewport->cam_fov_radians, aspect, viewport->cam_near, viewport->cam_far);
+  if (viewport->reverse_z) {
+    viewport->projection_matrix = mop_mat4_perspective_reverse_z(
+        viewport->cam_fov_radians, aspect, viewport->cam_near);
+  } else {
+    viewport->projection_matrix =
+        mop_mat4_perspective(viewport->cam_fov_radians, aspect,
+                             viewport->cam_near, viewport->cam_far);
+  }
 }
 
 void mop_viewport_set_clear_color(MopViewport *viewport, MopColor color) {
@@ -663,14 +683,39 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
   viewport->view_matrix = mop_mat4_look_at(eye, target, up);
 
   float aspect = (float)viewport->width / (float)viewport->height;
-  viewport->projection_matrix = mop_mat4_perspective(
-      viewport->cam_fov_radians, aspect, near_plane, far_plane);
+  if (viewport->reverse_z) {
+    viewport->projection_matrix = mop_mat4_perspective_reverse_z(
+        viewport->cam_fov_radians, aspect, near_plane);
+  } else {
+    viewport->projection_matrix = mop_mat4_perspective(
+        viewport->cam_fov_radians, aspect, near_plane, far_plane);
+  }
+
+  /* Sync the orbit camera so mop_orbit_camera_apply() won't overwrite.
+   * Convert eye/target to spherical orbit parameters (distance, yaw, pitch). */
+  MopVec3 offset = mop_vec3_sub(eye, target);
+  float dist = mop_vec3_length(offset);
+  if (dist > 1e-6f) {
+    viewport->camera.target = target;
+    viewport->camera.distance = dist;
+    viewport->camera.yaw = atan2f(offset.x, offset.z);
+    viewport->camera.pitch = asinf(offset.y / dist);
+    viewport->camera.fov_degrees = fov_degrees;
+    viewport->camera.near_plane = near_plane;
+    viewport->camera.far_plane = far_plane;
+  }
 }
 
 MopBackendType mop_viewport_get_backend(MopViewport *viewport) {
   if (!viewport)
     return MOP_BACKEND_CPU;
   return viewport->backend_type;
+}
+
+float mop_viewport_gpu_frame_time_ms(MopViewport *viewport) {
+  if (!viewport || !viewport->rhi || !viewport->rhi->frame_gpu_time_ms)
+    return 0.0f;
+  return viewport->rhi->frame_gpu_time_ms(viewport->device);
 }
 
 MopVec3 mop_viewport_get_camera_eye(const MopViewport *viewport) {
@@ -781,6 +826,7 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc) {
   mesh->has_material = false;
   mesh->material = mop_material_default();
   mesh->blend_mode = MOP_BLEND_OPAQUE;
+  mesh->shading_mode_override = -1;
   mesh->vertex_capacity = desc->vertex_count;
   mesh->index_capacity = desc->index_count;
 
@@ -895,6 +941,7 @@ MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport,
   mesh->has_material = false;
   mesh->material = mop_material_default();
   mesh->blend_mode = MOP_BLEND_OPAQUE;
+  mesh->shading_mode_override = -1;
   mesh->vertex_capacity = desc->vertex_count;
   mesh->index_capacity = desc->index_count;
   mesh->vertex_format = fmt_copy;
@@ -1102,6 +1149,12 @@ MopVec3 mop_mesh_get_scale(const MopMesh *mesh) {
   return mesh ? mesh->scale_val : (MopVec3){1, 1, 1};
 }
 
+void mop_mesh_set_shading(MopMesh *mesh, MopShadingMode mode) {
+  if (!mesh)
+    return;
+  mesh->shading_mode_override = (int)mode;
+}
+
 /* -------------------------------------------------------------------------
  * Rendering — internal pass functions
  *
@@ -1114,15 +1167,24 @@ void mop_overlay_builtin_wireframe(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_normals(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_bounds(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_selection(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_outline(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_grid(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data);
 
 /* Per-frame triangle counter — accumulated across passes */
 static uint32_t s_triangle_count;
 
 /* ---- Helper macro: issue a draw call for a mesh ---- */
+/* Chrome meshes (grid = MOP_GRID_ID, >= 0xFFFE0000 for gizmo/indicators)
+ * are rendered fully unlit (ambient=1, no lights) so they keep their vertex
+ * colors without being darkened or brightened by scene lighting. */
 #define EMIT_DRAW(vp, mesh_ptr)                                                \
   do {                                                                         \
     struct MopMesh *m_ = (mesh_ptr);                                           \
     s_triangle_count += m_->index_count / 3;                                   \
+    bool chrome_ = (m_->object_id >= 0xFFFD0000u);                             \
     MopMat4 mvp_ = mop_mat4_multiply(                                          \
         (vp)->projection_matrix,                                               \
         mop_mat4_multiply((vp)->view_matrix, m_->world_transform));            \
@@ -1139,20 +1201,23 @@ static uint32_t s_triangle_count;
         .base_color = m_->base_color,                                          \
         .opacity = m_->opacity,                                                \
         .light_dir = (vp)->light_dir,                                          \
-        .ambient = (vp)->ambient,                                              \
-        .shading_mode = (vp)->shading_mode,                                    \
+        .ambient = chrome_ ? 1.0f : (vp)->ambient,                             \
+        .shading_mode = (m_->shading_mode_override >= 0                        \
+                             ? (MopShadingMode)m_->shading_mode_override       \
+                             : (vp)->shading_mode),                            \
         .wireframe =                                                           \
             ((vp)->render_mode == MOP_RENDER_WIREFRAME) && m_->object_id != 0, \
-        .depth_test = (m_->object_id < 0xFFFE0000u),                           \
-        .backface_cull = (m_->object_id != 0 && m_->object_id < 0xFFFE0000u),  \
+        .depth_test = (m_->object_id < 0xFFFD0000u),                           \
+        .depth_write = true,                                                   \
+        .backface_cull = (m_->object_id < 0xFFFD0000u),                        \
         .texture = m_->texture ? m_->texture->rhi_texture : NULL,              \
         .blend_mode = m_->blend_mode,                                          \
         .metallic = m_->has_material ? m_->material.metallic : 0.0f,           \
         .roughness = m_->has_material ? m_->material.roughness : 0.5f,         \
         .emissive =                                                            \
             m_->has_material ? m_->material.emissive : (MopVec3){0, 0, 0},     \
-        .lights = (vp)->lights,                                                \
-        .light_count = (vp)->light_count,                                      \
+        .lights = chrome_ ? NULL : (vp)->lights,                               \
+        .light_count = chrome_ ? 0 : (vp)->light_count,                        \
         .cam_eye = (vp)->cam_eye,                                              \
         .vertex_format = m_->vertex_format,                                    \
     };                                                                         \
@@ -1195,15 +1260,175 @@ static void pass_background(MopViewport *vp) {
   vp->rhi->draw(vp->device, vp->framebuffer, &bg_call);
 }
 
+/* ---- Pass: shadow map from directional light ---- */
+#define MOP_SHADOW_MAP_SIZE 1024
+
+static void pass_shadow(MopViewport *vp) {
+  /* Find first active directional light */
+  int dir_light_idx = -1;
+  for (uint32_t i = 0; i < vp->light_count; i++) {
+    if (vp->lights[i].active && vp->lights[i].type == MOP_LIGHT_DIRECTIONAL) {
+      dir_light_idx = (int)i;
+      break;
+    }
+  }
+  if (dir_light_idx < 0) {
+    vp->shadow_fb_valid = false;
+    mop_sw_shadow_clear();
+    return;
+  }
+
+  /* Compute scene AABB from active meshes */
+  float scene_min[3] = {1e9f, 1e9f, 1e9f};
+  float scene_max[3] = {-1e9f, -1e9f, -1e9f};
+  bool has_meshes = false;
+
+  for (uint32_t i = 0; i < vp->mesh_count; i++) {
+    struct MopMesh *mesh = &vp->meshes[i];
+    if (!mesh->active || mesh->object_id >= 0xFFFD0000u)
+      continue;
+    if (mesh->blend_mode != MOP_BLEND_OPAQUE)
+      continue;
+
+    /* Use the world transform's translation as a rough center */
+    float cx = mesh->world_transform.d[12];
+    float cy = mesh->world_transform.d[13];
+    float cz = mesh->world_transform.d[14];
+
+    /* Estimate radius from scale */
+    float sx = sqrtf(mesh->world_transform.d[0] * mesh->world_transform.d[0] +
+                     mesh->world_transform.d[1] * mesh->world_transform.d[1] +
+                     mesh->world_transform.d[2] * mesh->world_transform.d[2]);
+    float sy = sqrtf(mesh->world_transform.d[4] * mesh->world_transform.d[4] +
+                     mesh->world_transform.d[5] * mesh->world_transform.d[5] +
+                     mesh->world_transform.d[6] * mesh->world_transform.d[6]);
+    float sz = sqrtf(mesh->world_transform.d[8] * mesh->world_transform.d[8] +
+                     mesh->world_transform.d[9] * mesh->world_transform.d[9] +
+                     mesh->world_transform.d[10] * mesh->world_transform.d[10]);
+    float r = sx > sy ? sx : sy;
+    if (sz > r)
+      r = sz;
+    r *= 1.5f; /* margin */
+
+    if (cx - r < scene_min[0])
+      scene_min[0] = cx - r;
+    if (cy - r < scene_min[1])
+      scene_min[1] = cy - r;
+    if (cz - r < scene_min[2])
+      scene_min[2] = cz - r;
+    if (cx + r > scene_max[0])
+      scene_max[0] = cx + r;
+    if (cy + r > scene_max[1])
+      scene_max[1] = cy + r;
+    if (cz + r > scene_max[2])
+      scene_max[2] = cz + r;
+    has_meshes = true;
+  }
+
+  if (!has_meshes) {
+    vp->shadow_fb_valid = false;
+    mop_sw_shadow_clear();
+    return;
+  }
+
+  /* Allocate or resize shadow framebuffer */
+  if (vp->shadow_fb.width != MOP_SHADOW_MAP_SIZE ||
+      vp->shadow_fb.height != MOP_SHADOW_MAP_SIZE) {
+    mop_sw_framebuffer_free(&vp->shadow_fb);
+    if (!mop_sw_framebuffer_alloc(&vp->shadow_fb, MOP_SHADOW_MAP_SIZE,
+                                  MOP_SHADOW_MAP_SIZE)) {
+      vp->shadow_fb_valid = false;
+      mop_sw_shadow_clear();
+      return;
+    }
+  }
+
+  /* Clear shadow depth to 1.0 */
+  size_t shadow_pixels = (size_t)MOP_SHADOW_MAP_SIZE * MOP_SHADOW_MAP_SIZE;
+  for (size_t p = 0; p < shadow_pixels; p++)
+    vp->shadow_fb.depth[p] = 1.0f;
+
+  /* Light direction (the "dir" field points FROM the surface TOWARDS the
+   * light source; we need the light's look direction, which is the opposite) */
+  MopVec3 light_dir = mop_vec3_normalize(vp->lights[dir_light_idx].direction);
+  MopVec3 neg_dir = {-light_dir.x, -light_dir.y, -light_dir.z};
+
+  /* Scene center and radius */
+  float center_x = (scene_min[0] + scene_max[0]) * 0.5f;
+  float center_y = (scene_min[1] + scene_max[1]) * 0.5f;
+  float center_z = (scene_min[2] + scene_max[2]) * 0.5f;
+  float dx = scene_max[0] - scene_min[0];
+  float dy = scene_max[1] - scene_min[1];
+  float dz = scene_max[2] - scene_min[2];
+  float scene_radius = sqrtf(dx * dx + dy * dy + dz * dz) * 0.5f;
+  if (scene_radius < 1.0f)
+    scene_radius = 1.0f;
+
+  /* Light view: position the light far back along its direction */
+  MopVec3 light_eye = {center_x - neg_dir.x * scene_radius * 2.0f,
+                       center_y - neg_dir.y * scene_radius * 2.0f,
+                       center_z - neg_dir.z * scene_radius * 2.0f};
+  MopVec3 light_target = {center_x, center_y, center_z};
+
+  /* Choose a stable up vector (avoid collinear with light direction) */
+  MopVec3 up = {0, 1, 0};
+  float dot_up = fabsf(mop_vec3_dot(neg_dir, up));
+  if (dot_up > 0.99f)
+    up = (MopVec3){1, 0, 0};
+
+  MopMat4 light_view = mop_mat4_look_at(light_eye, light_target, up);
+
+  /* Orthographic projection covering the scene */
+  float ortho_size = scene_radius * 1.2f;
+  float ortho_near = 0.1f;
+  float ortho_far = scene_radius * 4.0f;
+  MopMat4 light_proj = mop_mat4_ortho(-ortho_size, ortho_size, -ortho_size,
+                                      ortho_size, ortho_near, ortho_far);
+
+  MopMat4 light_vp = mop_mat4_multiply(light_proj, light_view);
+
+  /* Render each opaque mesh into the shadow depth buffer */
+  for (uint32_t i = 0; i < vp->mesh_count; i++) {
+    struct MopMesh *mesh = &vp->meshes[i];
+    if (!mesh->active || mesh->object_id >= 0xFFFD0000u)
+      continue;
+    if (mesh->blend_mode != MOP_BLEND_OPAQUE)
+      continue;
+
+    /* Read vertex data from the RHI buffer */
+    const MopVertex *verts =
+        (const MopVertex *)vp->rhi->buffer_read(mesh->vertex_buffer);
+    const uint32_t *indices =
+        (const uint32_t *)vp->rhi->buffer_read(mesh->index_buffer);
+    if (!verts || !indices)
+      continue;
+
+    mop_sw_shadow_render_mesh(verts, mesh->vertex_count, indices,
+                              mesh->index_count, mesh->world_transform,
+                              light_vp, &vp->shadow_fb);
+  }
+
+  /* Set shadow state for the main render */
+  mop_sw_shadow_set(vp->shadow_fb.depth, MOP_SHADOW_MAP_SIZE,
+                    MOP_SHADOW_MAP_SIZE, light_vp);
+  vp->shadow_fb_valid = true;
+}
+
+/* ---- Pass: ground grid ----
+ * Grid rendering is handled entirely by the post-frame_end analytical
+ * overlay (mop_overlay_builtin_grid).  No geometry pass needed. */
+
 /* ---- Pass: opaque scene meshes ---- */
 static void pass_scene_opaque(MopViewport *vp) {
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
     struct MopMesh *mesh = &vp->meshes[i];
     if (!mesh->active)
       continue;
+    if (mesh->object_id == MOP_GRID_ID)
+      continue; /* grid drawn separately after scene */
     if (mesh->blend_mode != MOP_BLEND_OPAQUE)
       continue;
-    if (mesh->object_id >= 0xFFFF0000u)
+    if (mesh->object_id >= 0xFFFE0000u)
       continue;
     EMIT_DRAW(vp, mesh);
   }
@@ -1216,7 +1441,7 @@ static void pass_scene_transparent(MopViewport *vp) {
     struct MopMesh *mesh = &vp->meshes[i];
     if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
       continue;
-    if (mesh->object_id >= 0xFFFF0000u)
+    if (mesh->object_id >= 0xFFFE0000u)
       continue;
     trans_count++;
   }
@@ -1234,7 +1459,7 @@ static void pass_scene_transparent(MopViewport *vp) {
       struct MopMesh *mesh = &vp->meshes[i];
       if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
         continue;
-      if (mesh->object_id >= 0xFFFF0000u)
+      if (mesh->object_id >= 0xFFFE0000u)
         continue;
       EMIT_DRAW(vp, mesh);
     }
@@ -1247,7 +1472,7 @@ static void pass_scene_transparent(MopViewport *vp) {
     struct MopMesh *mesh = &vp->meshes[i];
     if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
       continue;
-    if (mesh->object_id >= 0xFFFF0000u)
+    if (mesh->object_id >= 0xFFFE0000u)
       continue;
     trans_idx[ti] = i;
     float dx = mesh->world_transform.d[12] - eye.x;
@@ -1287,6 +1512,8 @@ static void pass_gizmo(MopViewport *vp) {
       continue;
     if (mesh->object_id < 0xFFFE0000u)
       continue; /* light indicators + gizmo handles */
+    if (mesh->opacity < 0.01f)
+      continue; /* invisible chrome — 2D overlay + screen-space picking */
     EMIT_DRAW(vp, mesh);
   }
 }
@@ -1307,6 +1534,9 @@ static void pass_overlays(MopViewport *vp) {
   if (vp->overlay_enabled[MOP_OVERLAY_SELECTION]) {
     mop_overlay_builtin_selection(vp, NULL);
   }
+  /* NOTE: MOP_OVERLAY_OUTLINE runs as a post-process after frame_end,
+   * since it needs the object_id readback buffer (populated by frame_end
+   * on GPU backends). See mop_viewport_render(). */
 
   /* Custom overlays */
   for (uint32_t i = MOP_OVERLAY_BUILTIN_COUNT; i < vp->overlay_count; i++) {
@@ -1314,68 +1544,6 @@ static void pass_overlays(MopViewport *vp) {
         vp->overlays[i].draw_fn) {
       vp->overlays[i].draw_fn(vp, vp->overlays[i].user_data);
     }
-  }
-}
-
-/* ---- Pass: axis indicator (HUD corner widget) ---- */
-static void pass_hud(MopViewport *vp) {
-  /* Build view-rotation-only matrix (zero out translation column) */
-  MopMat4 view_rot = vp->view_matrix;
-  view_rot.d[12] = 0.0f;
-  view_rot.d[13] = 0.0f;
-  view_rot.d[14] = 0.0f;
-  view_rot.d[15] = 1.0f;
-
-  /* Corner projection: scale down + translate to bottom-left in NDC */
-  MopMat4 corner = mop_mat4_identity();
-  corner.d[0] = 0.12f;   /* scale X */
-  corner.d[5] = 0.12f;   /* scale Y */
-  corner.d[10] = 0.12f;  /* scale Z */
-  corner.d[12] = -0.82f; /* translate X (left) */
-  corner.d[13] = -0.78f; /* translate Y (bottom) */
-
-  MopMat4 axis_mvp = mop_mat4_multiply(corner, view_rot);
-
-  for (int ax = 0; ax < 3; ax++) {
-    if (!vp->axis_ind_vb[ax] || !vp->axis_ind_ib[ax])
-      continue;
-
-    MopColor ax_color;
-    if (ax == 0)
-      ax_color = (MopColor){0.85f, 0.20f, 0.20f, 1.0f};
-    else if (ax == 1)
-      ax_color = (MopColor){0.30f, 0.75f, 0.30f, 1.0f};
-    else
-      ax_color = (MopColor){0.25f, 0.40f, 0.90f, 1.0f};
-
-    MopRhiDrawCall ax_call = {
-        .vertex_buffer = vp->axis_ind_vb[ax],
-        .index_buffer = vp->axis_ind_ib[ax],
-        .vertex_count = vp->axis_ind_vcnt[ax],
-        .index_count = vp->axis_ind_icnt[ax],
-        .object_id = 0,
-        .model = mop_mat4_identity(),
-        .view = mop_mat4_identity(),
-        .projection = mop_mat4_identity(),
-        .mvp = axis_mvp,
-        .base_color = ax_color,
-        .opacity = 1.0f,
-        .light_dir = vp->light_dir,
-        .ambient = 1.0f,
-        .shading_mode = MOP_SHADING_SMOOTH,
-        .wireframe = false,
-        .depth_test = false,
-        .backface_cull = false,
-        .texture = NULL,
-        .blend_mode = MOP_BLEND_OPAQUE,
-        .metallic = 0.0f,
-        .roughness = 0.5f,
-        .emissive = (MopVec3){0, 0, 0},
-        .lights = NULL,
-        .light_count = 0,
-        .vertex_format = NULL,
-    };
-    vp->rhi->draw(vp->device, vp->framebuffer, &ax_call);
   }
 }
 
@@ -1443,11 +1611,25 @@ void mop_viewport_render(MopViewport *viewport) {
   /* Apply owned camera each frame */
   mop_orbit_camera_apply(&viewport->camera, viewport);
 
-  /* Update light indicator meshes (create/destroy/reposition) */
-  mop_light_update_indicators(viewport);
+  /* Update geometry light indicators for picking (object_id buffer).
+   * Visual rendering is handled by 2D overlay after frame_end.
+   * Set geometry indicator opacity to 0 so they're invisible but
+   * still rasterized (writes to object_id buffer for click detection). */
+  if (viewport->show_chrome) {
+    mop_light_update_indicators(viewport);
+    for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+      if (viewport->light_indicators[i]) {
+        viewport->light_indicators[i]->opacity = 0.0f;
+        viewport->light_indicators[i]->blend_mode = MOP_BLEND_ALPHA;
+      }
+    }
+  }
 
-  /* Refresh gizmo scale for current camera distance */
+  /* Refresh gizmo scale for current camera distance.
+   * Set handle geometry opacity to 0 — invisible but still rasterized
+   * (writes object_id for picking).  2D overlay provides the visuals. */
   mop_gizmo_update(viewport->gizmo);
+  mop_gizmo_set_handles_opacity(viewport->gizmo, 0.0f);
 
   /* --- Transform phase (TRS + hierarchical world transforms) --- */
   double t_transform_start = mop_profile_now_ms();
@@ -1519,6 +1701,10 @@ void mop_viewport_render(MopViewport *viewport) {
   /* --- PRE_SCENE hooks --- */
   dispatch_hooks(viewport, MOP_STAGE_PRE_SCENE);
 
+  /* --- Shadow map pass (CPU backend only) --- */
+  if (viewport->backend_type == MOP_BACKEND_CPU)
+    pass_shadow(viewport);
+
   /* --- Rasterize phase --- */
   double t_rasterize_start = mop_profile_now_ms();
 
@@ -1540,10 +1726,28 @@ void mop_viewport_render(MopViewport *viewport) {
   /* --- POST_OVERLAY hooks --- */
   dispatch_hooks(viewport, MOP_STAGE_POST_OVERLAY);
 
-  if (viewport->show_chrome)
-    pass_hud(viewport);
+  /* Geometry HUD skipped — 2D overlay replaces it (pass_hud removed) */
 
   viewport->rhi->frame_end(viewport->device, viewport->framebuffer);
+
+  /* Post-process overlays — run after frame_end so that readback buffers
+   * (color, object_id, depth) are populated (GPU copies happen in frame_end).
+   * These modify the readback color buffer in-place. */
+  if (viewport->overlay_enabled[MOP_OVERLAY_OUTLINE]) {
+    mop_overlay_builtin_outline(viewport, NULL);
+  }
+
+  /* 2D screen-space chrome — anti-aliased lines for all UI elements */
+  if (viewport->show_chrome) {
+    mop_overlay_builtin_grid(viewport, NULL); /* grid on below-Y=0 objects */
+    mop_overlay_builtin_light_indicators(viewport, NULL);
+    mop_overlay_builtin_gizmo_2d(viewport, NULL);
+    mop_overlay_builtin_axis_indicator_2d(viewport, NULL);
+  }
+
+  /* Clear shadow state */
+  if (viewport->backend_type == MOP_BACKEND_CPU)
+    mop_sw_shadow_clear();
 
   /* Post-render subsystems (postprocess effects, etc.) */
   mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_POST_RENDER,
@@ -1576,8 +1780,227 @@ const uint8_t *mop_viewport_read_color(MopViewport *viewport, int *out_width,
                                        int *out_height) {
   if (!viewport)
     return NULL;
-  return viewport->rhi->framebuffer_read_color(
-      viewport->device, viewport->framebuffer, out_width, out_height);
+
+  int render_w = 0, render_h = 0;
+  const uint8_t *src = viewport->rhi->framebuffer_read_color(
+      viewport->device, viewport->framebuffer, &render_w, &render_h);
+  if (!src)
+    return NULL;
+
+  int sf = viewport->ssaa_factor;
+  if (sf <= 1 || !viewport->ssaa_color_buf) {
+    /* No supersampling — return raw buffer */
+    if (out_width)
+      *out_width = render_w;
+    if (out_height)
+      *out_height = render_h;
+    return src;
+  }
+
+  /* Box-filter downsample: average sf×sf pixel blocks */
+  int pw = viewport->width;
+  int ph = viewport->height;
+  uint8_t *dst = viewport->ssaa_color_buf;
+
+  for (int y = 0; y < ph; y++) {
+    for (int x = 0; x < pw; x++) {
+      int r = 0, g = 0, b = 0, a = 0;
+      for (int dy = 0; dy < sf; dy++) {
+        for (int dx = 0; dx < sf; dx++) {
+          int sx = x * sf + dx;
+          int sy = y * sf + dy;
+          const uint8_t *p = &src[(sy * render_w + sx) * 4];
+          r += p[0];
+          g += p[1];
+          b += p[2];
+          a += p[3];
+        }
+      }
+      int n = sf * sf;
+      uint8_t *d = &dst[(y * pw + x) * 4];
+      d[0] = (uint8_t)(r / n);
+      d[1] = (uint8_t)(g / n);
+      d[2] = (uint8_t)(b / n);
+      d[3] = (uint8_t)(a / n);
+    }
+  }
+
+  if (out_width)
+    *out_width = pw;
+  if (out_height)
+    *out_height = ph;
+  return dst;
+}
+
+/* -------------------------------------------------------------------------
+ * Screen-space picking helpers
+ *
+ * Chrome elements (gizmo handles, light indicators) are rendered as 2D
+ * overlays only — no geometry in the object_id buffer.  Picking is done
+ * by projecting their 3D positions to screen space and computing the
+ * distance from the click point to each handle/indicator.
+ * ------------------------------------------------------------------------- */
+
+/* Project world point to screen (presentation) coords.
+ * Returns false if behind camera. */
+static bool pick_project(MopVec3 p, const MopViewport *vp, float *sx,
+                         float *sy) {
+  MopMat4 vpm = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+  MopVec4 clip = mop_mat4_mul_vec4(vpm, (MopVec4){p.x, p.y, p.z, 1.0f});
+  if (clip.w <= 0.001f)
+    return false;
+  float nx = clip.x / clip.w;
+  float ny = clip.y / clip.w;
+  *sx = (nx * 0.5f + 0.5f) * (float)vp->width;
+  *sy = (1.0f - (ny * 0.5f + 0.5f)) * (float)vp->height;
+  return true;
+}
+
+/* Distance from point (px,py) to line segment (ax,ay)-(bx,by) */
+static float dist_to_segment(float px, float py, float ax, float ay, float bx,
+                             float by) {
+  float dx = bx - ax, dy = by - ay;
+  float len2 = dx * dx + dy * dy;
+  if (len2 < 0.001f)
+    return sqrtf((px - ax) * (px - ax) + (py - ay) * (py - ay));
+  float t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  if (t < 0.0f)
+    t = 0.0f;
+  if (t > 1.0f)
+    t = 1.0f;
+  float cx = ax + t * dx, cy = ay + t * dy;
+  return sqrtf((px - cx) * (px - cx) + (py - cy) * (py - cy));
+}
+
+/* Screen-space gizmo pick — returns the handle object_id, or 0 */
+static uint32_t pick_gizmo_screen(const MopViewport *vp, float mx, float my) {
+  if (!vp->gizmo || !mop_gizmo_is_visible(vp->gizmo))
+    return 0;
+
+  MopVec3 pos = mop_gizmo_get_position_internal(vp->gizmo);
+  MopGizmoMode mode = mop_gizmo_get_mode(vp->gizmo);
+
+  float dist_cam = mop_vec3_length(mop_vec3_sub(pos, vp->cam_eye));
+  float s = dist_cam * 0.18f;
+  if (s < 0.05f)
+    s = 0.05f;
+
+  float threshold = 12.0f; /* pixels */
+  float best_dist = threshold;
+  int best_axis = -1;
+
+  for (int a = 0; a < 3; a++) {
+    MopVec3 dir = mop_gizmo_get_axis_dir(vp->gizmo, a);
+
+    if (mode == MOP_GIZMO_TRANSLATE || mode == MOP_GIZMO_SCALE) {
+      MopVec3 shaft_s = {pos.x + dir.x * 0.20f * s, pos.y + dir.y * 0.20f * s,
+                         pos.z + dir.z * 0.20f * s};
+      MopVec3 shaft_e = {pos.x + dir.x * 1.20f * s, pos.y + dir.y * 1.20f * s,
+                         pos.z + dir.z * 1.20f * s};
+      float ss_x, ss_y, se_x, se_y;
+      if (pick_project(shaft_s, vp, &ss_x, &ss_y) &&
+          pick_project(shaft_e, vp, &se_x, &se_y)) {
+        float d = dist_to_segment(mx, my, ss_x, ss_y, se_x, se_y);
+        if (d < best_dist) {
+          best_dist = d;
+          best_axis = a;
+        }
+      }
+    } else {
+      /* Rotate — test distance to circle ring */
+      MopVec3 up = {0, 1, 0};
+      if (fabsf(mop_vec3_dot(dir, up)) > 0.99f)
+        up = (MopVec3){0, 0, 1};
+      MopVec3 axis_u = mop_vec3_normalize(mop_vec3_cross(up, dir));
+      MopVec3 axis_v = mop_vec3_cross(dir, axis_u);
+      int segs = 24;
+      for (int i = 0; i < segs; i++) {
+        float a0 = (float)i * 2.0f * 3.14159265f / (float)segs;
+        float a1 = (float)(i + 1) * 2.0f * 3.14159265f / (float)segs;
+        float ca0 = cosf(a0), sa0 = sinf(a0);
+        float ca1 = cosf(a1), sa1 = sinf(a1);
+        MopVec3 p0 = {pos.x + (axis_u.x * ca0 + axis_v.x * sa0) * s,
+                      pos.y + (axis_u.y * ca0 + axis_v.y * sa0) * s,
+                      pos.z + (axis_u.z * ca0 + axis_v.z * sa0) * s};
+        MopVec3 p1 = {pos.x + (axis_u.x * ca1 + axis_v.x * sa1) * s,
+                      pos.y + (axis_u.y * ca1 + axis_v.y * sa1) * s,
+                      pos.z + (axis_u.z * ca1 + axis_v.z * sa1) * s};
+        float s0x, s0y, s1x, s1y;
+        if (pick_project(p0, vp, &s0x, &s0y) &&
+            pick_project(p1, vp, &s1x, &s1y)) {
+          float d = dist_to_segment(mx, my, s0x, s0y, s1x, s1y);
+          if (d < best_dist) {
+            best_dist = d;
+            best_axis = a;
+          }
+        }
+      }
+    }
+  }
+
+  /* Center handle — small region around gizmo center */
+  float csx, csy;
+  if (pick_project(pos, vp, &csx, &csy)) {
+    float d = sqrtf((mx - csx) * (mx - csx) + (my - csy) * (my - csy));
+    if (d < 10.0f && d < best_dist) {
+      best_axis = 3; /* center */
+    }
+  }
+
+  if (best_axis < 0)
+    return 0;
+
+  /* Reconstruct the handle object_id that mop_gizmo_test_pick expects */
+  /* Handle IDs: base + 1 + axis, where base = 0xFFFF0000 + instance*8 */
+  /* For the first gizmo instance (counter=0): IDs are 0xFFFF0001..0xFFFF0004 */
+  /* We use the gizmo's internal handle_ids via a new accessor */
+  return mop_gizmo_get_handle_id(vp->gizmo, best_axis);
+}
+
+/* Screen-space light indicator pick — returns the light indicator object_id */
+static uint32_t pick_light_screen(const MopViewport *vp, float mx, float my) {
+  float threshold = 18.0f;
+  float best_dist = threshold;
+  uint32_t best_id = 0;
+
+  MopMat4 vpm = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+  (void)vpm;
+
+  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+    if (!vp->lights[i].active)
+      continue;
+
+    MopVec3 pos;
+    if (vp->lights[i].type == MOP_LIGHT_DIRECTIONAL) {
+      MopVec3 dir = mop_vec3_normalize(vp->lights[i].direction);
+      pos = mop_vec3_add(vp->cam_target, mop_vec3_scale(dir, 3.0f));
+    } else {
+      pos = vp->lights[i].position;
+    }
+
+    float sx, sy;
+    if (!pick_project(pos, vp, &sx, &sy))
+      continue;
+
+    float d = sqrtf((mx - sx) * (mx - sx) + (my - sy) * (my - sy));
+
+    /* Use a distance threshold scaled by camera distance */
+    float cam_dist = mop_vec3_length(mop_vec3_sub(pos, vp->cam_eye));
+    float s = cam_dist * 0.16f;
+    if (s < 0.05f)
+      s = 0.05f;
+    float pixel_radius = s * (float)vp->width * 0.1f;
+    if (pixel_radius < threshold)
+      pixel_radius = threshold;
+
+    if (d < pixel_radius && d < best_dist) {
+      best_dist = d;
+      /* Light indicator object_ids start at 0xFFFE0000 + light_index */
+      best_id = 0xFFFE0000u + i;
+    }
+  }
+
+  return best_id;
 }
 
 /* -------------------------------------------------------------------------
@@ -1593,14 +2016,33 @@ MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y) {
     return result;
   }
 
+  /* Scale from presentation coords to internal render coords */
+  int sf = viewport->ssaa_factor;
+  int rx = x * sf;
+  int ry = y * sf;
+
+  /* First: screen-space picking for chrome (gizmo, light indicators).
+   * These have priority over scene objects — they're always "on top". */
+  float mx = (float)x, my = (float)y;
+  uint32_t chrome_id = pick_gizmo_screen(viewport, mx, my);
+  if (chrome_id == 0)
+    chrome_id = pick_light_screen(viewport, mx, my);
+  if (chrome_id != 0) {
+    result.hit = true;
+    result.object_id = chrome_id;
+    result.depth = 0.0f; /* always on top */
+    return result;
+  }
+
+  /* Fallback: object_id buffer for scene objects */
   uint32_t id = viewport->rhi->pick_read_id(viewport->device,
-                                            viewport->framebuffer, x, y);
+                                            viewport->framebuffer, rx, ry);
 
   if (id != 0) {
     result.hit = true;
     result.object_id = id;
-    result.depth = viewport->rhi->pick_read_depth(viewport->device,
-                                                  viewport->framebuffer, x, y);
+    result.depth = viewport->rhi->pick_read_depth(
+        viewport->device, viewport->framebuffer, rx, ry);
   }
 
   return result;
@@ -1789,6 +2231,30 @@ void mop_viewport_set_time(MopViewport *viewport, float t) {
 /* -------------------------------------------------------------------------
  * Chrome visibility
  * ------------------------------------------------------------------------- */
+
+void mop_viewport_set_theme(MopViewport *vp, const MopTheme *theme) {
+  if (!vp || !theme)
+    return;
+  vp->theme = *theme;
+  vp->clear_color = theme->bg_bottom;
+
+  /* Regenerate gradient background mesh with new colors */
+  if (vp->bg_vb) {
+    vp->rhi->buffer_destroy(vp->device, vp->bg_vb);
+    vp->bg_vb = NULL;
+  }
+  if (vp->bg_ib) {
+    vp->rhi->buffer_destroy(vp->device, vp->bg_ib);
+    vp->bg_ib = NULL;
+  }
+  create_gradient_bg(vp);
+}
+
+const MopTheme *mop_viewport_get_theme(const MopViewport *vp) {
+  if (!vp)
+    return NULL;
+  return &vp->theme;
+}
 
 void mop_viewport_set_chrome(MopViewport *viewport, bool visible) {
   if (!viewport)

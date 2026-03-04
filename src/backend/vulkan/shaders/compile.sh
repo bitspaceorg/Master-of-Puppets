@@ -69,8 +69,19 @@ HEADER
 echo "Compiling GLSL 450 -> SPIR-V -> C arrays..."
 
 compile_shader "$SCRIPT_DIR/mop_solid.vert" "mop_solid_vert_spv"
+compile_shader "$SCRIPT_DIR/mop_instanced.vert" "mop_instanced_vert_spv"
 compile_shader "$SCRIPT_DIR/mop_solid.frag" "mop_solid_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_wireframe.frag" "mop_wireframe_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_shadow.vert" "mop_shadow_vert_spv"
+compile_shader "$SCRIPT_DIR/mop_shadow.frag" "mop_shadow_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_fullscreen.vert" "mop_fullscreen_vert_spv"
+compile_shader "$SCRIPT_DIR/mop_fxaa.frag" "mop_fxaa_frag_spv"
+
+echo "" >>"$OUT_FILE"
+echo "/* Feature flags: define these to enable shader-dependent pipelines */" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_SHADOW_SHADERS 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_POSTPROCESS_SHADERS 1" >>"$OUT_FILE"
+echo "" >>"$OUT_FILE"
 
 echo "#endif /* MOP_VK_SHADERS_H */" >>"$OUT_FILE"
 

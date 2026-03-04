@@ -8,8 +8,8 @@
  */
 
 #include <math.h>
-#include <mop/log.h>
 #include <mop/types.h>
+#include <mop/util/log.h>
 
 /* -------------------------------------------------------------------------
  * Vec3
@@ -75,6 +75,36 @@ MopMat4 mop_mat4_perspective(float fov_radians, float aspect, float near_plane,
   M(m, 2, 2) = -(far_plane + near_plane) / (far_plane - near_plane);
   M(m, 3, 2) = -1.0f;
   M(m, 2, 3) = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
+  return m;
+}
+
+MopMat4 mop_mat4_perspective_reverse_z(float fov_radians, float aspect,
+                                       float near_plane) {
+  float tan_half_fov = tanf(fov_radians * 0.5f);
+  MopMat4 m = {0};
+  M(m, 0, 0) = 1.0f / (aspect * tan_half_fov);
+  M(m, 1, 1) = 1.0f / tan_half_fov;
+  M(m, 2, 2) = 0.0f;
+  M(m, 3, 2) = -1.0f;
+  M(m, 2, 3) = near_plane;
+  return m;
+}
+
+MopMat4 mop_mat4_ortho(float left, float right, float bottom, float top,
+                       float near_plane, float far_plane) {
+  MopMat4 m = {0};
+  float rl = right - left;
+  float tb = top - bottom;
+  float fn = far_plane - near_plane;
+  if (fabsf(rl) < 1e-9f || fabsf(tb) < 1e-9f || fabsf(fn) < 1e-9f)
+    return mop_mat4_identity();
+  M(m, 0, 0) = 2.0f / rl;
+  M(m, 1, 1) = 2.0f / tb;
+  M(m, 2, 2) = -2.0f / fn;
+  M(m, 0, 3) = -(right + left) / rl;
+  M(m, 1, 3) = -(top + bottom) / tb;
+  M(m, 2, 3) = -(far_plane + near_plane) / fn;
+  M(m, 3, 3) = 1.0f;
   return m;
 }
 

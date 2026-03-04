@@ -296,6 +296,11 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
     mop_orbit_camera_zoom(&vp->camera, event->scroll);
     break;
 
+  case MOP_INPUT_SCROLL_ORBIT:
+    mop_orbit_camera_orbit(&vp->camera, event->dx, event->dy,
+                           ORBIT_SENSITIVITY);
+    break;
+
   /* ----- Gizmo mode actions ----- */
   case MOP_INPUT_MODE_TRANSLATE:
     if (vp->selected_id)
@@ -378,6 +383,13 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
     }
     break;
   }
+
+  /* Edit mode switching (Phase 3) */
+  case MOP_INPUT_EDIT_MODE_NONE:
+  case MOP_INPUT_EDIT_MODE_VERTEX:
+  case MOP_INPUT_EDIT_MODE_EDGE:
+  case MOP_INPUT_EDIT_MODE_FACE:
+    break;
   }
 }
 

@@ -11,11 +11,14 @@
 #include "core/subsystem.h"
 #include "rasterizer/rasterizer.h"
 #include "rhi/rhi.h"
-#include <mop/display.h>
-#include <mop/light.h>
+#include <mop/core/camera_object.h>
+#include <mop/core/display.h>
+#include <mop/core/light.h>
+#include <mop/core/overlay.h>
+#include <mop/core/pipeline.h>
+#include <mop/core/theme.h>
+#include <mop/interact/selection.h>
 #include <mop/mop.h>
-#include <mop/overlay.h>
-#include <mop/pipeline.h>
 
 /* -------------------------------------------------------------------------
  * Opaque texture wrapper — maps public MopTexture to RHI texture
@@ -70,6 +73,12 @@ struct MopMesh {
 
   /* Flexible vertex format — NULL = standard MopVertex layout */
   MopVertexFormat *vertex_format;
+
+  /* Edit mode (Phase 3) */
+  MopEditMode edit_mode;
+
+  /* Per-mesh shading mode override (-1 = use viewport default) */
+  int shading_mode_override;
 };
 
 /* -------------------------------------------------------------------------
@@ -99,6 +108,32 @@ struct MopInstancedMesh {
   /* Material (optional) */
   MopMaterial material;
   bool has_material;
+};
+
+/* -------------------------------------------------------------------------
+ * Camera object (Phase 5)
+ * ------------------------------------------------------------------------- */
+
+#define MOP_MAX_CAMERAS 16
+
+struct MopCameraObject {
+  MopVec3 position;
+  MopVec3 target;
+  MopVec3 up;
+  float fov_degrees;
+  float near_plane;
+  float far_plane;
+  float aspect_ratio;
+  uint32_t object_id;
+  char name[64];
+  bool active;
+  bool frustum_visible;
+
+  /* Frustum wireframe mesh — regenerated when camera params change */
+  MopMesh *frustum_mesh;
+
+  /* Camera icon mesh (small box at camera position) */
+  MopMesh *icon_mesh;
 };
 
 /* -------------------------------------------------------------------------
@@ -206,7 +241,8 @@ struct MopViewport {
 
   /* Multi-light system */
   MopLight lights[MOP_MAX_LIGHTS];
-  uint32_t light_count; /* high-water mark for iteration */
+  uint32_t light_count;      /* high-water mark for iteration */
+  bool default_light_active; /* true until user calls add_light */
 
   /* Camera */
   MopVec3 cam_eye;
@@ -235,6 +271,11 @@ struct MopViewport {
   MopOrbitCamera camera;
   MopMesh *grid;
 
+  /* Camera objects (Phase 5) */
+  struct MopCameraObject cameras[MOP_MAX_CAMERAS];
+  uint32_t camera_count;
+  struct MopCameraObject *active_camera; /* NULL = use orbit camera */
+
   /* Gradient background (clip-space quad) */
   MopRhiBuffer *bg_vb;
   MopRhiBuffer *bg_ib;
@@ -247,6 +288,9 @@ struct MopViewport {
 
   /* Selection */
   uint32_t selected_id;
+
+  /* Sub-element selection (Phase 3) */
+  MopSelection selection;
 
   /* Interaction state */
   MopInteractState interact_state;
@@ -291,6 +335,9 @@ struct MopViewport {
   /* Display settings */
   MopDisplaySettings display;
 
+  /* Theme (design language) */
+  MopTheme theme;
+
 /* Pipeline hooks (Phase D) */
 #define MOP_MAX_HOOKS 56 /* 7 stages * 8 per stage */
   struct {
@@ -308,8 +355,19 @@ struct MopViewport {
   /* Light indicators (visual representations of lights) */
   MopMesh *light_indicators[MOP_MAX_LIGHTS];
 
+  /* SSAA (Supersampling Anti-Aliasing) — backend-agnostic smooth rendering */
+  int ssaa_factor;         /* 1 = off, 2 = 2x SSAA (default) */
+  uint8_t *ssaa_color_buf; /* downsampled color buffer for readback */
+
+  /* Shadow map for directional light (CPU backend only) */
+  MopSwFramebuffer shadow_fb;
+  bool shadow_fb_valid; /* true after shadow pass rendered this frame */
+
   /* Chrome visibility (grid, axis indicator, background, gizmo) */
   bool show_chrome; /* true by default */
+
+  /* Reversed-Z depth buffer — improves depth precision for large scenes */
+  bool reverse_z;
 
   /* Subsystem registry — generic dispatch for water, particles, postprocess,
    * etc. */
@@ -330,5 +388,14 @@ void mop_postprocess_apply(MopSwFramebuffer *fb, uint32_t effects,
 /* Light indicator management — create/destroy/update visual indicators */
 void mop_light_update_indicators(MopViewport *vp);
 void mop_light_destroy_indicators(MopViewport *vp);
+
+/* Gizmo internal accessors — used by 2D overlay renderer */
+bool mop_gizmo_is_visible(const MopGizmo *gizmo);
+MopVec3 mop_gizmo_get_position_internal(const MopGizmo *gizmo);
+MopVec3 mop_gizmo_get_rotation_internal(const MopGizmo *gizmo);
+MopGizmoAxis mop_gizmo_get_hover_axis(const MopGizmo *gizmo);
+MopVec3 mop_gizmo_get_axis_dir(const MopGizmo *gizmo, int axis);
+uint32_t mop_gizmo_get_handle_id(const MopGizmo *gizmo, int axis);
+void mop_gizmo_set_handles_opacity(MopGizmo *gizmo, float opacity);
 
 #endif /* MOP_VIEWPORT_INTERNAL_H */

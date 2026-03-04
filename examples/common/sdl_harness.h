@@ -106,7 +106,7 @@ static inline int mop_sdl_run(MopSDLApp *app) {
     SDL_Quit();
     return 1;
   }
-  mop_viewport_set_clear_color(vp, (MopColor){.12f, .12f, .16f, 1});
+  /* Clear color comes from theme — no override needed */
 
   printf("[%s] %dx%d  backend=%s\n", app->title ? app->title : "MOP", win_w,
          win_h, mop_backend_name(backend));

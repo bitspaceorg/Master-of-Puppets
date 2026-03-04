@@ -18,6 +18,43 @@
 #include <stdio.h>
 
 /* =========================================================================
+ * Validation callback globals (set by conformance runner)
+ * ========================================================================= */
+
+MopVkValidationCallback mop_vk_on_validation_error = NULL;
+MopVkValidationCallback mop_vk_on_sync_hazard = NULL;
+
+/* =========================================================================
+ * VK_EXT_debug_utils callback
+ * ========================================================================= */
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL mop_vk_debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT type,
+    const VkDebugUtilsMessengerCallbackDataEXT *data, void *user_data) {
+  (void)user_data;
+
+  if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+    MOP_ERROR("[VK validation] %s", data->pMessage);
+    if (mop_vk_on_validation_error)
+      mop_vk_on_validation_error();
+  } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+    MOP_WARN("[VK validation] %s", data->pMessage);
+    /* Sync hazards come through as warnings with VALIDATION type */
+    if ((type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) &&
+        data->pMessage && strstr(data->pMessage, "SYNC-HAZARD")) {
+      if (mop_vk_on_sync_hazard)
+        mop_vk_on_sync_hazard();
+    } else {
+      if (mop_vk_on_validation_error)
+        mop_vk_on_validation_error();
+    }
+  }
+
+  return VK_FALSE;
+}
+
+/* =========================================================================
  * Helper: create VkShaderModule from SPIR-V
  * ========================================================================= */
 
@@ -120,7 +157,7 @@ static MopRhiDevice *vk_device_create(void) {
       .applicationVersion = VK_MAKE_VERSION(0, 1, 0),
       .pEngineName = "MOP",
       .engineVersion = VK_MAKE_VERSION(0, 1, 0),
-      .apiVersion = VK_API_VERSION_1_1,
+      .apiVersion = VK_API_VERSION_1_2,
   };
 
   /* Request validation layers in debug builds (optional — fall back if
@@ -163,20 +200,48 @@ static MopRhiDevice *vk_device_create(void) {
 #endif
   };
 
-  /* MoltenVK portability extension */
+  /* Instance extensions */
+  const char *inst_exts[4];
+  uint32_t inst_ext_count = 0;
 #if defined(__APPLE__)
-  const char *inst_exts[] = {
-      VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-  };
-  inst_ci.enabledExtensionCount = 1;
-  inst_ci.ppEnabledExtensionNames = inst_exts;
+  inst_exts[inst_ext_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
 #endif
+  if (layer_count > 0) {
+    inst_exts[inst_ext_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+  }
+  inst_ci.enabledExtensionCount = inst_ext_count;
+  inst_ci.ppEnabledExtensionNames = inst_ext_count > 0 ? inst_exts : NULL;
 
   VkResult r = vkCreateInstance(&inst_ci, NULL, &dev->instance);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] vkCreateInstance failed: %d", r);
     free(dev);
     return NULL;
+  }
+
+  /* ---- Debug messenger (when validation layers are enabled) ---- */
+  if (layer_count > 0) {
+    PFN_vkCreateDebugUtilsMessengerEXT create_fn =
+        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            dev->instance, "vkCreateDebugUtilsMessengerEXT");
+    if (create_fn) {
+      VkDebugUtilsMessengerCreateInfoEXT dbg_ci = {
+          .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+          .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+          .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                         VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+          .pfnUserCallback = mop_vk_debug_callback,
+      };
+      r = create_fn(dev->instance, &dbg_ci, NULL, &dev->debug_messenger);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] debug messenger setup failed: %d", r);
+        dev->debug_messenger = VK_NULL_HANDLE;
+      } else {
+        MOP_INFO("[VK] debug messenger enabled (validation errors → counters)");
+      }
+    }
   }
 
   /* ---- Physical device ---- */
@@ -207,6 +272,18 @@ static MopRhiDevice *vk_device_create(void) {
   VkPhysicalDeviceFeatures features;
   vkGetPhysicalDeviceFeatures(dev->physical_device, &features);
   dev->has_fill_mode_non_solid = features.fillModeNonSolid;
+  dev->reverse_z = true;
+
+  /* Query MSAA support (intersection of color + depth sample counts) */
+  {
+    VkSampleCountFlags supported =
+        dev->dev_props.limits.framebufferColorSampleCounts &
+        dev->dev_props.limits.framebufferDepthSampleCounts;
+    dev->msaa_samples = (supported & VK_SAMPLE_COUNT_4_BIT)
+                            ? VK_SAMPLE_COUNT_4_BIT
+                            : VK_SAMPLE_COUNT_1_BIT;
+    MOP_INFO("[VK] MSAA: %dx", (int)dev->msaa_samples);
+  }
 
   /* ---- Queue family ---- */
   uint32_t qf_count = 0;
@@ -310,19 +387,22 @@ static MopRhiDevice *vk_device_create(void) {
   /* ---- Shader modules ---- */
   dev->solid_vert = create_shader_module(dev->device, mop_solid_vert_spv,
                                          mop_solid_vert_spv_size);
+  dev->instanced_vert = create_shader_module(
+      dev->device, mop_instanced_vert_spv, mop_instanced_vert_spv_size);
   dev->solid_frag = create_shader_module(dev->device, mop_solid_frag_spv,
                                          mop_solid_frag_spv_size);
   dev->wireframe_frag = create_shader_module(
       dev->device, mop_wireframe_frag_spv, mop_wireframe_frag_spv_size);
 
-  if (!dev->solid_vert || !dev->solid_frag || !dev->wireframe_frag) {
+  if (!dev->solid_vert || !dev->instanced_vert || !dev->solid_frag ||
+      !dev->wireframe_frag) {
     MOP_ERROR("[VK] shader module creation failed");
-    /* device_destroy handles partial cleanup */
     goto fail;
   }
 
   /* ---- Render pass, layouts ---- */
-  r = mop_vk_create_render_pass(dev->device, &dev->render_pass);
+  r = mop_vk_create_render_pass(dev->device, dev->msaa_samples,
+                                &dev->render_pass);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] render pass: %d", r);
     goto fail;
@@ -344,7 +424,8 @@ static MopRhiDevice *vk_device_create(void) {
   /* ---- Descriptor pool ---- */
   VkDescriptorPoolSize pool_sizes[] = {
       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, MOP_VK_MAX_DRAWS_PER_FRAME},
-      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MOP_VK_MAX_DRAWS_PER_FRAME},
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+       MOP_VK_MAX_DRAWS_PER_FRAME * 2}, /* texture + shadow sampler */
   };
   VkDescriptorPoolCreateInfo dp_ci = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -392,10 +473,11 @@ static MopRhiDevice *vk_device_create(void) {
   }
 
   /* ---- 1x1 white fallback texture ---- */
-  r = mop_vk_create_image(
-      dev->device, &dev->mem_props, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
-      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-      &dev->white_image, &dev->white_memory);
+  r = mop_vk_create_image(dev->device, &dev->mem_props, 1, 1,
+                          VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                          VK_IMAGE_USAGE_SAMPLED_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                          &dev->white_image, &dev->white_memory);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] white image: %d", r);
     goto fail;
@@ -414,6 +496,269 @@ static MopRhiDevice *vk_device_create(void) {
     uint8_t white[4] = {255, 255, 255, 255};
     staging_upload_image(dev, dev->white_image, 1, 1, white);
   }
+
+  /* ---- GPU timestamp query pool ---- */
+  dev->timestamp_period_ns = dev->dev_props.limits.timestampPeriod;
+  dev->has_timestamp_queries = (dev->timestamp_period_ns > 0.0f);
+  if (dev->has_timestamp_queries) {
+    VkQueryPoolCreateInfo qp_ci = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = 2, /* begin + end */
+    };
+    r = vkCreateQueryPool(dev->device, &qp_ci, NULL, &dev->timestamp_pool);
+    if (r != VK_SUCCESS) {
+      MOP_WARN("[VK] timestamp query pool failed: %d (timing disabled)", r);
+      dev->has_timestamp_queries = false;
+    }
+  }
+
+  /* ---- Shadow mapping resources ---- */
+  {
+    /* Shadow render pass */
+    r = mop_vk_create_shadow_render_pass(dev->device, &dev->shadow_render_pass);
+    if (r != VK_SUCCESS) {
+      MOP_WARN("[VK] shadow render pass failed: %d (shadows disabled)", r);
+    } else {
+      /* Shadow image: D32_SFLOAT, 2048x2048, 4 array layers */
+      VkImageCreateInfo shadow_ci = {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+          .imageType = VK_IMAGE_TYPE_2D,
+          .format = VK_FORMAT_D32_SFLOAT,
+          .extent = {MOP_VK_SHADOW_MAP_SIZE, MOP_VK_SHADOW_MAP_SIZE, 1},
+          .mipLevels = 1,
+          .arrayLayers = MOP_VK_CASCADE_COUNT,
+          .samples = VK_SAMPLE_COUNT_1_BIT,
+          .tiling = VK_IMAGE_TILING_OPTIMAL,
+          .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                   VK_IMAGE_USAGE_SAMPLED_BIT,
+          .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+          .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      };
+      r = vkCreateImage(dev->device, &shadow_ci, NULL, &dev->shadow_image);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] shadow image failed: %d (shadows disabled)", r);
+        goto shadow_done;
+      }
+
+      VkMemoryRequirements shadow_req;
+      vkGetImageMemoryRequirements(dev->device, dev->shadow_image, &shadow_req);
+      int shadow_mem_idx =
+          mop_vk_find_memory_type(&dev->mem_props, shadow_req.memoryTypeBits,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      if (shadow_mem_idx < 0) {
+        MOP_WARN("[VK] shadow memory type not found (shadows disabled)");
+        vkDestroyImage(dev->device, dev->shadow_image, NULL);
+        dev->shadow_image = VK_NULL_HANDLE;
+        goto shadow_done;
+      }
+
+      VkMemoryAllocateInfo shadow_ai = {
+          .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+          .allocationSize = shadow_req.size,
+          .memoryTypeIndex = (uint32_t)shadow_mem_idx,
+      };
+      r = vkAllocateMemory(dev->device, &shadow_ai, NULL, &dev->shadow_memory);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] shadow memory alloc failed: %d", r);
+        vkDestroyImage(dev->device, dev->shadow_image, NULL);
+        dev->shadow_image = VK_NULL_HANDLE;
+        goto shadow_done;
+      }
+      vkBindImageMemory(dev->device, dev->shadow_image, dev->shadow_memory, 0);
+
+      /* Per-layer image views (for rendering into individual cascades) */
+      for (int i = 0; i < MOP_VK_CASCADE_COUNT; i++) {
+        VkImageViewCreateInfo vci = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = dev->shadow_image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .subresourceRange =
+                {
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = (uint32_t)i,
+                    .layerCount = 1,
+                },
+        };
+        r = vkCreateImageView(dev->device, &vci, NULL, &dev->shadow_views[i]);
+        if (r != VK_SUCCESS) {
+          MOP_WARN("[VK] shadow view[%d] failed: %d", i, r);
+          goto shadow_done;
+        }
+      }
+
+      /* Array image view (for sampling all cascades) */
+      VkImageViewCreateInfo arr_vci = {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+          .image = dev->shadow_image,
+          .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+          .format = VK_FORMAT_D32_SFLOAT,
+          .subresourceRange =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                  .baseMipLevel = 0,
+                  .levelCount = 1,
+                  .baseArrayLayer = 0,
+                  .layerCount = MOP_VK_CASCADE_COUNT,
+              },
+      };
+      r = vkCreateImageView(dev->device, &arr_vci, NULL,
+                            &dev->shadow_array_view);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] shadow array view failed: %d", r);
+        goto shadow_done;
+      }
+
+      /* Shadow framebuffers (one per cascade) */
+      for (int i = 0; i < MOP_VK_CASCADE_COUNT; i++) {
+        VkFramebufferCreateInfo fci = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = dev->shadow_render_pass,
+            .attachmentCount = 1,
+            .pAttachments = &dev->shadow_views[i],
+            .width = MOP_VK_SHADOW_MAP_SIZE,
+            .height = MOP_VK_SHADOW_MAP_SIZE,
+            .layers = 1,
+        };
+        r = vkCreateFramebuffer(dev->device, &fci, NULL, &dev->shadow_fbs[i]);
+        if (r != VK_SUCCESS) {
+          MOP_WARN("[VK] shadow fb[%d] failed: %d", i, r);
+          goto shadow_done;
+        }
+      }
+
+      /* Comparison sampler for PCF (linear filtering for hardware PCF) */
+      VkSamplerCreateInfo shadow_samp_ci = {
+          .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+          .magFilter = VK_FILTER_LINEAR,
+          .minFilter = VK_FILTER_LINEAR,
+          .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+          .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+          .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+          .compareEnable = VK_TRUE,
+          .compareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+          .maxLod = 1.0f,
+          .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+      };
+      r = vkCreateSampler(dev->device, &shadow_samp_ci, NULL,
+                          &dev->shadow_sampler);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] shadow sampler failed: %d", r);
+        goto shadow_done;
+      }
+
+      /* Shadow pipeline layout: push constant = mat4 (64 bytes) */
+      VkPushConstantRange shadow_push = {
+          .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+          .offset = 0,
+          .size = 64, /* mat4 light_vp */
+      };
+      VkPipelineLayoutCreateInfo shadow_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges = &shadow_push,
+      };
+      r = vkCreatePipelineLayout(dev->device, &shadow_layout_ci, NULL,
+                                 &dev->shadow_pipeline_layout);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] shadow pipeline layout failed: %d", r);
+        goto shadow_done;
+      }
+
+      /* Load shadow shaders and create pipeline */
+#if defined(MOP_VK_HAS_SHADOW_SHADERS)
+      dev->shadow_vert = create_shader_module(dev->device, mop_shadow_vert_spv,
+                                              mop_shadow_vert_spv_size);
+      dev->shadow_frag = create_shader_module(dev->device, mop_shadow_frag_spv,
+                                              mop_shadow_frag_spv_size);
+      if (dev->shadow_vert && dev->shadow_frag) {
+        dev->shadow_pipeline = mop_vk_create_shadow_pipeline(dev);
+        if (dev->shadow_pipeline) {
+          dev->shadows_enabled = true;
+          MOP_INFO("[VK] cascade shadow mapping enabled (%dx%d, %d cascades)",
+                   MOP_VK_SHADOW_MAP_SIZE, MOP_VK_SHADOW_MAP_SIZE,
+                   MOP_VK_CASCADE_COUNT);
+        }
+      }
+#else
+      /* Shadow shaders not compiled yet — resources allocated but pipeline
+       * deferred until SPIR-V is available */
+      MOP_INFO("[VK] shadow map resources allocated (pipeline pending shader "
+               "compilation)");
+#endif
+    }
+  }
+shadow_done:
+
+  /* ---- Post-processing resources ---- */
+  {
+    r = mop_vk_create_postprocess_render_pass(dev->device,
+                                              &dev->postprocess_render_pass);
+    if (r != VK_SUCCESS) {
+      MOP_WARN("[VK] postprocess render pass failed: %d", r);
+    } else {
+      /* Descriptor set layout: single combined image sampler */
+      VkDescriptorSetLayoutBinding pp_binding = {
+          .binding = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      };
+      VkDescriptorSetLayoutCreateInfo pp_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 1,
+          .pBindings = &pp_binding,
+      };
+      r = vkCreateDescriptorSetLayout(dev->device, &pp_layout_ci, NULL,
+                                      &dev->postprocess_desc_layout);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] postprocess desc layout failed: %d", r);
+        goto postprocess_done;
+      }
+
+      /* Pipeline layout: desc set + push constant (vec2 inv_resolution) */
+      VkPushConstantRange pp_push = {
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .offset = 0,
+          .size = 8, /* vec2 */
+      };
+      VkPipelineLayoutCreateInfo pp_pl_ci = {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = 1,
+          .pSetLayouts = &dev->postprocess_desc_layout,
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges = &pp_push,
+      };
+      r = vkCreatePipelineLayout(dev->device, &pp_pl_ci, NULL,
+                                 &dev->postprocess_pipeline_layout);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] postprocess pipeline layout failed: %d", r);
+        goto postprocess_done;
+      }
+
+      /* Load post-process shaders and create pipeline */
+#if defined(MOP_VK_HAS_POSTPROCESS_SHADERS)
+      dev->fullscreen_vert = create_shader_module(
+          dev->device, mop_fullscreen_vert_spv, mop_fullscreen_vert_spv_size);
+      dev->fxaa_frag = create_shader_module(dev->device, mop_fxaa_frag_spv,
+                                            mop_fxaa_frag_spv_size);
+      if (dev->fullscreen_vert && dev->fxaa_frag) {
+        dev->postprocess_pipeline = mop_vk_create_postprocess_pipeline(dev);
+        if (dev->postprocess_pipeline) {
+          dev->postprocess_enabled = true;
+          MOP_INFO("[VK] FXAA post-processing enabled");
+        }
+      }
+#else
+      MOP_INFO("[VK] postprocess resources allocated (pipeline pending shader "
+               "compilation)");
+#endif
+    }
+  }
+postprocess_done:
 
   MOP_INFO("[VK] device created successfully");
   return dev;
@@ -452,8 +797,13 @@ fail:
       if (dev->render_pass)
         vkDestroyRenderPass(d, dev->render_pass, NULL);
 
+      if (dev->timestamp_pool)
+        vkDestroyQueryPool(d, dev->timestamp_pool, NULL);
+
       if (dev->solid_vert)
         vkDestroyShaderModule(d, dev->solid_vert, NULL);
+      if (dev->instanced_vert)
+        vkDestroyShaderModule(d, dev->instanced_vert, NULL);
       if (dev->solid_frag)
         vkDestroyShaderModule(d, dev->solid_frag, NULL);
       if (dev->wireframe_frag)
@@ -485,11 +835,57 @@ static void vk_device_destroy(MopRhiDevice *dev) {
   if (d) {
     vkDeviceWaitIdle(d);
 
+    /* Shadow mapping cleanup */
+    if (dev->shadow_pipeline)
+      vkDestroyPipeline(d, dev->shadow_pipeline, NULL);
+    if (dev->shadow_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->shadow_pipeline_layout, NULL);
+    if (dev->shadow_render_pass)
+      vkDestroyRenderPass(d, dev->shadow_render_pass, NULL);
+    for (int i = 0; i < MOP_VK_CASCADE_COUNT; i++) {
+      if (dev->shadow_fbs[i])
+        vkDestroyFramebuffer(d, dev->shadow_fbs[i], NULL);
+      if (dev->shadow_views[i])
+        vkDestroyImageView(d, dev->shadow_views[i], NULL);
+    }
+    if (dev->shadow_array_view)
+      vkDestroyImageView(d, dev->shadow_array_view, NULL);
+    if (dev->shadow_sampler)
+      vkDestroySampler(d, dev->shadow_sampler, NULL);
+    if (dev->shadow_image)
+      vkDestroyImage(d, dev->shadow_image, NULL);
+    if (dev->shadow_memory)
+      vkFreeMemory(d, dev->shadow_memory, NULL);
+    if (dev->shadow_vert)
+      vkDestroyShaderModule(d, dev->shadow_vert, NULL);
+    if (dev->shadow_frag)
+      vkDestroyShaderModule(d, dev->shadow_frag, NULL);
+
+    /* Post-processing cleanup */
+    if (dev->postprocess_pipeline)
+      vkDestroyPipeline(d, dev->postprocess_pipeline, NULL);
+    if (dev->postprocess_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->postprocess_pipeline_layout, NULL);
+    if (dev->postprocess_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->postprocess_desc_layout, NULL);
+    if (dev->postprocess_render_pass)
+      vkDestroyRenderPass(d, dev->postprocess_render_pass, NULL);
+    if (dev->fullscreen_vert)
+      vkDestroyShaderModule(d, dev->fullscreen_vert, NULL);
+    if (dev->fxaa_frag)
+      vkDestroyShaderModule(d, dev->fxaa_frag, NULL);
+
     /* Pipelines */
     for (int i = 0; i < MOP_VK_MAX_PIPELINES; i++) {
       if (dev->pipelines[i])
         vkDestroyPipeline(d, dev->pipelines[i], NULL);
     }
+    if (dev->instanced_pipeline)
+      vkDestroyPipeline(d, dev->instanced_pipeline, NULL);
+
+    /* Timestamp queries */
+    if (dev->timestamp_pool)
+      vkDestroyQueryPool(d, dev->timestamp_pool, NULL);
 
     /* Staging */
     if (dev->staging_mapped)
@@ -520,6 +916,8 @@ static void vk_device_destroy(MopRhiDevice *dev) {
 
     if (dev->solid_vert)
       vkDestroyShaderModule(d, dev->solid_vert, NULL);
+    if (dev->instanced_vert)
+      vkDestroyShaderModule(d, dev->instanced_vert, NULL);
     if (dev->solid_frag)
       vkDestroyShaderModule(d, dev->solid_frag, NULL);
     if (dev->wireframe_frag)
@@ -531,6 +929,14 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyCommandPool(d, dev->cmd_pool, NULL);
 
     vkDestroyDevice(d, NULL);
+  }
+
+  if (dev->debug_messenger && dev->instance) {
+    PFN_vkDestroyDebugUtilsMessengerEXT destroy_fn =
+        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            dev->instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (destroy_fn)
+      destroy_fn(dev->instance, dev->debug_messenger, NULL);
   }
 
   if (dev->instance)
@@ -650,12 +1056,13 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
 
   VkResult r;
 
-  /* ---- Color (R8G8B8A8_SRGB — hardware linear→sRGB on write) ---- */
-  r = mop_vk_create_image(dev->device, &dev->mem_props, (uint32_t)width,
-                          (uint32_t)height, VK_FORMAT_R8G8B8A8_SRGB,
-                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                          &fb->color_image, &fb->color_memory);
+  /* ---- Color (R8G8B8A8_SRGB) — TRANSFER_DST for MSAA manual resolve ---- */
+  r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+      VK_FORMAT_R8G8B8A8_SRGB, VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      &fb->color_image, &fb->color_memory);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] fb color image: %d", r);
     return;
@@ -669,12 +1076,13 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     return;
   }
 
-  /* ---- Picking (R32_UINT) ---- */
-  r = mop_vk_create_image(dev->device, &dev->mem_props, (uint32_t)width,
-                          (uint32_t)height, VK_FORMAT_R32_UINT,
-                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                          &fb->pick_image, &fb->pick_memory);
+  /* ---- Picking (R32_UINT) — TRANSFER_DST for MSAA manual resolve ---- */
+  r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+      VK_FORMAT_R32_UINT, VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      &fb->pick_image, &fb->pick_memory);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] fb pick image: %d", r);
     return;
@@ -687,12 +1095,13 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     return;
   }
 
-  /* ---- Depth (D32_SFLOAT) ---- */
-  r = mop_vk_create_image(dev->device, &dev->mem_props, (uint32_t)width,
-                          (uint32_t)height, VK_FORMAT_D32_SFLOAT,
-                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                          &fb->depth_image, &fb->depth_memory);
+  /* ---- Depth (D32_SFLOAT) — TRANSFER_DST for MSAA manual resolve ---- */
+  r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+      VK_FORMAT_D32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      &fb->depth_image, &fb->depth_memory);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] fb depth image: %d", r);
     return;
@@ -706,12 +1115,86 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     return;
   }
 
+  /* ---- MSAA render targets (when msaa_samples > 1) ---- */
+  if (dev->msaa_samples > VK_SAMPLE_COUNT_1_BIT) {
+    /* MSAA color — TRANSFER_SRC for manual resolve */
+    r = mop_vk_create_image(
+        dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+        VK_FORMAT_R8G8B8A8_SRGB, dev->msaa_samples,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        &fb->msaa_color_image, &fb->msaa_color_memory);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] fb msaa color image: %d", r);
+      return;
+    }
+    r = mop_vk_create_image_view(
+        dev->device, fb->msaa_color_image, VK_FORMAT_R8G8B8A8_SRGB,
+        VK_IMAGE_ASPECT_COLOR_BIT, &fb->msaa_color_view);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] fb msaa color view: %d", r);
+      return;
+    }
+
+    /* MSAA picking — needs TRANSFER_SRC for manual vkCmdResolveImage */
+    r = mop_vk_create_image(
+        dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+        VK_FORMAT_R32_UINT, dev->msaa_samples,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        &fb->msaa_pick_image, &fb->msaa_pick_memory);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] fb msaa pick image: %d", r);
+      return;
+    }
+    r = mop_vk_create_image_view(dev->device, fb->msaa_pick_image,
+                                 VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT,
+                                 &fb->msaa_pick_view);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] fb msaa pick view: %d", r);
+      return;
+    }
+
+    /* MSAA depth — TRANSFER_SRC for manual resolve */
+    r = mop_vk_create_image(dev->device, &dev->mem_props, (uint32_t)width,
+                            (uint32_t)height, VK_FORMAT_D32_SFLOAT,
+                            dev->msaa_samples,
+                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                            &fb->msaa_depth_image, &fb->msaa_depth_memory);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] fb msaa depth image: %d", r);
+      return;
+    }
+    r = mop_vk_create_image_view(
+        dev->device, fb->msaa_depth_image, VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_ASPECT_DEPTH_BIT, &fb->msaa_depth_view);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] fb msaa depth view: %d", r);
+      return;
+    }
+  }
+
   /* ---- VkFramebuffer ---- */
-  VkImageView views[3] = {fb->color_view, fb->pick_view, fb->depth_view};
+  uint32_t att_count;
+  VkImageView views[6];
+  if (dev->msaa_samples > VK_SAMPLE_COUNT_1_BIT) {
+    /* MSAA: 6 attachments — 3 MSAA + 3 resolve (all resolved in-pass) */
+    views[0] = fb->msaa_color_view;
+    views[1] = fb->msaa_pick_view;
+    views[2] = fb->msaa_depth_view;
+    views[3] = fb->color_view;
+    views[4] = fb->pick_view;
+    views[5] = fb->depth_view;
+    att_count = 6;
+  } else {
+    views[0] = fb->color_view;
+    views[1] = fb->pick_view;
+    views[2] = fb->depth_view;
+    att_count = 3;
+  }
   VkFramebufferCreateInfo fb_ci = {
       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
       .renderPass = dev->render_pass,
-      .attachmentCount = 3,
+      .attachmentCount = att_count,
       .pAttachments = views,
       .width = (uint32_t)width,
       .height = (uint32_t)height,
@@ -843,6 +1326,28 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
   if (fb->depth_memory)
     vkFreeMemory(d, fb->depth_memory, NULL);
 
+  /* MSAA render targets */
+  if (fb->msaa_color_view)
+    vkDestroyImageView(d, fb->msaa_color_view, NULL);
+  if (fb->msaa_color_image)
+    vkDestroyImage(d, fb->msaa_color_image, NULL);
+  if (fb->msaa_color_memory)
+    vkFreeMemory(d, fb->msaa_color_memory, NULL);
+
+  if (fb->msaa_pick_view)
+    vkDestroyImageView(d, fb->msaa_pick_view, NULL);
+  if (fb->msaa_pick_image)
+    vkDestroyImage(d, fb->msaa_pick_image, NULL);
+  if (fb->msaa_pick_memory)
+    vkFreeMemory(d, fb->msaa_pick_memory, NULL);
+
+  if (fb->msaa_depth_view)
+    vkDestroyImageView(d, fb->msaa_depth_view, NULL);
+  if (fb->msaa_depth_image)
+    vkDestroyImage(d, fb->msaa_depth_image, NULL);
+  if (fb->msaa_depth_memory)
+    vkFreeMemory(d, fb->msaa_depth_memory, NULL);
+
   /* Readback staging */
   if (fb->readback_color_mapped)
     vkUnmapMemory(d, fb->readback_color_mem);
@@ -877,6 +1382,14 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
     vkDestroyBuffer(d, fb->ubo_buf, NULL);
   if (fb->ubo_mem)
     vkFreeMemory(d, fb->ubo_mem, NULL);
+
+  /* Instance buffer */
+  if (fb->instance_mapped)
+    vkUnmapMemory(d, fb->instance_mem);
+  if (fb->instance_buf)
+    vkDestroyBuffer(d, fb->instance_buf, NULL);
+  if (fb->instance_mem)
+    vkFreeMemory(d, fb->instance_mem, NULL);
 
   memset(fb, 0, sizeof(*fb));
 }
@@ -935,8 +1448,9 @@ static void vk_frame_begin(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   /* Reset descriptor pool for this frame */
   vkResetDescriptorPool(dev->device, dev->desc_pool, 0);
 
-  /* Reset UBO offset */
+  /* Reset UBO offset and instance offset */
   fb->ubo_offset = 0;
+  fb->instance_offset = 0;
 
   /* Begin command buffer */
   vkResetCommandBuffer(dev->cmd_buf, 0);
@@ -946,22 +1460,77 @@ static void vk_frame_begin(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   };
   vkBeginCommandBuffer(dev->cmd_buf, &begin_info);
 
-  /* Begin render pass */
-  VkClearValue clears[3] = {
-      {.color = {{clear_color.r, clear_color.g, clear_color.b, clear_color.a}}},
-      {.color = {{0}}}, /* picking = 0 */
-      {.depthStencil = {1.0f, 0}},
-  };
+  /* GPU timestamp: top of pipe */
+  if (dev->has_timestamp_queries) {
+    vkCmdResetQueryPool(dev->cmd_buf, dev->timestamp_pool, 0, 2);
+    vkCmdWriteTimestamp(dev->cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        dev->timestamp_pool, 0);
+  }
+
+  /* Begin render pass — reversed-Z clears depth to 0.0 */
+  float depth_clear = dev->reverse_z ? 0.0f : 1.0f;
+  uint32_t clear_count;
+  VkClearValue clears[6];
+  if (dev->msaa_samples > VK_SAMPLE_COUNT_1_BIT) {
+    /* 6 attachments: 3 MSAA (cleared) + 3 resolve (DONT_CARE but must exist) */
+    clears[0] = (VkClearValue){.color = {{clear_color.r, clear_color.g,
+                                          clear_color.b, clear_color.a}}};
+    clears[1] = (VkClearValue){.color = {{0}}}; /* MSAA picking */
+    clears[2] =
+        (VkClearValue){.depthStencil = {depth_clear, 0}}; /* MSAA depth */
+    clears[3] = (VkClearValue){.color = {{0}}};           /* resolve color */
+    clears[4] = (VkClearValue){.color = {{0}}};           /* resolve pick */
+    clears[5] = (VkClearValue){.depthStencil = {0, 0}};   /* resolve depth */
+    clear_count = 6;
+  } else {
+    clears[0] = (VkClearValue){.color = {{clear_color.r, clear_color.g,
+                                          clear_color.b, clear_color.a}}};
+    clears[1] = (VkClearValue){.color = {{0}}}; /* picking = 0 */
+    clears[2] = (VkClearValue){.depthStencil = {depth_clear, 0}};
+    clear_count = 3;
+  }
 
   VkRenderPassBeginInfo rp_info = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
       .renderPass = dev->render_pass,
       .framebuffer = fb->framebuffer,
       .renderArea = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}},
-      .clearValueCount = 3,
+      .clearValueCount = clear_count,
       .pClearValues = clears,
   };
   vkCmdBeginRenderPass(dev->cmd_buf, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+
+  /* Shadow pass: transition shadow image to attachment layout and render
+   * depth for each cascade.  Draw calls are deferred to main pass;
+   * the shadow pass will be populated by the viewport core calling
+   * vk_shadow_draw() per mesh before frame_begin's main render pass.
+   * For now, just transition the shadow map if shadows are enabled. */
+  if (dev->shadows_enabled && dev->shadow_image) {
+    /* Transition shadow image layers to attachment-optimal before use.
+     * Actual shadow draw commands will be recorded by the viewport core
+     * through the shadow RHI extension functions. */
+    VkImageMemoryBarrier shadow_barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = dev->shadow_image,
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = MOP_VK_CASCADE_COUNT,
+            },
+    };
+    vkCmdPipelineBarrier(dev->cmd_buf, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL,
+                         0, NULL, 1, &shadow_barrier);
+  }
 
   /* Set dynamic viewport + scissor */
   /* Negative viewport height flips Y to match OpenGL/CPU clip space
@@ -1000,8 +1569,11 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       mop_vk_pipeline_key(call->wireframe, call->depth_test,
                           call->backface_cull, call->blend_mode, vertex_stride);
   VkPipeline pipeline = mop_vk_get_pipeline(dev, key, vertex_stride);
-  if (!pipeline)
+  if (!pipeline) {
+    MOP_ERROR("[VK] draw: pipeline NULL for key=%u stride=%u", key,
+              vertex_stride);
     return;
+  }
 
   vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
@@ -1031,8 +1603,12 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   ubo->object_id = call->object_id;
   ubo->blend_mode = (int32_t)call->blend_mode;
   ubo->has_texture = call->texture ? 1 : 0;
-  ubo->_pad1 = 0.0f;
-  ubo->_pad2 = 0.0f;
+  ubo->metallic = call->metallic;
+  ubo->roughness = call->roughness;
+  ubo->cam_pos[0] = call->cam_eye.x;
+  ubo->cam_pos[1] = call->cam_eye.y;
+  ubo->cam_pos[2] = call->cam_eye.z;
+  ubo->cam_pos[3] = 0.0f;
 
   /* Multi-light: populate light array from draw call */
   ubo->num_lights = (int32_t)(call->light_count < MOP_VK_MAX_FRAG_LIGHTS
@@ -1061,6 +1637,23 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   /* Zero unused light slots */
   for (int i = ubo->num_lights; i < MOP_VK_MAX_FRAG_LIGHTS; i++) {
     memset(&ubo->lights[i], 0, sizeof(MopVkLight));
+  }
+
+  /* Shadow mapping data */
+  ubo->shadows_enabled = dev->shadows_enabled ? 1 : 0;
+  ubo->cascade_count = dev->shadows_enabled ? MOP_VK_CASCADE_COUNT : 0;
+  ubo->_pad_shadow[0] = 0.0f;
+  ubo->_pad_shadow[1] = 0.0f;
+  if (dev->shadows_enabled) {
+    for (int c = 0; c < MOP_VK_CASCADE_COUNT; c++) {
+      memcpy(ubo->cascade_vp[c], dev->cascade_vp[c].d, 64);
+    }
+    for (int c = 0; c < MOP_VK_CASCADE_COUNT; c++) {
+      ubo->cascade_splits[c] = dev->cascade_splits[c + 1];
+    }
+  } else {
+    memset(ubo->cascade_vp, 0, sizeof(ubo->cascade_vp));
+    memset(ubo->cascade_splits, 0, sizeof(ubo->cascade_splits));
   }
 
   uint32_t dynamic_offset = (uint32_t)fb->ubo_offset;
@@ -1093,7 +1686,23 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
 
-  VkWriteDescriptorSet writes[2] = {
+  /* Shadow map sampler — use shadow array view if available, else white
+   * fallback.  The comparison sampler requires a depth-compatible view;
+   * when shadows are not enabled, bind the default sampler + white view
+   * as a dummy (shader checks shadows_enabled before sampling). */
+  VkDescriptorImageInfo shadow_img_info = {
+      .sampler =
+          dev->shadow_sampler ? dev->shadow_sampler : dev->default_sampler,
+      .imageView =
+          dev->shadow_array_view ? dev->shadow_array_view : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+  };
+  /* If shadows not available, use shader-read layout with default sampler */
+  if (!dev->shadow_array_view) {
+    shadow_img_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  }
+
+  VkWriteDescriptorSet writes[3] = {
       {
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = ds,
@@ -1110,8 +1719,16 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo = &img_info,
       },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 2,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &shadow_img_info,
+      },
   };
-  vkUpdateDescriptorSets(dev->device, 2, writes, 0, NULL);
+  vkUpdateDescriptorSets(dev->device, 3, writes, 0, NULL);
 
   /* Bind descriptor set with dynamic offset */
   vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1130,6 +1747,50 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
  * 11. draw_instanced
  * ========================================================================= */
 
+/* Ensure the per-frame instance buffer is large enough */
+static void vk_ensure_instance_buffer(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                                      VkDeviceSize needed) {
+  if (fb->instance_buf && fb->instance_buf_size >= needed)
+    return;
+
+  /* Destroy old buffer if any */
+  if (fb->instance_mapped)
+    vkUnmapMemory(dev->device, fb->instance_mem);
+  if (fb->instance_buf)
+    vkDestroyBuffer(dev->device, fb->instance_buf, NULL);
+  if (fb->instance_mem)
+    vkFreeMemory(dev->device, fb->instance_mem, NULL);
+
+  /* Round up to next power of 2 (min 64 KB) */
+  VkDeviceSize sz = 64 * 1024;
+  while (sz < needed)
+    sz *= 2;
+
+  VkResult r = mop_vk_create_buffer(dev->device, &dev->mem_props, sz,
+                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                    &fb->instance_buf, &fb->instance_mem);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] instance buffer alloc failed: %d", r);
+    fb->instance_buf = VK_NULL_HANDLE;
+    fb->instance_buf_size = 0;
+    return;
+  }
+
+  r = vkMapMemory(dev->device, fb->instance_mem, 0, sz, 0,
+                  &fb->instance_mapped);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] instance buffer map failed: %d", r);
+    vkDestroyBuffer(dev->device, fb->instance_buf, NULL);
+    vkFreeMemory(dev->device, fb->instance_mem, NULL);
+    fb->instance_buf = VK_NULL_HANDLE;
+    fb->instance_buf_size = 0;
+    return;
+  }
+  fb->instance_buf_size = sz;
+}
+
 static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
                               const MopRhiDrawCall *call,
                               const MopMat4 *instance_transforms,
@@ -1137,15 +1798,194 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   if (!call || !instance_transforms || instance_count == 0)
     return;
 
-  for (uint32_t i = 0; i < instance_count; i++) {
-    MopRhiDrawCall inst_call = *call;
-    inst_call.model = instance_transforms[i];
+  uint32_t vertex_stride = call->vertex_format
+                               ? (uint32_t)call->vertex_format->stride
+                               : (uint32_t)sizeof(MopVertex);
 
-    MopMat4 view_model = mop_mat4_multiply(call->view, instance_transforms[i]);
-    inst_call.mvp = mop_mat4_multiply(call->projection, view_model);
-
-    vk_draw(dev, fb, &inst_call);
+  /* Get instanced pipeline */
+  VkPipeline pipeline = mop_vk_get_instanced_pipeline(dev, vertex_stride);
+  if (!pipeline) {
+    /* Fallback to N sequential draw calls */
+    for (uint32_t i = 0; i < instance_count; i++) {
+      MopRhiDrawCall inst_call = *call;
+      inst_call.model = instance_transforms[i];
+      MopMat4 vm = mop_mat4_multiply(call->view, instance_transforms[i]);
+      inst_call.mvp = mop_mat4_multiply(call->projection, vm);
+      vk_draw(dev, fb, &inst_call);
+    }
+    return;
   }
+
+  /* Ensure instance buffer has room */
+  VkDeviceSize inst_data_size = (VkDeviceSize)instance_count * sizeof(MopMat4);
+  VkDeviceSize total_needed = fb->instance_offset + inst_data_size;
+  vk_ensure_instance_buffer(dev, fb, total_needed);
+  if (!fb->instance_buf)
+    return;
+
+  /* Write instance transforms to buffer */
+  memcpy((uint8_t *)fb->instance_mapped + fb->instance_offset,
+         instance_transforms, inst_data_size);
+  VkDeviceSize inst_buf_offset = fb->instance_offset;
+  fb->instance_offset += inst_data_size;
+
+  /* Bind instanced pipeline */
+  vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+  /* Push constants: VP matrix (view * projection) */
+  MopMat4 vp = mop_mat4_multiply(call->projection, call->view);
+  float push_data[32];
+  memcpy(push_data, vp.d, 64);
+  memset(push_data + 16, 0, 64); /* unused second mat4 */
+  vkCmdPushConstants(dev->cmd_buf, dev->pipeline_layout,
+                     VK_SHADER_STAGE_VERTEX_BIT, 0, 128, push_data);
+
+  /* Write fragment UBO (shared across all instances) */
+  VkDeviceSize aligned_size =
+      mop_vk_align(sizeof(MopVkFragUniforms), dev->min_ubo_alignment);
+  if (fb->ubo_offset + aligned_size > MOP_VK_UBO_SIZE) {
+    MOP_WARN("[VK] UBO exhausted in instanced draw");
+    return;
+  }
+
+  MopVkFragUniforms *ubo =
+      (MopVkFragUniforms *)((uint8_t *)fb->ubo_mapped + fb->ubo_offset);
+  ubo->light_dir[0] = call->light_dir.x;
+  ubo->light_dir[1] = call->light_dir.y;
+  ubo->light_dir[2] = call->light_dir.z;
+  ubo->light_dir[3] = 0.0f;
+  ubo->ambient = call->ambient;
+  ubo->opacity = call->opacity;
+  ubo->object_id = call->object_id;
+  ubo->blend_mode = (int32_t)call->blend_mode;
+  ubo->has_texture = call->texture ? 1 : 0;
+  ubo->metallic = call->metallic;
+  ubo->roughness = call->roughness;
+  ubo->cam_pos[0] = call->cam_eye.x;
+  ubo->cam_pos[1] = call->cam_eye.y;
+  ubo->cam_pos[2] = call->cam_eye.z;
+  ubo->cam_pos[3] = 0.0f;
+
+  ubo->num_lights = (int32_t)(call->light_count < MOP_VK_MAX_FRAG_LIGHTS
+                                  ? call->light_count
+                                  : MOP_VK_MAX_FRAG_LIGHTS);
+  for (int i = 0; i < ubo->num_lights; i++) {
+    const MopLight *src = &call->lights[i];
+    MopVkLight *dst = &ubo->lights[i];
+    dst->position[0] = src->position.x;
+    dst->position[1] = src->position.y;
+    dst->position[2] = src->position.z;
+    dst->position[3] = (float)src->type;
+    dst->direction[0] = src->direction.x;
+    dst->direction[1] = src->direction.y;
+    dst->direction[2] = src->direction.z;
+    dst->direction[3] = 0.0f;
+    dst->color[0] = src->color.r;
+    dst->color[1] = src->color.g;
+    dst->color[2] = src->color.b;
+    dst->color[3] = src->intensity;
+    dst->params[0] = src->range;
+    dst->params[1] = src->spot_inner_cos;
+    dst->params[2] = src->spot_outer_cos;
+    dst->params[3] = src->active ? 1.0f : 0.0f;
+  }
+  for (int i = ubo->num_lights; i < MOP_VK_MAX_FRAG_LIGHTS; i++) {
+    memset(&ubo->lights[i], 0, sizeof(MopVkLight));
+  }
+
+  /* Shadow mapping data (instanced path) */
+  ubo->shadows_enabled = dev->shadows_enabled ? 1 : 0;
+  ubo->cascade_count = dev->shadows_enabled ? MOP_VK_CASCADE_COUNT : 0;
+  ubo->_pad_shadow[0] = 0.0f;
+  ubo->_pad_shadow[1] = 0.0f;
+  if (dev->shadows_enabled) {
+    for (int c = 0; c < MOP_VK_CASCADE_COUNT; c++) {
+      memcpy(ubo->cascade_vp[c], dev->cascade_vp[c].d, 64);
+    }
+    for (int c = 0; c < MOP_VK_CASCADE_COUNT; c++) {
+      ubo->cascade_splits[c] = dev->cascade_splits[c + 1];
+    }
+  } else {
+    memset(ubo->cascade_vp, 0, sizeof(ubo->cascade_vp));
+    memset(ubo->cascade_splits, 0, sizeof(ubo->cascade_splits));
+  }
+
+  uint32_t dynamic_offset = (uint32_t)fb->ubo_offset;
+  fb->ubo_offset += aligned_size;
+
+  /* Allocate + update descriptor set */
+  VkDescriptorSetAllocateInfo ds_ai = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = dev->desc_pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &dev->desc_set_layout,
+  };
+  VkDescriptorSet ds;
+  VkResult r = vkAllocateDescriptorSets(dev->device, &ds_ai, &ds);
+  if (r != VK_SUCCESS) {
+    MOP_WARN("[VK] instanced descriptor alloc failed: %d", r);
+    return;
+  }
+
+  VkDescriptorBufferInfo buf_info = {
+      .buffer = fb->ubo_buf,
+      .offset = 0,
+      .range = sizeof(MopVkFragUniforms),
+  };
+  VkDescriptorImageInfo img_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->texture ? call->texture->view : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo shadow_img_info = {
+      .sampler =
+          dev->shadow_sampler ? dev->shadow_sampler : dev->default_sampler,
+      .imageView =
+          dev->shadow_array_view ? dev->shadow_array_view : dev->white_view,
+      .imageLayout = dev->shadow_array_view
+                         ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkWriteDescriptorSet writes[3] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .pBufferInfo = &buf_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 1,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &img_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 2,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &shadow_img_info,
+      },
+  };
+  vkUpdateDescriptorSets(dev->device, 3, writes, 0, NULL);
+
+  vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          dev->pipeline_layout, 0, 1, &ds, 1, &dynamic_offset);
+
+  /* Bind vertex + instance + index buffers */
+  VkBuffer vbufs[2] = {call->vertex_buffer->buffer, fb->instance_buf};
+  VkDeviceSize offsets[2] = {0, inst_buf_offset};
+  vkCmdBindVertexBuffers(dev->cmd_buf, 0, 2, vbufs, offsets);
+  vkCmdBindIndexBuffer(dev->cmd_buf, call->index_buffer->buffer, 0,
+                       VK_INDEX_TYPE_UINT32);
+
+  /* Single instanced draw call */
+  vkCmdDrawIndexed(dev->cmd_buf, call->index_count, instance_count, 0, 0, 0);
 }
 
 /* =========================================================================
@@ -1153,7 +1993,18 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
  * ========================================================================= */
 
 static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
+  /* GPU timestamp: bottom of pipe (before ending render pass for correct
+   * timing — we want rendering time, not including readback copies) */
+  if (dev->has_timestamp_queries) {
+    vkCmdWriteTimestamp(dev->cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        dev->timestamp_pool, 1);
+  }
+
   vkCmdEndRenderPass(dev->cmd_buf);
+
+  /* MSAA: all resolves happen in-pass via pResolveAttachments and
+   * VkSubpassDescriptionDepthStencilResolve.  Render pass transitions
+   * the 1x resolve targets to TRANSFER_SRC_OPTIMAL automatically. */
 
   /* Copy images to readback staging buffers.
    * Render pass transitions images to TRANSFER_SRC_OPTIMAL. */
@@ -1214,6 +2065,19 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
   vkQueueSubmit(dev->queue, 1, &submit, dev->fence);
   vkWaitForFences(dev->device, 1, &dev->fence, VK_TRUE, UINT64_MAX);
 
+  /* Read GPU timestamps */
+  if (dev->has_timestamp_queries) {
+    uint64_t timestamps[2] = {0, 0};
+    VkResult tr = vkGetQueryPoolResults(
+        dev->device, dev->timestamp_pool, 0, 2, sizeof(timestamps), timestamps,
+        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    if (tr == VK_SUCCESS && timestamps[1] >= timestamps[0]) {
+      double elapsed_ns =
+          (double)(timestamps[1] - timestamps[0]) * dev->timestamp_period_ns;
+      dev->last_timing.gpu_frame_ms = elapsed_ns / 1e6;
+    }
+  }
+
   /* Copy from mapped staging to CPU arrays.
    * Vulkan is top-left origin — no Y-flip needed. */
   size_t npixels = (size_t)fb->width * (size_t)fb->height;
@@ -1241,6 +2105,33 @@ static const uint8_t *vk_framebuffer_read_color(MopRhiDevice *dev,
   if (out_height)
     *out_height = fb->height;
   return fb->readback_color;
+}
+
+/* =========================================================================
+ * 13b. framebuffer_read_object_id
+ * ========================================================================= */
+
+static const uint32_t *vk_framebuffer_read_object_id(MopRhiDevice *dev,
+                                                     MopRhiFramebuffer *fb,
+                                                     int *out_width,
+                                                     int *out_height) {
+  (void)dev;
+  if (out_width)
+    *out_width = fb->width;
+  if (out_height)
+    *out_height = fb->height;
+  return fb->readback_pick;
+}
+
+static const float *vk_framebuffer_read_depth(MopRhiDevice *dev,
+                                              MopRhiFramebuffer *fb,
+                                              int *out_width, int *out_height) {
+  (void)dev;
+  if (out_width)
+    *out_width = fb->width;
+  if (out_height)
+    *out_height = fb->height;
+  return fb->readback_depth;
 }
 
 /* =========================================================================
@@ -1283,7 +2174,7 @@ static MopRhiTexture *vk_texture_create(MopRhiDevice *dev, int width,
 
   VkResult r = mop_vk_create_image(
       dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
-      VK_FORMAT_R8G8B8A8_UNORM,
+      VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &tex->image,
       &tex->memory);
   if (r != VK_SUCCESS) {
@@ -1333,6 +2224,152 @@ static const void *vk_buffer_read(MopRhiBuffer *buf) {
 }
 
 /* =========================================================================
+ * 19. frame_gpu_time_ms
+ * ========================================================================= */
+
+static float vk_frame_gpu_time_ms(MopRhiDevice *dev) {
+  return (float)dev->last_timing.gpu_frame_ms;
+}
+
+/* =========================================================================
+ * Shadow mapping: cascade computation
+ * ========================================================================= */
+
+/* Compute cascade split distances and light-space VP matrices.
+ * Called from the viewport core before shadow rendering. */
+void vk_compute_cascades(MopRhiDevice *dev, const MopMat4 *view,
+                         const MopMat4 *proj, MopVec3 light_dir) {
+  /* Compute cascade split distances using logarithmic scheme */
+  float near_clip = 0.1f;
+  float far_clip = 100.0f;
+
+  /* Extract near/far from projection matrix (standard perspective) */
+  /* M(2,3) = -2fn/(f-n), M(2,2) = -(f+n)/(f-n) */
+  float m22 = proj->d[2 * 4 + 2]; /* col-major: d[10] */
+  float m23 = proj->d[3 * 4 + 2]; /* col-major: d[14] */
+
+  if (dev->reverse_z) {
+    /* reverse_z: near_plane = M(2,3) = proj->d[14] */
+    near_clip = m23;
+    far_clip = 200.0f; /* infinite far, use practical value */
+  } else {
+    /* Standard perspective: near = m23 / (m22 - 1), far = m23 / (m22 + 1) */
+    if (fabsf(m22 - 1.0f) > 1e-6f)
+      near_clip = m23 / (m22 - 1.0f);
+    if (fabsf(m22 + 1.0f) > 1e-6f)
+      far_clip = m23 / (m22 + 1.0f);
+  }
+
+  if (near_clip <= 0.0f)
+    near_clip = 0.1f;
+  if (far_clip <= near_clip)
+    far_clip = near_clip + 100.0f;
+
+  dev->cascade_splits[0] = near_clip;
+  for (int i = 1; i <= MOP_VK_CASCADE_COUNT; i++) {
+    float p = (float)i / (float)MOP_VK_CASCADE_COUNT;
+    float log_split = near_clip * powf(far_clip / near_clip, p);
+    float lin_split = near_clip + (far_clip - near_clip) * p;
+    dev->cascade_splits[i] = 0.95f * log_split + 0.05f * lin_split;
+  }
+
+  /* Normalize light direction */
+  float llen = sqrtf(light_dir.x * light_dir.x + light_dir.y * light_dir.y +
+                     light_dir.z * light_dir.z);
+  if (llen > 1e-6f) {
+    light_dir.x /= llen;
+    light_dir.y /= llen;
+    light_dir.z /= llen;
+  }
+
+  /* Compute inverse view-projection */
+  MopMat4 vp = mop_mat4_multiply(*proj, *view);
+  MopMat4 inv_vp = mop_mat4_inverse(vp);
+
+  /* For each cascade, compute the light VP matrix */
+  for (int c = 0; c < MOP_VK_CASCADE_COUNT; c++) {
+    float split_near = dev->cascade_splits[c];
+    float split_far = dev->cascade_splits[c + 1];
+
+    /* Remap split distances to NDC Z range [0,1] */
+    float ndc_near, ndc_far;
+    if (dev->reverse_z) {
+      ndc_near = near_clip / split_near; /* reverse_z: z = near/z_eye */
+      ndc_far = near_clip / split_far;
+    } else {
+      /* Standard: z_ndc = (A*z_eye + B) / (-z_eye), A = -(f+n)/(f-n), B =
+       * -2fn/(f-n) */
+      ndc_near = (-m22 * (-split_near) + m23) / split_near;
+      ndc_far = (-m22 * (-split_far) + m23) / split_far;
+    }
+
+    /* Frustum corners in NDC space */
+    MopVec4 frustum_corners[8] = {
+        {-1, -1, ndc_near, 1}, {1, -1, ndc_near, 1}, {1, 1, ndc_near, 1},
+        {-1, 1, ndc_near, 1},  {-1, -1, ndc_far, 1}, {1, -1, ndc_far, 1},
+        {1, 1, ndc_far, 1},    {-1, 1, ndc_far, 1},
+    };
+
+    /* Transform frustum corners to world space */
+    MopVec3 world_corners[8];
+    MopVec3 center = {0, 0, 0};
+    for (int i = 0; i < 8; i++) {
+      MopVec4 ws = mop_mat4_mul_vec4(inv_vp, frustum_corners[i]);
+      if (fabsf(ws.w) > 1e-6f) {
+        ws.x /= ws.w;
+        ws.y /= ws.w;
+        ws.z /= ws.w;
+      }
+      world_corners[i] = (MopVec3){ws.x, ws.y, ws.z};
+      center.x += ws.x;
+      center.y += ws.y;
+      center.z += ws.z;
+    }
+    center.x /= 8.0f;
+    center.y /= 8.0f;
+    center.z /= 8.0f;
+
+    /* Light view matrix: look from center along light direction */
+    MopVec3 light_eye = {center.x - light_dir.x * 50.0f,
+                         center.y - light_dir.y * 50.0f,
+                         center.z - light_dir.z * 50.0f};
+    MopMat4 light_view =
+        mop_mat4_look_at(light_eye, center, (MopVec3){0, 1, 0});
+
+    /* Find AABB of frustum corners in light space */
+    float min_x = 1e30f, max_x = -1e30f;
+    float min_y = 1e30f, max_y = -1e30f;
+    float min_z = 1e30f, max_z = -1e30f;
+
+    for (int i = 0; i < 8; i++) {
+      MopVec4 ls = mop_mat4_mul_vec4(
+          light_view, (MopVec4){world_corners[i].x, world_corners[i].y,
+                                world_corners[i].z, 1.0f});
+      if (ls.x < min_x)
+        min_x = ls.x;
+      if (ls.x > max_x)
+        max_x = ls.x;
+      if (ls.y < min_y)
+        min_y = ls.y;
+      if (ls.y > max_y)
+        max_y = ls.y;
+      if (ls.z < min_z)
+        min_z = ls.z;
+      if (ls.z > max_z)
+        max_z = ls.z;
+    }
+
+    /* Add margin for shadow casters behind the frustum */
+    float z_margin = 50.0f;
+    min_z -= z_margin;
+
+    MopMat4 light_proj =
+        mop_mat4_ortho(min_x, max_x, min_y, max_y, min_z, max_z);
+    dev->cascade_vp[c] = mop_mat4_multiply(light_proj, light_view);
+  }
+}
+
+/* =========================================================================
  * Backend function table
  * ========================================================================= */
 
@@ -1351,11 +2388,14 @@ static const MopRhiBackend VK_BACKEND = {
     .pick_read_id = vk_pick_read_id,
     .pick_read_depth = vk_pick_read_depth,
     .framebuffer_read_color = vk_framebuffer_read_color,
+    .framebuffer_read_object_id = vk_framebuffer_read_object_id,
+    .framebuffer_read_depth = vk_framebuffer_read_depth,
     .texture_create = vk_texture_create,
     .texture_destroy = vk_texture_destroy,
     .draw_instanced = vk_draw_instanced,
     .buffer_update = vk_buffer_update,
     .buffer_read = vk_buffer_read,
+    .frame_gpu_time_ms = vk_frame_gpu_time_ms,
 };
 
 const MopRhiBackend *mop_rhi_backend_vulkan(void) { return &VK_BACKEND; }

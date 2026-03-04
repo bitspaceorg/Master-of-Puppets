@@ -3,6 +3,15 @@
  * mop.h — Unified public header
  *
  * Include this single header to access the full public API.
+ * For finer-grained control, include individual group headers:
+ *   <mop/core/core.h>         — viewport, scene, lights, materials, overlays
+ *   <mop/interact/interact.h> — input, camera, gizmo, undo
+ *   <mop/query/query.h>       — scene queries, camera export, spatial,
+ * snapshots <mop/render/render.h>     — backend selection, picking,
+ * post-processing <mop/subsystem/subsystem.h> — particles, water
+ *   <mop/loader/loader.h>     — OBJ and binary mesh loading
+ *   <mop/config/config.h>     — Lua configuration
+ *   <mop/util/util.h>         — logging, profiling
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -10,31 +19,16 @@
 #ifndef MOP_H
 #define MOP_H
 
-#include "backend.h"
-#include "camera.h"
-#include "camera_query.h"
-#include "config.h"
-#include "display.h"
-#include "gizmo.h"
-#include "input.h"
-#include "light.h"
-#include "loader.h"
-#include "log.h"
-#include "material.h"
-#include "overlay.h"
-#include "particle.h"
-#include "picking.h"
-#include "pipeline.h"
-#include "postprocess.h"
-#include "profile.h"
-#include "query.h"
-#include "scene.h"
-#include "snapshot.h"
-#include "spatial.h"
-#include "types.h"
-#include "undo.h"
-#include "vertex_format.h"
-#include "viewport.h"
-#include "water.h"
+#include <mop/types.h>
+
+#include <mop/config/config.h>
+#include <mop/core/core.h>
+#include <mop/export/export.h>
+#include <mop/interact/interact.h>
+#include <mop/loader/loader.h>
+#include <mop/query/query.h>
+#include <mop/render/render.h>
+#include <mop/subsystem/subsystem.h>
+#include <mop/util/util.h>
 
 #endif /* MOP_H */

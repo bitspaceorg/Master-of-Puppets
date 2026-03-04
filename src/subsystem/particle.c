@@ -6,8 +6,8 @@
  */
 
 #include "core/viewport_internal.h"
-#include <mop/log.h>
-#include <mop/particle.h>
+#include <mop/subsystem/particle.h>
+#include <mop/util/log.h>
 
 #include <math.h>
 #include <stdlib.h>

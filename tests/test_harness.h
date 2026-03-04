@@ -128,4 +128,39 @@ static int mop_current_test_failed = 0;
 
 #define TEST_EXIT() return (mop_tests_failed > 0) ? 1 : 0
 
+/* -------------------------------------------------------------------------
+ * Extended assertions for torture tests
+ * ------------------------------------------------------------------------- */
+
+#define TEST_ASSERT_MAT4_NEAR(a, b, tol)                                       \
+  do {                                                                         \
+    MopMat4 _ma = (a), _mb = (b);                                              \
+    int _mat_ok = 1;                                                           \
+    for (int _mi = 0; _mi < 16; _mi++) {                                       \
+      if (fabsf(_ma.d[_mi] - _mb.d[_mi]) > (tol)) {                            \
+        _mat_ok = 0;                                                           \
+        break;                                                                 \
+      }                                                                        \
+    }                                                                          \
+    if (!_mat_ok) {                                                            \
+      mop_tests_failed++;                                                      \
+      mop_current_test_failed = 1;                                             \
+      printf(MOP_TEST_RED "  FAIL" MOP_TEST_RESET " %s\n"                      \
+                          "       %s:%d: matrices differ (tol=%.1e)\n",        \
+             _test_name, __FILE__, __LINE__, (double)(tol));                   \
+      break;                                                                   \
+    }                                                                          \
+  } while (0)
+
+#define TEST_ASSERT_NO_NAN(val)                                                \
+  TEST_ASSERT_MSG(!isnan(val) && !isinf(val), "NaN/Inf detected")
+
+#define TEST_ASSERT_FINITE_VEC3(v)                                             \
+  do {                                                                         \
+    MopVec3 _fv = (v);                                                         \
+    TEST_ASSERT_MSG(!isnan(_fv.x) && !isinf(_fv.x) && !isnan(_fv.y) &&         \
+                        !isinf(_fv.y) && !isnan(_fv.z) && !isinf(_fv.z),       \
+                    "NaN/Inf in vec3");                                        \
+  } while (0)
+
 #endif /* MOP_TEST_HARNESS_H */

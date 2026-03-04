@@ -6,8 +6,8 @@
  */
 
 #include <math.h>
-#include <mop/camera.h>
-#include <mop/viewport.h>
+#include <mop/core/viewport.h>
+#include <mop/interact/camera.h>
 
 MopOrbitCamera mop_orbit_camera_default(void) {
   return (MopOrbitCamera){

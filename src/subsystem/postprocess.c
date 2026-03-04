@@ -72,6 +72,12 @@ void mop_postprocess_apply(MopSwFramebuffer *fb, uint32_t effects,
   if (!fb || !fb->color || effects == 0)
     return;
 
+  /* FXAA runs first — operates on raw rasterized colors before tonemap/gamma.
+   * This replaces per-triangle edge AA which caused seam artifacts. */
+  if (effects & MOP_POST_FXAA) {
+    mop_sw_fxaa(fb);
+  }
+
   int w = fb->width;
   int h = fb->height;
   float cx = (float)w * 0.5f;

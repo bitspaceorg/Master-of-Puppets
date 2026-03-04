@@ -9,12 +9,12 @@
 
 /* -------------------------------------------------------------------------
  * Internal filter: a mesh is a "scene mesh" if it's active, has a non-zero
- * object_id, and is not a gizmo handle (object_id < 0xFFFF0000).
+ * object_id, and is not chrome (object_id < 0xFFFD0000).
  * This matches the filter used by pass_scene_opaque/pass_scene_transparent.
  * ------------------------------------------------------------------------- */
 
 static bool is_scene_mesh(const struct MopMesh *m) {
-  return m->active && m->object_id != 0 && m->object_id < 0xFFFF0000u;
+  return m->active && m->object_id != 0 && m->object_id < 0xFFFD0000u;
 }
 
 /* -------------------------------------------------------------------------

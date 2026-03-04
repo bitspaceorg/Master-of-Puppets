@@ -11,10 +11,10 @@
 #ifndef MOP_RHI_H
 #define MOP_RHI_H
 
-#include <mop/backend.h>
-#include <mop/light.h>
+#include <mop/core/light.h>
+#include <mop/core/vertex_format.h>
+#include <mop/render/backend.h>
 #include <mop/types.h>
-#include <mop/vertex_format.h>
 
 /* -------------------------------------------------------------------------
  * Opaque RHI handles — each backend defines the concrete structs
@@ -64,6 +64,7 @@ typedef struct MopRhiDrawCall {
   MopShadingMode shading_mode;
   bool wireframe;
   bool depth_test;
+  bool depth_write; /* false = read-only depth test (no Z-buffer update) */
   bool backface_cull;
 
   /* Texture (Phase 2C) — NULL = no texture */
@@ -86,6 +87,10 @@ typedef struct MopRhiDrawCall {
 
   /* Flexible vertex format — NULL = standard MopVertex layout */
   const MopVertexFormat *vertex_format;
+
+  /* Line rendering (Phase 1) */
+  float line_width; /* wireframe line width in pixels, default 1.0 */
+  float depth_bias; /* z offset for coplanar overlay prevention */
 } MopRhiDrawCall;
 
 /* -------------------------------------------------------------------------
@@ -135,6 +140,17 @@ typedef struct MopRhiBackend {
                                            MopRhiFramebuffer *fb,
                                            int *out_width, int *out_height);
 
+  /* Object-ID buffer readback — returns uint32_t per pixel, row-major */
+  const uint32_t *(*framebuffer_read_object_id)(MopRhiDevice *device,
+                                                MopRhiFramebuffer *fb,
+                                                int *out_width,
+                                                int *out_height);
+
+  /* Depth buffer readback — returns float per pixel, row-major */
+  const float *(*framebuffer_read_depth)(MopRhiDevice *device,
+                                         MopRhiFramebuffer *fb, int *out_width,
+                                         int *out_height);
+
   /* Texture management */
   MopRhiTexture *(*texture_create)(MopRhiDevice *device, int width, int height,
                                    const uint8_t *rgba_data);
@@ -153,6 +169,10 @@ typedef struct MopRhiBackend {
   /* Read raw vertex data from a buffer (overlay safety).
    * CPU returns buf->data, Vulkan returns buf->shadow. */
   const void *(*buffer_read)(MopRhiBuffer *buffer);
+
+  /* Return the GPU frame time in milliseconds for the last completed frame.
+   * CPU backend returns 0.0f. */
+  float (*frame_gpu_time_ms)(MopRhiDevice *dev);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------

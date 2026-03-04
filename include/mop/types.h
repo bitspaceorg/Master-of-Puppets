@@ -97,6 +97,10 @@ typedef enum MopShadingMode {
 MopMat4 mop_mat4_identity(void);
 MopMat4 mop_mat4_perspective(float fov_radians, float aspect, float near_plane,
                              float far_plane);
+MopMat4 mop_mat4_perspective_reverse_z(float fov_radians, float aspect,
+                                       float near_plane);
+MopMat4 mop_mat4_ortho(float left, float right, float bottom, float top,
+                       float near_plane, float far_plane);
 MopMat4 mop_mat4_look_at(MopVec3 eye, MopVec3 center, MopVec3 up);
 MopMat4 mop_mat4_rotate_y(float angle_radians);
 MopMat4 mop_mat4_rotate_x(float angle_radians);

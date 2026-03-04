@@ -16,7 +16,177 @@
  * Final layouts are TRANSFER_SRC_OPTIMAL so we can readback at frame_end.
  * ------------------------------------------------------------------------- */
 
-VkResult mop_vk_create_render_pass(VkDevice device, VkRenderPass *out) {
+VkResult mop_vk_create_render_pass(VkDevice device,
+                                   VkSampleCountFlagBits samples,
+                                   VkRenderPass *out) {
+  if (samples > VK_SAMPLE_COUNT_1_BIT) {
+    /* ---- MSAA render pass via vkCreateRenderPass2 (Vulkan 1.2) ----
+     *
+     * 6 attachments — all resolves happen in-pass (no manual
+     * vkCmdResolveImage): 0: MSAA color   (4x, CLEAR → DONT_CARE, auto-resolved
+     * → 3) 1: MSAA picking (4x, CLEAR → DONT_CARE, auto-resolved → 4) 2: MSAA
+     * depth   (4x, CLEAR → DONT_CARE, depth-resolved → 5) 3: Resolve color (1x,
+     * DONT_CARE → STORE, TRANSFER_SRC) 4: Resolve picking (1x, DONT_CARE →
+     * STORE, TRANSFER_SRC) 5: Resolve depth   (1x, DONT_CARE → STORE,
+     * TRANSFER_SRC)
+     *
+     * Integer picking (R32_UINT) resolve takes sample 0 per Vulkan spec.
+     * Depth resolve uses VK_RESOLVE_MODE_SAMPLE_ZERO_BIT (mandatory in 1.2).
+     */
+    VkAttachmentDescription2 attachments[6] = {
+        /* 0: MSAA color */
+        {
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .format = VK_FORMAT_R8G8B8A8_SRGB,
+            .samples = samples,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        },
+        /* 1: MSAA picking */
+        {
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .format = VK_FORMAT_R32_UINT,
+            .samples = samples,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        },
+        /* 2: MSAA depth */
+        {
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .samples = samples,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+        /* 3: Resolve color (1x) */
+        {
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .format = VK_FORMAT_R8G8B8A8_SRGB,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        },
+        /* 4: Resolve picking (1x) */
+        {
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .format = VK_FORMAT_R32_UINT,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        },
+        /* 5: Resolve depth (1x) */
+        {
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        },
+    };
+
+    VkAttachmentReference2 color_refs[2] = {
+        {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+         .attachment = 0,
+         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT},
+        {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+         .attachment = 1,
+         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT},
+    };
+
+    VkAttachmentReference2 resolve_refs[2] = {
+        {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+         .attachment = 3,
+         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT},
+        {.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+         .attachment = 4,
+         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT},
+    };
+
+    VkAttachmentReference2 depth_ref = {
+        .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+        .attachment = 2,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+    };
+
+    VkAttachmentReference2 depth_resolve_ref = {
+        .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+        .attachment = 5,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+    };
+
+    VkSubpassDescriptionDepthStencilResolve depth_resolve = {
+        .sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE,
+        .depthResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
+        .stencilResolveMode = VK_RESOLVE_MODE_NONE,
+        .pDepthStencilResolveAttachment = &depth_resolve_ref,
+    };
+
+    VkSubpassDescription2 subpass = {
+        .sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2,
+        .pNext = &depth_resolve,
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 2,
+        .pColorAttachments = color_refs,
+        .pResolveAttachments = resolve_refs,
+        .pDepthStencilAttachment = &depth_ref,
+    };
+
+    VkSubpassDependency2 dep = {
+        .sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2,
+        .srcSubpass = 0,
+        .dstSubpass = VK_SUBPASS_EXTERNAL,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+    };
+
+    VkRenderPassCreateInfo2 ci = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
+        .attachmentCount = 6,
+        .pAttachments = attachments,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = 1,
+        .pDependencies = &dep,
+    };
+
+    return vkCreateRenderPass2(device, &ci, NULL, out);
+  }
+
+  /* ---- Non-MSAA: original 3-attachment render pass ---- */
   VkAttachmentDescription attachments[3] = {
       /* 0: Color */
       {
@@ -101,7 +271,7 @@ VkResult mop_vk_create_render_pass(VkDevice device, VkRenderPass *out) {
 
 VkResult mop_vk_create_desc_set_layout(VkDevice device,
                                        VkDescriptorSetLayout *out) {
-  VkDescriptorSetLayoutBinding bindings[2] = {
+  VkDescriptorSetLayoutBinding bindings[3] = {
       {
           .binding = 0,
           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
@@ -114,11 +284,17 @@ VkResult mop_vk_create_desc_set_layout(VkDevice device,
           .descriptorCount = 1,
           .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       },
+      {
+          .binding = 2,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
   };
 
   VkDescriptorSetLayoutCreateInfo ci = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 2,
+      .bindingCount = 3,
       .pBindings = bindings,
   };
 
@@ -247,15 +423,17 @@ static VkPipeline create_pipeline(struct MopRhiDevice *dev, uint32_t key,
 
   VkPipelineMultisampleStateCreateInfo multisample = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+      .rasterizationSamples = dev->msaa_samples,
   };
 
-  /* Depth/stencil */
+  /* Depth/stencil — reversed-Z uses GREATER_OR_EQUAL */
+  VkCompareOp depth_op =
+      dev->reverse_z ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS;
   VkPipelineDepthStencilStateCreateInfo depth_stencil = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
       .depthTestEnable = depth_test ? VK_TRUE : VK_FALSE,
       .depthWriteEnable = depth_test ? VK_TRUE : VK_FALSE,
-      .depthCompareOp = VK_COMPARE_OP_LESS,
+      .depthCompareOp = depth_op,
   };
 
   /* Color blend — two attachments: color (index 0) and picking (index 1) */
@@ -360,6 +538,533 @@ VkPipeline mop_vk_get_pipeline(struct MopRhiDevice *dev, uint32_t key,
   }
 
   return dev->pipelines[key];
+}
+
+/* -------------------------------------------------------------------------
+ * Instanced rendering pipeline
+ *
+ * Uses mop_instanced.vert with two vertex bindings:
+ *   Binding 0: per-vertex (position, normal, color, texcoord)
+ *   Binding 1: per-instance (mat4 model = 4 × vec4 at locations 4-7)
+ * ------------------------------------------------------------------------- */
+
+static VkPipeline create_instanced_pipeline(struct MopRhiDevice *dev,
+                                            uint32_t vertex_stride) {
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = dev->instanced_vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = dev->solid_frag,
+          .pName = "main",
+      },
+  };
+
+  /* Two vertex bindings: per-vertex + per-instance */
+  VkVertexInputBindingDescription bindings[2] = {
+      {
+          .binding = 0,
+          .stride = vertex_stride,
+          .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+      },
+      {
+          .binding = 1,
+          .stride = 64, /* sizeof(MopMat4) = 16 floats × 4 bytes */
+          .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
+      },
+  };
+
+  /* Vertex attributes: 4 per-vertex + 4 per-instance (mat4 columns) */
+  VkVertexInputAttributeDescription attrs[8] = {
+      /* Per-vertex (binding 0) */
+      {.location = 0,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32_SFLOAT,
+       .offset = 0},
+      {.location = 1,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32_SFLOAT,
+       .offset = 3 * sizeof(float)},
+      {.location = 2,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = 6 * sizeof(float)},
+      {.location = 3,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32_SFLOAT,
+       .offset = 10 * sizeof(float)},
+      /* Per-instance model matrix columns (binding 1) */
+      {.location = 4,
+       .binding = 1,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = 0},
+      {.location = 5,
+       .binding = 1,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = 16},
+      {.location = 6,
+       .binding = 1,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = 32},
+      {.location = 7,
+       .binding = 1,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = 48},
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 2,
+      .pVertexBindingDescriptions = bindings,
+      .vertexAttributeDescriptionCount = 8,
+      .pVertexAttributeDescriptions = attrs,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_BACK_BIT,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = dev->msaa_samples,
+  };
+
+  VkCompareOp inst_depth_op =
+      dev->reverse_z ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS;
+  VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_TRUE,
+      .depthWriteEnable = VK_TRUE,
+      .depthCompareOp = inst_depth_op,
+  };
+
+  VkPipelineColorBlendAttachmentState blend_attachments[2];
+  memset(blend_attachments, 0, sizeof(blend_attachments));
+  blend_attachments[0].colorWriteMask =
+      VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  blend_attachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+
+  VkPipelineColorBlendStateCreateInfo color_blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 2,
+      .pAttachments = blend_attachments,
+  };
+
+  VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &input_assembly,
+      .pViewportState = &viewport_state,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth_stencil,
+      .pColorBlendState = &color_blend,
+      .pDynamicState = &dynamic_state,
+      .layout = dev->pipeline_layout,
+      .renderPass = dev->render_pass,
+      .subpass = 0,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkResult r = vkCreateGraphicsPipelines(dev->device, VK_NULL_HANDLE, 1, &ci,
+                                         NULL, &pipeline);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] instanced pipeline creation failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
+}
+
+VkPipeline mop_vk_get_instanced_pipeline(struct MopRhiDevice *dev,
+                                         uint32_t vertex_stride) {
+  if (dev->instanced_pipeline != VK_NULL_HANDLE &&
+      dev->instanced_pipeline_stride != vertex_stride) {
+    vkDestroyPipeline(dev->device, dev->instanced_pipeline, NULL);
+    dev->instanced_pipeline = VK_NULL_HANDLE;
+  }
+  if (dev->instanced_pipeline == VK_NULL_HANDLE) {
+    dev->instanced_pipeline = create_instanced_pipeline(dev, vertex_stride);
+    dev->instanced_pipeline_stride = vertex_stride;
+  }
+  return dev->instanced_pipeline;
+}
+
+/* =========================================================================
+ * Shadow render pass (depth-only)
+ * ========================================================================= */
+
+VkResult mop_vk_create_shadow_render_pass(VkDevice device, VkRenderPass *out) {
+  VkAttachmentDescription attachment = {
+      .format = VK_FORMAT_D32_SFLOAT,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+  };
+
+  VkAttachmentReference depth_ref = {
+      .attachment = 0,
+      .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+  };
+
+  VkSubpassDescription subpass = {
+      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+      .colorAttachmentCount = 0,
+      .pDepthStencilAttachment = &depth_ref,
+  };
+
+  VkSubpassDependency deps[2] = {
+      {
+          .srcSubpass = VK_SUBPASS_EXTERNAL,
+          .dstSubpass = 0,
+          .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+          .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+          .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+          .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+      },
+      {
+          .srcSubpass = 0,
+          .dstSubpass = VK_SUBPASS_EXTERNAL,
+          .srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+          .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+      },
+  };
+
+  VkRenderPassCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &attachment,
+      .subpassCount = 1,
+      .pSubpasses = &subpass,
+      .dependencyCount = 2,
+      .pDependencies = deps,
+  };
+
+  return vkCreateRenderPass(device, &ci, NULL, out);
+}
+
+/* =========================================================================
+ * Shadow pipeline creation (depth-only with bias)
+ * ========================================================================= */
+
+VkPipeline mop_vk_create_shadow_pipeline(struct MopRhiDevice *dev) {
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = dev->shadow_vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = dev->shadow_frag,
+          .pName = "main",
+      },
+  };
+
+  /* Vertex input: position + normal + color (must match binding layout) */
+  VkVertexInputBindingDescription binding = {
+      .binding = 0,
+      .stride = (uint32_t)sizeof(MopVertex),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+  };
+
+  VkVertexInputAttributeDescription attrs[3] = {
+      {.location = 0,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32_SFLOAT,
+       .offset = 0}, /* position */
+      {.location = 1,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32_SFLOAT,
+       .offset = 3 * sizeof(float)}, /* normal */
+      {.location = 2,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = 6 * sizeof(float)}, /* color */
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &binding,
+      .vertexAttributeDescriptionCount = 3,
+      .pVertexAttributeDescriptions = attrs,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_BACK_BIT,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .depthBiasEnable = VK_TRUE,
+      .depthBiasConstantFactor = 1.0f,
+      .depthBiasSlopeFactor = 1.5f,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_TRUE,
+      .depthWriteEnable = VK_TRUE,
+      .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+  };
+
+  /* No color attachments for shadow pass */
+  VkPipelineColorBlendStateCreateInfo color_blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 0,
+      .pAttachments = NULL,
+  };
+
+  VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &input_assembly,
+      .pViewportState = &viewport_state,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth_stencil,
+      .pColorBlendState = &color_blend,
+      .pDynamicState = &dynamic_state,
+      .layout = dev->shadow_pipeline_layout,
+      .renderPass = dev->shadow_render_pass,
+      .subpass = 0,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkResult r = vkCreateGraphicsPipelines(dev->device, VK_NULL_HANDLE, 1, &ci,
+                                         NULL, &pipeline);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] shadow pipeline creation failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
+}
+
+/* =========================================================================
+ * Post-process render pass (single color output)
+ * ========================================================================= */
+
+VkResult mop_vk_create_postprocess_render_pass(VkDevice device,
+                                               VkRenderPass *out) {
+  VkAttachmentDescription attachment = {
+      .format = VK_FORMAT_R8G8B8A8_SRGB,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+  };
+
+  VkAttachmentReference color_ref = {
+      .attachment = 0,
+      .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+  };
+
+  VkSubpassDescription subpass = {
+      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &color_ref,
+  };
+
+  VkSubpassDependency dep = {
+      .srcSubpass = VK_SUBPASS_EXTERNAL,
+      .dstSubpass = 0,
+      .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      .srcAccessMask = 0,
+      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+  };
+
+  VkRenderPassCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &attachment,
+      .subpassCount = 1,
+      .pSubpasses = &subpass,
+      .dependencyCount = 1,
+      .pDependencies = &dep,
+  };
+
+  return vkCreateRenderPass(device, &ci, NULL, out);
+}
+
+/* =========================================================================
+ * FXAA post-process pipeline (fullscreen triangle)
+ * ========================================================================= */
+
+VkPipeline mop_vk_create_postprocess_pipeline(struct MopRhiDevice *dev) {
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = dev->fullscreen_vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = dev->fxaa_frag,
+          .pName = "main",
+      },
+  };
+
+  /* No vertex input — fullscreen triangle generated in shader */
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_FALSE,
+      .depthWriteEnable = VK_FALSE,
+  };
+
+  VkPipelineColorBlendAttachmentState blend_att = {
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+
+  VkPipelineColorBlendStateCreateInfo color_blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &blend_att,
+  };
+
+  VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &input_assembly,
+      .pViewportState = &viewport_state,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth_stencil,
+      .pColorBlendState = &color_blend,
+      .pDynamicState = &dynamic_state,
+      .layout = dev->postprocess_pipeline_layout,
+      .renderPass = dev->postprocess_render_pass,
+      .subpass = 0,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkResult r = vkCreateGraphicsPipelines(dev->device, VK_NULL_HANDLE, 1, &ci,
+                                         NULL, &pipeline);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] postprocess pipeline creation failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
 }
 
 #endif /* MOP_HAS_VULKAN */

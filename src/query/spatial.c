@@ -15,7 +15,7 @@
  * ------------------------------------------------------------------------- */
 
 static bool is_scene_mesh(const struct MopMesh *m) {
-  return m->active && m->object_id != 0 && m->object_id < 0xFFFF0000u;
+  return m->active && m->object_id != 0 && m->object_id < 0xFFFD0000u;
 }
 
 /* -------------------------------------------------------------------------

@@ -10,8 +10,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <mop/loader.h>
-#include <mop/log.h>
+#include <mop/loader/loader.h>
+#include <mop/util/log.h>
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -2,14 +2,20 @@
 
 /*
  * Master of Puppets — Vulkan Backend
- * mop_solid.frag — Fragment shader with multi-light support + texture
+ * mop_solid.frag — Fragment shader with GGX Cook-Torrance PBR + multi-light
+ *                  + cascade shadow mapping
  *
  * Dynamic UBO (set=0, binding=0): per-draw fragment uniforms
  * Combined image sampler (set=0, binding=1): texture or 1x1 white fallback
+ * Shadow sampler (set=0, binding=2): cascade shadow map array (comparison)
  *
  * Outputs to two attachments:
  *   location 0: vec4  color    (R8G8B8A8_SRGB)
  *   location 1: uint  object_id (R32_UINT)
+ *
+ * Shading model matches CPU rasterizer (rasterizer.c smooth_ml path):
+ *   Diffuse:  Lambert (no 1/pi — cancels with sun energy = intensity*pi)
+ *   Specular: GGX Cook-Torrance (D=Trowbridge-Reitz, G=Smith-Schlick, F=Schlick)
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,6 +23,7 @@
 layout(location = 0) in vec3 v_normal;
 layout(location = 1) in vec4 v_color;
 layout(location = 2) in vec2 v_texcoord;
+layout(location = 3) in vec3 v_world_pos;
 
 struct Light {
     vec4 position;    /* xyz + type (0=dir, 1=point, 2=spot) */
@@ -33,42 +40,158 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     int   blend_mode;
     int   has_texture;
     int   num_lights;
-    float _pad1;
-    float _pad2;
-    Light lights[4];
+    float metallic;
+    float roughness;
+    vec4  cam_pos;       /* xyz = camera eye position, w = unused */
+    Light lights[8];
+
+    /* Shadow mapping (cascade) */
+    int   shadows_enabled;       /* bool: 1 = shadows active, 0 = off */
+    int   cascade_count;         /* number of active cascades (1-4) */
+    float _pad_shadow[2];        /* align to vec4 */
+    mat4  cascade_vp[4];         /* light-space VP matrix per cascade */
+    vec4  cascade_splits;        /* view-space Z split distances */
 } frag;
 
 layout(set = 0, binding = 1) uniform sampler2D u_texture;
+layout(set = 0, binding = 2) uniform sampler2DArrayShadow u_shadow_map;
 
 layout(location = 0) out vec4 frag_color;
 layout(location = 1) out uint frag_object_id;
 
+const float PI = 3.14159265359;
+
+/* GGX Normal Distribution (Trowbridge-Reitz)
+ * D = alpha^2 / (pi * ((NdotH)^2 * (alpha^2 - 1) + 1)^2) */
+float distribution_ggx(float ndoth, float alpha2) {
+    float denom = ndoth * ndoth * (alpha2 - 1.0) + 1.0;
+    return alpha2 / (PI * denom * denom);
+}
+
+/* Smith-Schlick G1 term
+ * G1(x) = NdotX / (NdotX * (1 - k) + k) */
+float geometry_schlick_g1(float ndotx, float k) {
+    return ndotx / (ndotx * (1.0 - k) + k);
+}
+
+/* Schlick Fresnel approximation (per-channel)
+ * F = F0 + (1 - F0) * (1 - VdotH)^5 */
+vec3 fresnel_schlick(float vdoth, vec3 f0) {
+    float om = 1.0 - vdoth;
+    float om2 = om * om;
+    float om5 = om2 * om2 * om;
+    return f0 + (1.0 - f0) * om5;
+}
+
+/* Compute shadow factor for the given world position using cascade shadow maps.
+ * Returns 1.0 = fully lit, 0.0 = fully shadowed. */
+float compute_shadow(vec3 world_pos) {
+    if (frag.shadows_enabled == 0) return 1.0;
+
+    /* Determine cascade based on view-space Z (approximated from camera distance) */
+    float view_z = length(frag.cam_pos.xyz - world_pos);
+    int cascade = frag.cascade_count - 1;
+    for (int i = 0; i < frag.cascade_count; i++) {
+        if (view_z < frag.cascade_splits[i]) {
+            cascade = i;
+            break;
+        }
+    }
+
+    /* Transform to light clip space */
+    vec4 light_clip = frag.cascade_vp[cascade] * vec4(world_pos, 1.0);
+    vec3 proj_coords = light_clip.xyz / light_clip.w;
+
+    /* Remap from [-1,1] to [0,1] */
+    vec2 shadow_uv = proj_coords.xy * 0.5 + 0.5;
+    float compare_depth = proj_coords.z;
+
+    /* Out-of-range = fully lit */
+    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 ||
+        shadow_uv.y < 0.0 || shadow_uv.y > 1.0 ||
+        compare_depth < 0.0 || compare_depth > 1.0) {
+        return 1.0;
+    }
+
+    /* PCF 3x3: 9 samples averaged for soft shadow edges */
+    float texel_size = 1.0 / 2048.0; /* MOP_VK_SHADOW_MAP_SIZE */
+    float shadow = 0.0;
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            vec2 offset = vec2(float(dx), float(dy)) * texel_size;
+            vec2 sample_uv = shadow_uv + offset;
+            /* sampler2DArrayShadow: texture(sampler, vec4(uv, layer, compare)) */
+            shadow += texture(u_shadow_map,
+                              vec4(sample_uv, float(cascade), compare_depth));
+        }
+    }
+    shadow /= 9.0;
+
+    return shadow;
+}
+
 void main() {
     vec3 n = normalize(v_normal);
+    vec3 world_pos = v_world_pos;
 
-    float lighting = frag.ambient;
+    /* Sample base color */
+    vec4 base = v_color;
+    if (frag.has_texture != 0) {
+        base *= texture(u_texture, v_texcoord);
+    }
+
+    float mtl = frag.metallic;
+    float rough = frag.roughness;
+
+    /* GGX alpha mapping: alpha = roughness^2 */
+    float alpha = rough * rough;
+    float alpha2 = alpha * alpha;
+    if (alpha2 < 1e-7) alpha2 = 1e-7;
+
+    /* View direction */
+    vec3 view_dir = normalize(frag.cam_pos.xyz - world_pos);
+    float ndotv = max(dot(n, view_dir), 1e-4);
+
+    /* Smith-Schlick k = alpha / 2 (Disney/Unreal mapping) */
+    float k = alpha * 0.5;
+    float g1v = geometry_schlick_g1(ndotv, k);
+
+    /* F0: Fresnel at normal incidence */
+    vec3 f0 = mix(vec3(0.04), base.rgb, mtl);
+
+    /* Diffuse scale: metals have no diffuse */
+    float diffuse_scale = 1.0 - mtl;
+
+    /* Accumulate lighting */
+    vec3 diffuse_accum = vec3(0.0);
+    vec3 specular_accum = vec3(0.0);
 
     if (frag.num_lights > 0) {
-        /* Multi-light accumulation */
+        /* Compute shadow factor once for directional lights */
+        float shadow_factor = compute_shadow(world_pos);
+
         for (int i = 0; i < frag.num_lights; i++) {
             if (frag.lights[i].params.w < 0.5) continue; /* inactive */
 
             int light_type = int(frag.lights[i].position.w + 0.5);
-            float ndotl = 0.0;
             float attenuation = 1.0;
             float spot_factor = 1.0;
             float intensity = frag.lights[i].color.w;
+            vec3 light_color = frag.lights[i].color.rgb;
+            vec3 l_dir;
+
+            /* Apply shadow only to directional lights (type 0) */
+            float light_shadow = 1.0;
 
             if (light_type == 0) {
                 /* Directional */
-                vec3 dir = normalize(frag.lights[i].direction.xyz);
-                ndotl = max(dot(n, dir), 0.0);
+                l_dir = normalize(frag.lights[i].direction.xyz);
+                light_shadow = shadow_factor;
             } else if (light_type == 1) {
                 /* Point */
-                vec3 to_light = frag.lights[i].position.xyz; /* world pos — approx */
+                vec3 to_light = frag.lights[i].position.xyz - world_pos;
                 float dist = length(to_light);
-                vec3 dir = to_light / max(dist, 0.000001);
-                ndotl = max(dot(n, dir), 0.0);
+                l_dir = to_light / max(dist, 1e-6);
 
                 float range = frag.lights[i].params.x;
                 if (range > 0.0) {
@@ -76,17 +199,17 @@ void main() {
                     attenuation = max(1.0 - r, 0.0);
                     attenuation *= attenuation;
                 } else {
-                    attenuation = 1.0 / (1.0 + dist * dist);
+                    float d2 = max(dist * dist, 0.01);
+                    attenuation = 1.0 / d2;
                 }
             } else {
                 /* Spot */
-                vec3 to_light = frag.lights[i].position.xyz;
+                vec3 to_light = frag.lights[i].position.xyz - world_pos;
                 float dist = length(to_light);
-                vec3 dir = to_light / max(dist, 0.000001);
-                ndotl = max(dot(n, dir), 0.0);
+                l_dir = to_light / max(dist, 1e-6);
 
                 vec3 spot_dir = normalize(frag.lights[i].direction.xyz);
-                float cos_angle = -dot(dir, spot_dir);
+                float cos_angle = -dot(l_dir, spot_dir);
                 float outer_cos = frag.lights[i].params.z;
                 float inner_cos = frag.lights[i].params.y;
 
@@ -94,8 +217,9 @@ void main() {
                     spot_factor = 0.0;
                 } else if (cos_angle < inner_cos) {
                     float range_val = inner_cos - outer_cos;
-                    if (range_val > 0.000001) {
-                        spot_factor = (cos_angle - outer_cos) / range_val;
+                    if (range_val > 1e-6) {
+                        float t = (cos_angle - outer_cos) / range_val;
+                        spot_factor = t * t * (3.0 - 2.0 * t); /* smoothstep */
                     }
                 }
 
@@ -105,28 +229,55 @@ void main() {
                     attenuation = max(1.0 - r, 0.0);
                     attenuation *= attenuation;
                 } else {
-                    attenuation = 1.0 / (1.0 + dist * dist);
+                    float d2 = max(dist * dist, 0.01);
+                    attenuation = 1.0 / d2;
                 }
             }
 
-            lighting += ndotl * intensity * attenuation * spot_factor;
+            float ndotl = max(dot(n, l_dir), 0.0);
+            if (ndotl <= 0.0) continue;
+
+            float weight = intensity * attenuation * spot_factor * ndotl *
+                           light_shadow;
+
+            /* Lambert diffuse (per-channel light color) */
+            diffuse_accum += weight * light_color;
+
+            /* GGX Cook-Torrance specular */
+            vec3 h = normalize(l_dir + view_dir);
+            float ndoth = max(dot(n, h), 0.0);
+            float vdoth = max(dot(view_dir, h), 0.0);
+
+            float D = distribution_ggx(ndoth, alpha2);
+            float g1l = geometry_schlick_g1(ndotl, k);
+            float G = g1v * g1l;
+            vec3 F = fresnel_schlick(vdoth, f0);
+
+            float spec_denom = max(4.0 * ndotl * ndotv, 1e-6);
+            float spec_term = D * G / spec_denom;
+
+            /* Multiply by PI to match energy scale (diffuse omits 1/PI) */
+            specular_accum += spec_term * PI * intensity * attenuation *
+                              spot_factor * ndotl * light_shadow *
+                              F * light_color;
         }
-        lighting = clamp(lighting, 0.0, 1.0);
+
+        /* Final composition */
+        vec3 lit = base.rgb * diffuse_accum * diffuse_scale + specular_accum;
+
+        /* Ambient */
+        lit += base.rgb * frag.ambient * diffuse_scale;
+
+        /* Emissive is handled at the material level if needed */
+
+        frag_color = vec4(clamp(lit, 0.0, 1.0), base.a * frag.opacity);
     } else {
-        /* Legacy single-light fallback */
+        /* Legacy single-light fallback (no PBR) */
         vec3 l = normalize(frag.light_dir.xyz);
         float ndotl = max(dot(n, l), 0.0);
-        lighting = clamp(frag.ambient + (1.0 - frag.ambient) * ndotl, 0.0, 1.0);
+        float lighting = clamp(frag.ambient + (1.0 - frag.ambient) * ndotl, 0.0, 1.0);
+        frag_color = vec4(base.rgb * lighting, base.a * frag.opacity);
     }
 
-    vec4 base = v_color;
-    if (frag.has_texture != 0) {
-        base *= texture(u_texture, v_texcoord);
-    }
-
-    vec3 lit = base.rgb * lighting;
-    float alpha = base.a * frag.opacity;
-
-    frag_color = vec4(lit, alpha);
     frag_object_id = frag.object_id;
 }

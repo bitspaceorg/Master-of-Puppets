@@ -16,20 +16,22 @@
 #define MOP_LIGHT_ID_BASE 0xFFFE0000u
 #define LI_PI 3.14159265358979323846f
 
-/* Geometry parameters — keep small so indicators don't dominate the scene */
-#define LI_CYL_SEGS 8
-#define LI_OCTA_RADIUS 0.12f
-#define LI_ARROW_RADIUS 0.015f
-#define LI_ARROW_START 0.0f
-#define LI_ARROW_END 0.30f
-#define LI_CONE_BASE 0.06f
-#define LI_CONE_TIP 0.42f
-#define LI_SPOT_BASE 0.15f
-#define LI_SPOT_HEIGHT 0.35f
+/* Wireframe icon parameters — thin line icons like Maya/Blender/Houdini.
+ * Each "line" is a cross-shaped pair of quads (8 verts, 4 tris) for
+ * visibility from all angles — same technique as gizmo tube handles. */
+#define LI_HW 0.012f /* half-width of line quads — clear 2D UI feel */
+#define LI_SEGS 16   /* segments for circles/arcs */
 
 MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc) {
   if (!vp || !desc)
     return NULL;
+
+  /* First user-added light replaces the built-in default directional.
+   * This ensures the default doesn't interfere with explicit lighting. */
+  if (vp->default_light_active) {
+    vp->lights[0].active = false;
+    vp->default_light_active = false;
+  }
 
   /* Find a free slot */
   for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
@@ -49,6 +51,15 @@ void mop_viewport_remove_light(MopViewport *vp, MopLight *light) {
   if (!vp || !light)
     return;
   light->active = false;
+}
+
+void mop_viewport_clear_lights(MopViewport *vp) {
+  if (!vp)
+    return;
+  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+    vp->lights[i].active = false;
+  }
+  vp->light_count = 0;
 }
 
 void mop_light_set_position(MopLight *l, MopVec3 pos) {
@@ -94,162 +105,179 @@ uint32_t mop_viewport_light_count(const MopViewport *vp) {
  * Geometry helpers (local to this TU)
  * ------------------------------------------------------------------------- */
 
-/* Map (along-axis, u, v) → world position.  axis=2 (Z) for default. */
-static MopVec3 li_on_axis(float along, float u, float w) {
-  return (MopVec3){u, w, along}; /* Z-up for default orientation */
-}
+/* -------------------------------------------------------------------------
+ * Cross-shaped line helper
+ *
+ * Each "line" is TWO perpendicular quads (8 verts, 4 tris) forming a
+ * cross-section, visible from all viewing angles — same technique as
+ * the gizmo tube handles (CYL_SEGS=4).
+ * ------------------------------------------------------------------------- */
 
-/* Octahedron — 8 faces × 3 verts = 24 verts, 24 indices (flat shaded) */
-#define LI_OCTA_VERTS 24
-#define LI_OCTA_IDXS 24
+/* Emit one cross-shaped line into verts[*vi] and idx[*ii].
+ * 'perp' is a unit vector perpendicular to the line direction;
+ * a second perp is computed via cross product for the second quad. */
+static void li_line_quad(MopVertex *verts, uint32_t *idx, int *vi, int *ii,
+                         MopVec3 a, MopVec3 b, MopVec3 perp, float hw,
+                         MopColor col) {
+  MopVec3 n = {0, 1, 0}; /* dummy normal — chrome is unlit */
 
-static void li_gen_octahedron(MopVertex *verts, uint32_t *idx, float radius,
-                              float cr, float cg, float cb) {
-  MopColor col = {cr, cg, cb, 1.0f};
-  float r = radius;
-  MopVec3 p[6] = {{r, 0, 0},  {-r, 0, 0}, {0, r, 0},
-                  {0, -r, 0}, {0, 0, r},  {0, 0, -r}};
-  static const int faces[8][3] = {{0, 2, 4}, {0, 4, 3}, {0, 3, 5}, {0, 5, 2},
-                                  {1, 4, 2}, {1, 3, 4}, {1, 5, 3}, {1, 2, 5}};
-  int vi = 0, ii = 0;
-  for (int f = 0; f < 8; f++) {
-    MopVec3 p0 = p[faces[f][0]], p1 = p[faces[f][1]], p2 = p[faces[f][2]];
-    MopVec3 n = mop_vec3_normalize(
-        mop_vec3_cross(mop_vec3_sub(p1, p0), mop_vec3_sub(p2, p0)));
-    verts[vi] = (MopVertex){p0, n, col, 0, 0};
-    idx[ii++] = (uint32_t)vi++;
-    verts[vi] = (MopVertex){p1, n, col, 0, 0};
-    idx[ii++] = (uint32_t)vi++;
-    verts[vi] = (MopVertex){p2, n, col, 0, 0};
-    idx[ii++] = (uint32_t)vi++;
+  /* Quad 1: along 'perp' */
+  MopVec3 off = mop_vec3_scale(perp, hw);
+  int base = *vi;
+  verts[(*vi)++] = (MopVertex){mop_vec3_sub(a, off), n, col, 0, 0};
+  verts[(*vi)++] = (MopVertex){mop_vec3_add(a, off), n, col, 0, 0};
+  verts[(*vi)++] = (MopVertex){mop_vec3_add(b, off), n, col, 0, 0};
+  verts[(*vi)++] = (MopVertex){mop_vec3_sub(b, off), n, col, 0, 0};
+  idx[(*ii)++] = (uint32_t)base;
+  idx[(*ii)++] = (uint32_t)(base + 1);
+  idx[(*ii)++] = (uint32_t)(base + 2);
+  idx[(*ii)++] = (uint32_t)(base + 2);
+  idx[(*ii)++] = (uint32_t)(base + 3);
+  idx[(*ii)++] = (uint32_t)base;
+
+  /* Quad 2: perpendicular to both line direction and first perp */
+  MopVec3 line_dir = mop_vec3_sub(b, a);
+  float len = mop_vec3_length(line_dir);
+  if (len > 0.0001f) {
+    MopVec3 perp2 = mop_vec3_normalize(mop_vec3_cross(line_dir, perp));
+    MopVec3 off2 = mop_vec3_scale(perp2, hw);
+    base = *vi;
+    verts[(*vi)++] = (MopVertex){mop_vec3_sub(a, off2), n, col, 0, 0};
+    verts[(*vi)++] = (MopVertex){mop_vec3_add(a, off2), n, col, 0, 0};
+    verts[(*vi)++] = (MopVertex){mop_vec3_add(b, off2), n, col, 0, 0};
+    verts[(*vi)++] = (MopVertex){mop_vec3_sub(b, off2), n, col, 0, 0};
+    idx[(*ii)++] = (uint32_t)base;
+    idx[(*ii)++] = (uint32_t)(base + 1);
+    idx[(*ii)++] = (uint32_t)(base + 2);
+    idx[(*ii)++] = (uint32_t)(base + 2);
+    idx[(*ii)++] = (uint32_t)(base + 3);
+    idx[(*ii)++] = (uint32_t)base;
   }
 }
 
-/* Arrow (cylinder + cone) — for directional light indicator.
- * Points along +Z in local space; transform orients it. */
-#define LI_CYL_VERTS (2 * LI_CYL_SEGS)                    /* 16 */
-#define LI_CYL_IDXS (LI_CYL_SEGS * 6)                     /* 48 */
-#define LI_CONE_VERTS (2 * LI_CYL_SEGS + 1 + LI_CYL_SEGS) /* 25 */
-#define LI_CONE_IDXS (LI_CYL_SEGS * 3 + LI_CYL_SEGS * 3)  /* 48 */
-#define LI_ARROW_VERTS (LI_CYL_VERTS + LI_CONE_VERTS)     /* 41 */
-#define LI_ARROW_IDXS (LI_CYL_IDXS + LI_CONE_IDXS)        /* 96 */
+/* -------------------------------------------------------------------------
+ * Point light icon — 6 short rays forming a starburst (like Maya's point
+ * light).  Each ray is a cross-shaped line (2 quads).
+ *
+ * 6 rays × (8 verts + 12 indices) = 48 verts, 72 indices
+ * ------------------------------------------------------------------------- */
+#define LI_POINT_RAYS 6
+#define LI_POINT_VERTS (LI_POINT_RAYS * 8)
+#define LI_POINT_IDXS (LI_POINT_RAYS * 12)
 
-static void li_gen_cylinder(MopVertex *verts, uint32_t *idx, float radius,
-                            float start, float end, float cr, float cg,
-                            float cb) {
-  MopColor col = {cr, cg, cb, 1.0f};
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    float a = (float)i * 2.0f * LI_PI / LI_CYL_SEGS;
-    float ca = cosf(a), sa = sinf(a);
-    MopVec3 n = {ca, sa, 0};
-    verts[i] =
-        (MopVertex){li_on_axis(start, radius * ca, radius * sa), n, col, 0, 0};
-    verts[i + LI_CYL_SEGS] =
-        (MopVertex){li_on_axis(end, radius * ca, radius * sa), n, col, 0, 0};
-  }
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    int nx = (i + 1) % LI_CYL_SEGS;
-    int b = i * 6;
-    idx[b] = i;
-    idx[b + 1] = nx;
-    idx[b + 2] = i + LI_CYL_SEGS;
-    idx[b + 3] = nx;
-    idx[b + 4] = nx + LI_CYL_SEGS;
-    idx[b + 5] = i + LI_CYL_SEGS;
-  }
-}
-
-static void li_gen_cone(MopVertex *verts, uint32_t *idx, float base_r,
-                        float start, float end, float cr, float cg, float cb) {
-  MopColor col = {cr, cg, cb, 1.0f};
-  float h = end - start;
-  float slant = sqrtf(h * h + base_r * base_r);
-  float na = base_r / slant;
-  float nr = h / slant;
-
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    float a = (float)i * 2.0f * LI_PI / LI_CYL_SEGS;
-    float am = ((float)i + 0.5f) * 2.0f * LI_PI / LI_CYL_SEGS;
-    float ca = cosf(a), sa = sinf(a);
-    float cm = cosf(am), sm = sinf(am);
-    MopVec3 bn = {nr * ca, nr * sa, na};
-    MopVec3 tn = {nr * cm, nr * sm, na};
-    verts[i] =
-        (MopVertex){li_on_axis(start, base_r * ca, base_r * sa), bn, col, 0, 0};
-    verts[i + LI_CYL_SEGS] = (MopVertex){li_on_axis(end, 0, 0), tn, col, 0, 0};
-  }
-  int ii = 0;
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    int nx = (i + 1) % LI_CYL_SEGS;
-    idx[ii++] = i;
-    idx[ii++] = nx;
-    idx[ii++] = i + LI_CYL_SEGS;
-  }
-
-  /* Base cap */
-  int vi = 2 * LI_CYL_SEGS;
-  MopVec3 cap_n = {0, 0, -1};
-  verts[vi] = (MopVertex){li_on_axis(start, 0, 0), cap_n, col, 0, 0};
-  int ci = vi++;
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    float a = (float)i * 2.0f * LI_PI / LI_CYL_SEGS;
-    verts[vi + i] =
-        (MopVertex){li_on_axis(start, base_r * cosf(a), base_r * sinf(a)),
-                    cap_n, col, 0, 0};
-  }
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    int nx = (i + 1) % LI_CYL_SEGS;
-    idx[ii++] = ci;
-    idx[ii++] = vi + nx;
-    idx[ii++] = vi + i;
-  }
-}
-
-static void li_gen_arrow(MopVertex *verts, uint32_t *idx, float cr, float cg,
+static void li_gen_point(MopVertex *verts, uint32_t *idx, float cr, float cg,
                          float cb) {
-  li_gen_cylinder(verts, idx, LI_ARROW_RADIUS, LI_ARROW_START, LI_ARROW_END, cr,
-                  cg, cb);
-  li_gen_cone(verts + LI_CYL_VERTS, idx + LI_CYL_IDXS, LI_CONE_BASE,
-              LI_ARROW_END, LI_CONE_TIP, cr, cg, cb);
-  for (int i = LI_CYL_IDXS; i < LI_ARROW_IDXS; i++)
-    idx[i] += LI_CYL_VERTS;
+  MopColor col = {cr, cg, cb, 1.0f};
+  float inner = 0.04f;
+  float outer = 0.14f;
+  int vi = 0, ii = 0;
+
+  /* 6 rays: ±X, ±Y, ±Z */
+  static const float dirs[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                   {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+  /* Perpendicular vectors for each ray (to give the quad width) */
+  static const float perps[6][3] = {{0, 1, 0}, {0, 1, 0}, {1, 0, 0},
+                                    {1, 0, 0}, {1, 0, 0}, {1, 0, 0}};
+
+  for (int r = 0; r < LI_POINT_RAYS; r++) {
+    MopVec3 d = {dirs[r][0], dirs[r][1], dirs[r][2]};
+    MopVec3 p = {perps[r][0], perps[r][1], perps[r][2]};
+    MopVec3 a = mop_vec3_scale(d, inner);
+    MopVec3 b = mop_vec3_scale(d, outer);
+    li_line_quad(verts, idx, &vi, &ii, a, b, p, LI_HW, col);
+  }
 }
 
-/* Spot cone — open cone showing direction and angle */
-#define LI_SPOT_VERTS (LI_CYL_SEGS + 1) /* ring + apex */
-#define LI_SPOT_IDXS (LI_CYL_SEGS * 6)  /* sides + base ring */
+/* -------------------------------------------------------------------------
+ * Directional light icon — circle + 4 downward rays (like Maya/Blender).
+ * Oriented along +Z in local space; transform orients to light direction.
+ *
+ * Circle: LI_SEGS cross-lines
+ * Rays:   4 cross-lines
+ * Total:  (LI_SEGS + 4) × (8 verts + 12 indices)
+ * ------------------------------------------------------------------------- */
+#define LI_DIR_QUADS (LI_SEGS + 4)
+#define LI_DIR_VERTS (LI_DIR_QUADS * 8)
+#define LI_DIR_IDXS (LI_DIR_QUADS * 12)
 
-static void li_gen_spot_cone(MopVertex *verts, uint32_t *idx, float cr,
-                             float cg, float cb) {
-  MopColor col = {cr, cg, cb, 0.8f};
+static void li_gen_directional(MopVertex *verts, uint32_t *idx, float cr,
+                               float cg, float cb) {
+  MopColor col = {cr, cg, cb, 1.0f};
+  float radius = 0.10f;
+  float ray_start = 0.0f;
+  float ray_end = 0.30f;
+  int vi = 0, ii = 0;
 
-  /* Apex at origin, cone opens along +Z */
-  verts[0] = (MopVertex){{0, 0, 0}, {0, 0, -1}, col, 0, 0};
-
-  /* Base ring */
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    float a = (float)i * 2.0f * LI_PI / LI_CYL_SEGS;
-    float ca = cosf(a), sa = sinf(a);
-    MopVec3 n =
-        mop_vec3_normalize((MopVec3){ca, sa, -LI_SPOT_BASE / LI_SPOT_HEIGHT});
-    verts[1 + i] = (MopVertex){
-        {LI_SPOT_BASE * ca, LI_SPOT_BASE * sa, LI_SPOT_HEIGHT}, n, col, 0, 0};
+  /* Circle in XY plane at Z=0 */
+  MopVec3 perp_z = {0, 0, 1}; /* quads face Z */
+  for (int i = 0; i < LI_SEGS; i++) {
+    float a0 = (float)i * 2.0f * LI_PI / (float)LI_SEGS;
+    float a1 = (float)(i + 1) * 2.0f * LI_PI / (float)LI_SEGS;
+    MopVec3 p0 = {radius * cosf(a0), radius * sinf(a0), ray_start};
+    MopVec3 p1 = {radius * cosf(a1), radius * sinf(a1), ray_start};
+    /* Perpendicular to segment, in XY plane */
+    MopVec3 seg = mop_vec3_sub(p1, p0);
+    MopVec3 perp = mop_vec3_normalize(mop_vec3_cross(seg, perp_z));
+    li_line_quad(verts, idx, &vi, &ii, p0, p1, perp, LI_HW, col);
   }
 
-  /* Side triangles */
-  int ii = 0;
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    int nx = (i + 1) % LI_CYL_SEGS;
-    idx[ii++] = 0;
-    idx[ii++] = 1 + i;
-    idx[ii++] = 1 + nx;
+  /* 4 rays pointing along +Z (will be oriented by transform) */
+  MopVec3 perp_x = {1, 0, 0};
+  MopVec3 perp_y = {0, 1, 0};
+  static const float ray_angles[4] = {0, 1.5707963f, 3.1415927f, 4.7123890f};
+  for (int r = 0; r < 4; r++) {
+    float ca = cosf(ray_angles[r]) * radius;
+    float sa = sinf(ray_angles[r]) * radius;
+    MopVec3 a = {ca, sa, ray_start};
+    MopVec3 b = {ca, sa, ray_end};
+    /* Choose perp based on ray angle */
+    MopVec3 perp = (r == 0 || r == 2) ? perp_y : perp_x;
+    li_line_quad(verts, idx, &vi, &ii, a, b, perp, LI_HW, col);
   }
-  /* Back face (so cone is visible from behind too) */
-  for (int i = 0; i < LI_CYL_SEGS; i++) {
-    int nx = (i + 1) % LI_CYL_SEGS;
-    idx[ii++] = 0;
-    idx[ii++] = 1 + nx;
-    idx[ii++] = 1 + i;
+}
+
+/* -------------------------------------------------------------------------
+ * Spot light icon — wireframe cone outline (apex at origin, opens along +Z).
+ * 4 edge lines from apex to base ring + circle at base.
+ *
+ * Circle: LI_SEGS cross-lines
+ * Edges:  4 cross-lines
+ * Total:  (LI_SEGS + 4) × (8 verts + 12 indices)
+ * ------------------------------------------------------------------------- */
+#define LI_SPOT_QUADS (LI_SEGS + 4)
+#define LI_SPOT_VERTS (LI_SPOT_QUADS * 8)
+#define LI_SPOT_IDXS (LI_SPOT_QUADS * 12)
+
+static void li_gen_spot(MopVertex *verts, uint32_t *idx, float cr, float cg,
+                        float cb) {
+  MopColor col = {cr, cg, cb, 1.0f};
+  float base_r = 0.15f;
+  float height = 0.30f;
+  int vi = 0, ii = 0;
+
+  /* Base circle at Z=height */
+  MopVec3 perp_z = {0, 0, 1};
+  for (int i = 0; i < LI_SEGS; i++) {
+    float a0 = (float)i * 2.0f * LI_PI / (float)LI_SEGS;
+    float a1 = (float)(i + 1) * 2.0f * LI_PI / (float)LI_SEGS;
+    MopVec3 p0 = {base_r * cosf(a0), base_r * sinf(a0), height};
+    MopVec3 p1 = {base_r * cosf(a1), base_r * sinf(a1), height};
+    MopVec3 seg = mop_vec3_sub(p1, p0);
+    MopVec3 perp = mop_vec3_normalize(mop_vec3_cross(seg, perp_z));
+    li_line_quad(verts, idx, &vi, &ii, p0, p1, perp, LI_HW, col);
+  }
+
+  /* 4 edge lines from apex (origin) to base ring */
+  MopVec3 apex = {0, 0, 0};
+  MopVec3 perp_x = {1, 0, 0};
+  MopVec3 perp_y = {0, 1, 0};
+  static const float edge_angles[4] = {0, 1.5707963f, 3.1415927f, 4.7123890f};
+  for (int e = 0; e < 4; e++) {
+    float ca = cosf(edge_angles[e]) * base_r;
+    float sa = sinf(edge_angles[e]) * base_r;
+    MopVec3 base_pt = {ca, sa, height};
+    MopVec3 perp = (e == 0 || e == 2) ? perp_y : perp_x;
+    li_line_quad(verts, idx, &vi, &ii, apex, base_pt, perp, LI_HW, col);
   }
 }
 
@@ -289,9 +317,9 @@ static MopMat4 li_compute_transform(const MopViewport *vp,
   /* Screen-space scale: same formula as gizmo handles */
   MopVec3 to_indicator = mop_vec3_sub(position, vp->cam_eye);
   float dist = mop_vec3_length(to_indicator);
-  float s = dist * 0.12f; /* slightly smaller than gizmo (0.18) */
-  if (s < 0.03f)
-    s = 0.03f;
+  float s = dist * 0.16f; /* visible from distance, smaller than gizmo (0.18) */
+  if (s < 0.05f)
+    s = 0.05f;
 
   MopMat4 sc = mop_mat4_scale((MopVec3){s, s, s});
   MopMat4 t = mop_mat4_translate(position);
@@ -326,57 +354,44 @@ static void li_create(MopViewport *vp, uint32_t idx) {
   const MopLight *light = &vp->lights[idx];
   uint32_t obj_id = MOP_LIGHT_ID_BASE + idx;
 
-  /* Determine color from light — clamp for visibility */
-  float cr = light->color.r * light->intensity;
-  float cg = light->color.g * light->intensity;
-  float cb = light->color.b * light->intensity;
-  float mx = cr > cg ? cr : cg;
-  if (cb > mx)
-    mx = cb;
-  if (mx > 0.0f && mx < 0.5f) {
-    float boost = 0.5f / mx;
-    cr *= boost;
-    cg *= boost;
-    cb *= boost;
-  }
-  if (cr > 1.0f)
-    cr = 1.0f;
-  if (cg > 1.0f)
-    cg = 1.0f;
-  if (cb > 1.0f)
-    cb = 1.0f;
+  /* Use the theme accent color for all light indicators — thin, bright,
+   * contrasting UI chrome that stands out against the dark background. */
+  MopColor accent = vp->theme.accent;
+  float cr = accent.r;
+  float cg = accent.g;
+  float cb = accent.b;
 
   MopMesh *mesh = NULL;
 
   switch (light->type) {
   case MOP_LIGHT_POINT: {
-    MopVertex verts[LI_OCTA_VERTS];
-    uint32_t indices[LI_OCTA_IDXS];
-    li_gen_octahedron(verts, indices, LI_OCTA_RADIUS, cr, cg, cb);
+    MopVertex verts[LI_POINT_VERTS];
+    uint32_t indices[LI_POINT_IDXS];
+    li_gen_point(verts, indices, cr, cg, cb);
     mesh =
         mop_viewport_add_mesh(vp, &(MopMeshDesc){.vertices = verts,
-                                                 .vertex_count = LI_OCTA_VERTS,
+                                                 .vertex_count = LI_POINT_VERTS,
                                                  .indices = indices,
-                                                 .index_count = LI_OCTA_IDXS,
+                                                 .index_count = LI_POINT_IDXS,
                                                  .object_id = obj_id});
     break;
   }
   case MOP_LIGHT_DIRECTIONAL: {
-    MopVertex verts[LI_ARROW_VERTS];
-    uint32_t indices[LI_ARROW_IDXS];
-    li_gen_arrow(verts, indices, cr, cg, cb);
+    MopVertex verts[LI_DIR_VERTS];
+    uint32_t indices[LI_DIR_IDXS];
+    li_gen_directional(verts, indices, cr, cg, cb);
     mesh =
         mop_viewport_add_mesh(vp, &(MopMeshDesc){.vertices = verts,
-                                                 .vertex_count = LI_ARROW_VERTS,
+                                                 .vertex_count = LI_DIR_VERTS,
                                                  .indices = indices,
-                                                 .index_count = LI_ARROW_IDXS,
+                                                 .index_count = LI_DIR_IDXS,
                                                  .object_id = obj_id});
     break;
   }
   case MOP_LIGHT_SPOT: {
     MopVertex verts[LI_SPOT_VERTS];
     uint32_t indices[LI_SPOT_IDXS];
-    li_gen_spot_cone(verts, indices, cr, cg, cb);
+    li_gen_spot(verts, indices, cr, cg, cb);
     mesh =
         mop_viewport_add_mesh(vp, &(MopMeshDesc){.vertices = verts,
                                                  .vertex_count = LI_SPOT_VERTS,

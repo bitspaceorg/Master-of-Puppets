@@ -14,7 +14,7 @@
 #define MOP_SW_RASTERIZER_MT_H
 
 #include "rasterizer.h"
-#include <mop/light.h>
+#include <mop/core/light.h>
 #include <mop/types.h>
 
 #define MOP_TILE_SIZE 32
@@ -31,6 +31,7 @@ typedef struct MopSwPreparedTri {
   uint32_t object_id;
   bool wireframe;
   bool depth_test;
+  bool depth_write;
   bool cull_back;
   MopVec3 light_dir;
   float ambient;
@@ -42,6 +43,11 @@ typedef struct MopSwPreparedTri {
   const MopLight *lights;
   uint32_t light_count;
   MopVec3 cam_eye;
+
+  float metallic;
+  float roughness;
+  float line_width;
+  float depth_bias;
 } MopSwPreparedTri;
 
 /* -------------------------------------------------------------------------

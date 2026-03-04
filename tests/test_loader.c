@@ -26,13 +26,13 @@ static void test_cube_aabb(void) {
   MopObjMesh mesh;
   bool ok = mop_obj_load("tests/fixtures/cube.obj", &mesh);
   TEST_ASSERT(ok);
-  /* After normalization the cube should fit within ~[-1,1] */
-  TEST_ASSERT(mesh.bbox_min.x >= -1.1f);
-  TEST_ASSERT(mesh.bbox_max.x <= 1.1f);
-  TEST_ASSERT(mesh.bbox_min.y >= -1.1f);
-  TEST_ASSERT(mesh.bbox_max.y <= 1.1f);
-  TEST_ASSERT(mesh.bbox_min.z >= -1.1f);
-  TEST_ASSERT(mesh.bbox_max.z <= 1.1f);
+  /* Raw vertices: unit cube at [-0.5, 0.5] */
+  TEST_ASSERT_FLOAT_EQ(mesh.bbox_min.x, -0.5f);
+  TEST_ASSERT_FLOAT_EQ(mesh.bbox_max.x, 0.5f);
+  TEST_ASSERT_FLOAT_EQ(mesh.bbox_min.y, -0.5f);
+  TEST_ASSERT_FLOAT_EQ(mesh.bbox_max.y, 0.5f);
+  TEST_ASSERT_FLOAT_EQ(mesh.bbox_min.z, -0.5f);
+  TEST_ASSERT_FLOAT_EQ(mesh.bbox_max.z, 0.5f);
   mop_obj_free(&mesh);
   TEST_END();
 }

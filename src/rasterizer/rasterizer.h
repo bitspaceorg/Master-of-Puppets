@@ -12,7 +12,7 @@
 #ifndef MOP_SW_RASTERIZER_H
 #define MOP_SW_RASTERIZER_H
 
-#include <mop/light.h>
+#include <mop/core/light.h>
 #include <mop/types.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -50,9 +50,11 @@ void mop_sw_framebuffer_clear(MopSwFramebuffer *fb, MopColor clear_color);
 typedef struct MopSwClipVertex {
   MopVec4 position; /* clip-space (before perspective divide) */
   MopVec3 normal;   /* world-space normal */
-  MopColor color;   /* vertex color */
-  float u, v;       /* texture coordinates */
-  MopVec3 tangent;  /* world-space tangent (for normal mapping) */
+  MopVec3
+      world_pos;   /* world-space position (for point/spot light attenuation) */
+  MopColor color;  /* vertex color */
+  float u, v;      /* texture coordinates */
+  MopVec3 tangent; /* world-space tangent (for normal mapping) */
 } MopSwClipVertex;
 
 /* -------------------------------------------------------------------------
@@ -89,10 +91,13 @@ void mop_sw_rasterize_triangle(const MopSwClipVertex vertices[3],
 
 typedef struct MopSwScreenVertex {
   float sx, sy, sz; /* screen-space position */
+  float inv_w;      /* 1/w for perspective-correct interpolation */
   MopVec3 normal;   /* world-space normal */
-  MopColor color;   /* vertex color */
-  float u, v;       /* texture coordinates */
-  MopVec3 tangent;  /* world-space tangent (for normal mapping) */
+  MopVec3
+      world_pos;   /* world-space position (for point/spot light attenuation) */
+  MopColor color;  /* vertex color */
+  float u, v;      /* texture coordinates */
+  MopVec3 tangent; /* world-space tangent (for normal mapping) */
 } MopSwScreenVertex;
 
 /* -------------------------------------------------------------------------
@@ -112,13 +117,11 @@ void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
  * If lights is non-NULL and light_count > 0, accumulates contribution
  * from all active lights (directional, point, spot).
  * If lights is NULL, falls back to single-light (light_dir + ambient). */
-void mop_sw_rasterize_triangle_smooth_ml(const MopSwScreenVertex verts[3],
-                                         uint32_t object_id, bool depth_test,
-                                         MopVec3 light_dir, float ambient,
-                                         float opacity, MopBlendMode blend_mode,
-                                         const MopLight *lights,
-                                         uint32_t light_count, MopVec3 cam_eye,
-                                         MopSwFramebuffer *fb);
+void mop_sw_rasterize_triangle_smooth_ml(
+    const MopSwScreenVertex verts[3], uint32_t object_id, bool depth_test,
+    MopVec3 light_dir, float ambient, float opacity, MopBlendMode blend_mode,
+    const MopLight *lights, uint32_t light_count, MopVec3 cam_eye,
+    float metallic, float roughness, MopSwFramebuffer *fb);
 
 /* Smooth-shaded triangle rasterization with normal mapping.
  * If normal_map is non-NULL, tangent-space normals are sampled from the
@@ -142,7 +145,7 @@ void mop_sw_rasterize_triangle_full(
     bool depth_test, bool cull_back, MopVec3 light_dir, float ambient,
     float opacity, bool smooth_shading, MopBlendMode blend_mode,
     const MopLight *lights, uint32_t light_count, MopVec3 cam_eye,
-    MopSwFramebuffer *fb);
+    float metallic, float roughness, MopSwFramebuffer *fb);
 
 /* -------------------------------------------------------------------------
  * Sutherland-Hodgman clipping
@@ -165,5 +168,43 @@ int mop_sw_clip_polygon(const MopSwClipVertex *in_vertices, int n,
 void mop_sw_draw_line(MopSwFramebuffer *fb, int x0, int y0, float z0, int x1,
                       int y1, float z1, uint8_t r, uint8_t g, uint8_t b,
                       uint32_t object_id, bool depth_test);
+
+/* Anti-aliased line drawing (Xiaolin Wu + thick line support) */
+void mop_sw_draw_line_aa(MopSwFramebuffer *fb, float x0, float y0, float z0,
+                         float x1, float y1, float z1, uint8_t r, uint8_t g,
+                         uint8_t b, uint32_t object_id, bool depth_test,
+                         float thickness);
+
+/* -------------------------------------------------------------------------
+ * Shadow map state
+ *
+ * Set before the main render pass so that the lighting functions can
+ * automatically test directional-light shadows.  The shadow map is a
+ * depth buffer rendered from the light's orthographic projection.
+ *
+ * Call mop_sw_shadow_set() before pass_scene_opaque() and
+ * mop_sw_shadow_clear() after the frame is done.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_shadow_set(const float *depth, int w, int h, MopMat4 light_vp);
+void mop_sw_shadow_clear(void);
+
+/* Render a depth-only pass for shadow mapping.
+ * Transforms vertices by light_mvp and writes only to the depth buffer.
+ * No color, no object_id, no shading.  Used by the viewport to build
+ * the shadow map before the main render. */
+void mop_sw_shadow_render_mesh(const MopVertex *vertices, uint32_t vertex_count,
+                               const uint32_t *indices, uint32_t index_count,
+                               MopMat4 model, MopMat4 light_vp,
+                               MopSwFramebuffer *shadow_fb);
+
+/* -------------------------------------------------------------------------
+ * FXAA post-process pass
+ *
+ * Applies Fast Approximate Anti-Aliasing to the color buffer in-place.
+ * Call after all triangles have been rendered.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_fxaa(MopSwFramebuffer *fb);
 
 #endif /* MOP_SW_RASTERIZER_H */

@@ -7,7 +7,7 @@
 
 #include "rhi/rhi.h"
 #include "test_harness.h"
-#include <mop/backend.h>
+#include <mop/render/backend.h>
 #include <mop/types.h>
 
 static void test_cpu_always_available(void) {

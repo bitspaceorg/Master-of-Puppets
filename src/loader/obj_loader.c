@@ -14,8 +14,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <mop/loader.h>
-#include <mop/log.h>
+#include <mop/loader/loader.h>
+#include <mop/util/log.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -269,40 +269,8 @@ bool mop_obj_load(const char *path, MopObjMesh *out) {
       bmax.z = p.z;
   }
 
-  /* Center at origin, scale to fit ~2 unit cube */
-  MopVec3 center = {(bmin.x + bmax.x) * 0.5f, (bmin.y + bmax.y) * 0.5f,
-                    (bmin.z + bmax.z) * 0.5f};
-  float extent = bmax.x - bmin.x;
-  if (bmax.y - bmin.y > extent)
-    extent = bmax.y - bmin.y;
-  if (bmax.z - bmin.z > extent)
-    extent = bmax.z - bmin.z;
-  float norm_scale = (extent > 1e-6f) ? 2.0f / extent : 1.0f;
-
-  for (uint32_t i = 0; i < vert_count; i++) {
-    verts[i].position.x = (verts[i].position.x - center.x) * norm_scale;
-    verts[i].position.y = (verts[i].position.y - center.y) * norm_scale;
-    verts[i].position.z = (verts[i].position.z - center.z) * norm_scale;
-  }
-
-  /* Recompute AABB after normalization */
-  bmin = verts[0].position;
-  bmax = bmin;
-  for (uint32_t i = 1; i < vert_count; i++) {
-    MopVec3 p = verts[i].position;
-    if (p.x < bmin.x)
-      bmin.x = p.x;
-    if (p.x > bmax.x)
-      bmax.x = p.x;
-    if (p.y < bmin.y)
-      bmin.y = p.y;
-    if (p.y > bmax.y)
-      bmax.y = p.y;
-    if (p.z < bmin.z)
-      bmin.z = p.z;
-    if (p.z > bmax.z)
-      bmax.z = p.z;
-  }
+  /* Return raw OBJ vertices — no centering or rescaling.
+   * Callers that need normalized coordinates can transform after load. */
 
   /* Compute per-vertex tangents from UV derivatives (for normal mapping).
    * For each triangle, compute the tangent vector from the UV edge

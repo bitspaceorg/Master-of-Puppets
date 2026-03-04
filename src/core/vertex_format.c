@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <mop/vertex_format.h>
+#include <mop/core/vertex_format.h>
 #include <stddef.h>
 
 uint32_t mop_attrib_format_size(MopAttribFormat fmt) {
