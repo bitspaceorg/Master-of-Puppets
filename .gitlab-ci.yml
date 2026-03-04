@@ -1,6 +1,7 @@
 stages:
   - build
   - test
+  - conformance
 
 variables:
   GIT_DEPTH: 1
@@ -45,3 +46,41 @@ test:macos-clang:
   <<: *test_template
   tags:
     - macos
+
+# --- Conformance ---
+.conformance_template: &conformance_template
+  stage: conformance
+  image: gcc:latest
+  before_script:
+    - apt-get update && apt-get install -y liblua5.4-dev
+    - make lib RELEASE=1
+    - make conformance RELEASE=1
+  artifacts:
+    when: always
+    paths:
+      - conformance/results/
+
+conformance:tier1:
+  <<: *conformance_template
+  timeout: 5 minutes
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - ./build/conformance_runner --tier=1 --width=640 --height=480 --output=conformance/results
+
+conformance:tier2:
+  <<: *conformance_template
+  timeout: 15 minutes
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+  script:
+    - ./build/conformance_runner --tier=2 --width=1920 --height=1080 --output=conformance/results
+
+conformance:tier3:
+  <<: *conformance_template
+  timeout: 60 minutes
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - ./build/conformance_runner --tier=3 --width=1920 --height=1080 --output=conformance/results --golden=conformance/baselines
