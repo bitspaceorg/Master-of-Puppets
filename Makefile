@@ -66,6 +66,7 @@ CORE_SRCS := \
   src/core/overlay_builtin.c \
   src/core/subsystem.c \
   src/core/camera_object.c \
+  src/core/environment.c \
   src/rasterizer/rasterizer.c \
   src/rasterizer/rasterizer_mt.c \
   src/interact/gizmo.c \

@@ -14,53 +14,47 @@
 #include <mop/core/theme.h>
 
 MopTheme mop_theme_default(void) {
-  /* Neutral gray background (linear space) — standard viewport look */
-  MopColor bg = {0.028f, 0.028f, 0.032f, 1.0f};
+  /* Brighter mid-gray background (linear space) — fresh, airy viewport */
+  MopColor bg = {0.10f, 0.10f, 0.11f, 1.0f};
 
-  /* #FFBB00 amber accent — all UI chrome uses this */
-  MopColor accent = {1.00f, 0.733f, 0.0f, 1.0f};
+  /* Bright white accent — high contrast selection on mid-gray bg */
+  MopColor accent = {1.0f, 1.0f, 1.0f, 1.0f};
 
-  /* Derived accent shades */
-  MopColor accent_dim = {accent.r * 0.15f, accent.g * 0.15f, accent.b * 0.15f,
-                         1.0f};
-  MopColor accent_mid = {accent.r * 0.25f, accent.g * 0.25f, accent.b * 0.25f,
-                         1.0f};
-  MopColor accent_bright = {fminf(accent.r * 1.3f, 1.0f),
-                            fminf(accent.g * 1.3f, 1.0f),
-                            fminf(accent.b * 1.3f, 1.0f), 1.0f};
+  /* Derived mid shade (for face selection fill) */
+  MopColor accent_mid = {0.35f, 0.35f, 0.35f, 1.0f};
 
   return (MopTheme){
       .accent = accent,
 
-      /* Background: neutral gray with subtle gradient */
-      .bg_top = {bg.r + 0.006f, bg.g + 0.006f, bg.b + 0.006f, 1.0f},
+      /* Background: brighter gray with subtle gradient */
+      .bg_top = {bg.r + 0.012f, bg.g + 0.012f, bg.b + 0.012f, 1.0f},
       .bg_bottom = bg,
 
-      /* Grid: derived from accent */
-      .grid_minor = accent_dim,
-      .grid_major = accent_mid,
-      .grid_axis_x = accent,
-      .grid_axis_z = accent,
+      /* Grid: visible gray lines on brighter bg, saturated center axes */
+      .grid_minor = {0.18f, 0.18f, 0.18f, 1.0f},
+      .grid_major = {0.28f, 0.28f, 0.28f, 1.0f},
+      .grid_axis_x = {0.93f, 0.27f, 0.27f, 1.0f},
+      .grid_axis_z = {0.27f, 0.72f, 0.27f, 1.0f},
       .grid_line_width_minor = 1.0f,
       .grid_line_width_major = 1.0f,
       .grid_line_width_axis = 1.5f,
 
-      /* Gizmo: ALL handles use accent color */
-      .gizmo_x = accent,
-      .gizmo_y = accent,
-      .gizmo_z = accent,
-      .gizmo_center = accent,
-      .gizmo_hover = accent_bright,
-      .gizmo_line_width = 1.5f,
+      /* Gizmo: bright saturated RGB per axis */
+      .gizmo_x = {0.93f, 0.27f, 0.27f, 1.0f},
+      .gizmo_y = {0.27f, 0.72f, 0.27f, 1.0f},
+      .gizmo_z = {0.30f, 0.45f, 0.93f, 1.0f},
+      .gizmo_center = {0.95f, 0.95f, 0.95f, 1.0f},
+      .gizmo_hover = {1.0f, 1.0f, 0.4f, 1.0f},
+      .gizmo_line_width = 2.5f,
       .gizmo_opacity = 1.0f,
       .gizmo_target_opacity = 0.45f,
 
-      /* Wireframe */
+      /* Wireframe: bright white */
       .wireframe_color = accent,
-      .wireframe_opacity = 0.18f,
+      .wireframe_opacity = 0.22f,
       .wireframe_line_width = 1.0f,
 
-      /* Selection: uses accent color */
+      /* Selection: bright white — high contrast */
       .selection_outline = accent,
       .selection_outline_width = 2.5f,
       .vertex_select_color = accent,
@@ -71,24 +65,27 @@ MopTheme mop_theme_default(void) {
       .face_select_opacity = 0.35f,
 
       /* Object outline: only on selected objects */
-      .outline_opacity_selected = 0.85f,
+      .outline_opacity_selected = 0.90f,
       .outline_opacity_unselected = 0.0f,
 
-      /* Normals */
+      /* Normals: bright white */
       .normal_color = accent,
       .normal_line_width = 1.0f,
 
-      /* Bounds */
+      /* Bounds: bright white */
       .bounds_color = accent,
       .bounds_line_width = 1.0f,
 
-      /* Axis indicator */
-      .axis_x = accent,
-      .axis_y = accent,
-      .axis_z = accent,
+      /* Axis indicator: bright saturated RGB */
+      .axis_x = {1.0f, 0.2f, 0.2f, 1.0f},
+      .axis_y = {0.2f, 0.85f, 0.2f, 1.0f},
+      .axis_z = {0.25f, 0.4f, 1.0f, 1.0f},
+      .axis_neg_x = {0.55f, 0.20f, 0.20f, 1.0f},
+      .axis_neg_y = {0.20f, 0.42f, 0.20f, 1.0f},
+      .axis_neg_z = {0.22f, 0.28f, 0.55f, 1.0f},
 
-      /* Camera frustum */
-      .camera_frustum_color = accent,
+      /* Camera frustum: bright white */
+      .camera_frustum_color = {0.90f, 0.90f, 0.90f, 1.0f},
       .camera_frustum_line_width = 1.0f,
 
       /* Depth bias */

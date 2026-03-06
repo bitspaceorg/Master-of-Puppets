@@ -30,6 +30,7 @@ typedef struct MopSwFramebuffer {
   int width;
   int height;
   uint8_t *color;      /* RGBA8, size = width * height * 4 */
+  float *color_hdr;    /* RGBA float — HDR accumulation     */
   float *depth;        /* float,  size = width * height     */
   uint32_t *object_id; /* uint32, size = width * height     */
 } MopSwFramebuffer;
@@ -189,6 +190,20 @@ void mop_sw_draw_line_aa(MopSwFramebuffer *fb, float x0, float y0, float z0,
 void mop_sw_shadow_set(const float *depth, int w, int h, MopMat4 light_vp);
 void mop_sw_shadow_clear(void);
 
+/* -------------------------------------------------------------------------
+ * IBL (Image-Based Lighting) state
+ *
+ * Set before the main render pass so that the lighting functions can
+ * use precomputed irradiance and prefiltered environment maps for
+ * physically-based ambient/specular lighting.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_ibl_set(const float *irradiance, int irr_w, int irr_h,
+                    const float *prefiltered, int pf_w, int pf_h, int pf_levels,
+                    const float *brdf_lut, int brdf_size, float rotation,
+                    float intensity);
+void mop_sw_ibl_clear(void);
+
 /* Render a depth-only pass for shadow mapping.
  * Transforms vertices by light_mvp and writes only to the depth buffer.
  * No color, no object_id, no shading.  Used by the viewport to build
@@ -206,5 +221,15 @@ void mop_sw_shadow_render_mesh(const MopVertex *vertices, uint32_t vertex_count,
  * ------------------------------------------------------------------------- */
 
 void mop_sw_fxaa(MopSwFramebuffer *fb);
+
+/* -------------------------------------------------------------------------
+ * HDR → LDR resolve (ACES Filmic tonemapping)
+ *
+ * Converts the HDR float accumulation buffer (color_hdr) to the uint8
+ * color buffer with ACES Filmic tonemapping and exposure control.
+ * Call after all scene geometry is rendered, before overlays / FXAA.
+ * ------------------------------------------------------------------------- */
+
+void mop_sw_hdr_resolve(MopSwFramebuffer *fb, float exposure);
 
 #endif /* MOP_SW_RASTERIZER_H */

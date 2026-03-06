@@ -44,7 +44,9 @@ struct MopRhiFramebuffer {
 struct MopRhiTexture {
   int width;
   int height;
-  uint8_t *data; /* RGBA8, row-major */
+  uint8_t *data;   /* RGBA8, row-major (NULL for HDR-only textures) */
+  float *hdr_data; /* RGBA float, row-major (NULL for LDR textures) */
+  bool is_hdr;
 };
 
 /* -------------------------------------------------------------------------
@@ -721,11 +723,34 @@ static MopRhiTexture *cpu_texture_create(MopRhiDevice *device, int width,
   return tex;
 }
 
+static MopRhiTexture *cpu_texture_create_hdr(MopRhiDevice *device, int width,
+                                             int height,
+                                             const float *rgba_float_data) {
+  (void)device;
+  MopRhiTexture *tex = calloc(1, sizeof(MopRhiTexture));
+  if (!tex)
+    return NULL;
+
+  size_t float_count = (size_t)width * (size_t)height * 4;
+  tex->hdr_data = malloc(float_count * sizeof(float));
+  if (!tex->hdr_data) {
+    free(tex);
+    return NULL;
+  }
+
+  memcpy(tex->hdr_data, rgba_float_data, float_count * sizeof(float));
+  tex->width = width;
+  tex->height = height;
+  tex->is_hdr = true;
+  return tex;
+}
+
 static void cpu_texture_destroy(MopRhiDevice *device, MopRhiTexture *texture) {
   (void)device;
   if (!texture)
     return;
   free(texture->data);
+  free(texture->hdr_data);
   free(texture);
 }
 
@@ -740,6 +765,37 @@ static const void *cpu_buffer_read(MopRhiBuffer *buffer) {
 static float cpu_frame_gpu_time_ms(MopRhiDevice *device) {
   (void)device;
   return 0.0f;
+}
+
+static void cpu_set_exposure(MopRhiDevice *device, float exposure) {
+  (void)device;
+  (void)exposure;
+  /* CPU backend: exposure handled by mop_sw_hdr_resolve() in viewport core */
+}
+
+static void cpu_set_ibl_textures(MopRhiDevice *device,
+                                 MopRhiTexture *irradiance,
+                                 MopRhiTexture *prefiltered,
+                                 MopRhiTexture *brdf_lut) {
+  (void)device;
+  (void)irradiance;
+  (void)prefiltered;
+  (void)brdf_lut;
+  /* CPU backend: IBL handled via mop_sw_ibl_set() in viewport core */
+}
+
+static void cpu_draw_skybox(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                            MopRhiTexture *env_map, const float *inv_vp,
+                            const float *cam_pos, float rotation,
+                            float intensity) {
+  (void)dev;
+  (void)fb;
+  (void)env_map;
+  (void)inv_vp;
+  (void)cam_pos;
+  (void)rotation;
+  (void)intensity;
+  /* CPU backend: skybox handled in viewport core pass_background */
 }
 
 /* -------------------------------------------------------------------------
@@ -764,11 +820,15 @@ static const MopRhiBackend CPU_BACKEND = {
     .framebuffer_read_object_id = cpu_framebuffer_read_object_id,
     .framebuffer_read_depth = cpu_framebuffer_read_depth,
     .texture_create = cpu_texture_create,
+    .texture_create_hdr = cpu_texture_create_hdr,
     .texture_destroy = cpu_texture_destroy,
     .draw_instanced = cpu_draw_instanced,
     .buffer_update = cpu_buffer_update,
     .buffer_read = cpu_buffer_read,
     .frame_gpu_time_ms = cpu_frame_gpu_time_ms,
+    .set_exposure = cpu_set_exposure,
+    .set_ibl_textures = cpu_set_ibl_textures,
+    .draw_skybox = cpu_draw_skybox,
 };
 
 const MopRhiBackend *mop_rhi_backend_cpu(void) { return &CPU_BACKEND; }

@@ -44,6 +44,10 @@ bool mop_sw_framebuffer_alloc(MopSwFramebuffer *fb, int width, int height) {
   if (!fb->color)
     goto fail_color;
 
+  fb->color_hdr = calloc(pixel_count * 4, sizeof(float));
+  if (!fb->color_hdr)
+    goto fail_hdr;
+
   fb->depth = malloc(pixel_count * sizeof(float));
   if (!fb->depth)
     goto fail_depth;
@@ -58,6 +62,9 @@ fail_id:
   free(fb->depth);
   fb->depth = NULL;
 fail_depth:
+  free(fb->color_hdr);
+  fb->color_hdr = NULL;
+fail_hdr:
   free(fb->color);
   fb->color = NULL;
 fail_color:
@@ -68,9 +75,11 @@ fail_color:
 
 void mop_sw_framebuffer_free(MopSwFramebuffer *fb) {
   free(fb->color);
+  free(fb->color_hdr);
   free(fb->depth);
   free(fb->object_id);
   fb->color = NULL;
+  fb->color_hdr = NULL;
   fb->depth = NULL;
   fb->object_id = NULL;
   fb->width = 0;
@@ -90,6 +99,10 @@ void mop_sw_framebuffer_clear(MopSwFramebuffer *fb, MopColor clear_color) {
     fb->color[i * 4 + 1] = g;
     fb->color[i * 4 + 2] = b;
     fb->color[i * 4 + 3] = a;
+    fb->color_hdr[i * 4 + 0] = clear_color.r;
+    fb->color_hdr[i * 4 + 1] = clear_color.g;
+    fb->color_hdr[i * 4 + 2] = clear_color.b;
+    fb->color_hdr[i * 4 + 3] = clear_color.a;
     fb->depth[i] = 1.0f;
     fb->object_id[i] = 0;
   }
@@ -116,6 +129,150 @@ void mop_sw_shadow_clear(void) {
   s_shadow_depth = NULL;
   s_shadow_w = 0;
   s_shadow_h = 0;
+}
+
+/* ---- IBL (Image-Based Lighting) state ---- */
+
+typedef struct MopSwIBLState {
+  const float *irradiance; /* RGBA float, equirectangular */
+  int irr_w, irr_h;
+  const float *prefiltered; /* RGBA float, mip levels concatenated */
+  int pf_w, pf_h, pf_levels;
+  const float *brdf_lut; /* RGBA float, NdotV x roughness */
+  int brdf_size;
+  float rotation;  /* environment Y-axis rotation */
+  float intensity; /* brightness multiplier */
+} MopSwIBLState;
+
+static MopSwIBLState s_ibl = {0};
+
+void mop_sw_ibl_set(const float *irradiance, int irr_w, int irr_h,
+                    const float *prefiltered, int pf_w, int pf_h, int pf_levels,
+                    const float *brdf_lut, int brdf_size, float rotation,
+                    float intensity) {
+  s_ibl.irradiance = irradiance;
+  s_ibl.irr_w = irr_w;
+  s_ibl.irr_h = irr_h;
+  s_ibl.prefiltered = prefiltered;
+  s_ibl.pf_w = pf_w;
+  s_ibl.pf_h = pf_h;
+  s_ibl.pf_levels = pf_levels;
+  s_ibl.brdf_lut = brdf_lut;
+  s_ibl.brdf_size = brdf_size;
+  s_ibl.rotation = rotation;
+  s_ibl.intensity = intensity;
+}
+
+void mop_sw_ibl_clear(void) { memset(&s_ibl, 0, sizeof(s_ibl)); }
+
+/* Sample equirectangular map bilinearly */
+static void ibl_sample(const float *data, int w, int h, float u, float v,
+                       float out[3]) {
+  u = u - floorf(u);
+  v = v - floorf(v);
+  float fx = u * (float)(w - 1);
+  float fy = v * (float)(h - 1);
+  int x0 = (int)fx, y0 = (int)fy;
+  int x1 = (x0 + 1) % w;
+  int y1 = y0 + 1 < h ? y0 + 1 : h - 1;
+  float sx = fx - (float)x0, sy = fy - (float)y0;
+  const float *p00 = &data[((size_t)y0 * w + x0) * 4];
+  const float *p10 = &data[((size_t)y0 * w + x1) * 4];
+  const float *p01 = &data[((size_t)y1 * w + x0) * 4];
+  const float *p11 = &data[((size_t)y1 * w + x1) * 4];
+  for (int c = 0; c < 3; c++) {
+    float top = p00[c] * (1.0f - sx) + p10[c] * sx;
+    float bot = p01[c] * (1.0f - sx) + p11[c] * sx;
+    out[c] = top * (1.0f - sy) + bot * sy;
+  }
+}
+
+/* Direction → equirectangular UV */
+static void dir_to_uv(float dx, float dy, float dz, float rot, float *u,
+                      float *v) {
+  float phi = atan2f(dz, dx) + rot;
+  float cdy = dy < -1.0f ? -1.0f : (dy > 1.0f ? 1.0f : dy);
+  *u = phi / (2.0f * 3.14159265f) + 0.5f;
+  *v = asinf(cdy) / 3.14159265f + 0.5f;
+}
+
+/* Sample irradiance at world-space normal */
+static void ibl_irradiance(MopVec3 n, float out[3]) {
+  out[0] = out[1] = out[2] = 0.0f;
+  if (!s_ibl.irradiance)
+    return;
+  float len = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+  if (len < 1e-6f)
+    return;
+  float u, v;
+  dir_to_uv(n.x / len, n.y / len, n.z / len, s_ibl.rotation, &u, &v);
+  ibl_sample(s_ibl.irradiance, s_ibl.irr_w, s_ibl.irr_h, u, v, out);
+  out[0] *= s_ibl.intensity;
+  out[1] *= s_ibl.intensity;
+  out[2] *= s_ibl.intensity;
+}
+
+/* Sample prefiltered env at reflection direction + roughness */
+static void ibl_prefiltered(MopVec3 refl, float roughness, float out[3]) {
+  out[0] = out[1] = out[2] = 0.0f;
+  if (!s_ibl.prefiltered)
+    return;
+  float len = sqrtf(refl.x * refl.x + refl.y * refl.y + refl.z * refl.z);
+  if (len < 1e-6f)
+    return;
+
+  int level = (int)(roughness * (float)(s_ibl.pf_levels - 1));
+  if (level >= s_ibl.pf_levels)
+    level = s_ibl.pf_levels - 1;
+
+  size_t offset = 0;
+  for (int l = 0; l < level; l++) {
+    int lw = s_ibl.pf_w >> l;
+    if (lw < 1)
+      lw = 1;
+    int lh = s_ibl.pf_h >> l;
+    if (lh < 1)
+      lh = 1;
+    offset += (size_t)lw * lh;
+  }
+  int lw = s_ibl.pf_w >> level;
+  if (lw < 1)
+    lw = 1;
+  int lh = s_ibl.pf_h >> level;
+  if (lh < 1)
+    lh = 1;
+
+  float u, v;
+  dir_to_uv(refl.x / len, refl.y / len, refl.z / len, s_ibl.rotation, &u, &v);
+  ibl_sample(s_ibl.prefiltered + offset * 4, lw, lh, u, v, out);
+  out[0] *= s_ibl.intensity;
+  out[1] *= s_ibl.intensity;
+  out[2] *= s_ibl.intensity;
+}
+
+/* Sample BRDF LUT (NdotV, roughness) → (scale, bias) */
+static void ibl_brdf(float ndotv, float roughness, float *scale, float *bias) {
+  *scale = 1.0f;
+  *bias = 0.0f;
+  if (!s_ibl.brdf_lut)
+    return;
+  if (ndotv < 0.0f)
+    ndotv = 0.0f;
+  if (ndotv > 1.0f)
+    ndotv = 1.0f;
+  if (roughness < 0.0f)
+    roughness = 0.0f;
+  if (roughness > 1.0f)
+    roughness = 1.0f;
+  int x = (int)(ndotv * (float)(s_ibl.brdf_size - 1) + 0.5f);
+  int y = (int)(roughness * (float)(s_ibl.brdf_size - 1) + 0.5f);
+  if (x >= s_ibl.brdf_size)
+    x = s_ibl.brdf_size - 1;
+  if (y >= s_ibl.brdf_size)
+    y = s_ibl.brdf_size - 1;
+  size_t idx = ((size_t)y * s_ibl.brdf_size + x) * 4;
+  *scale = s_ibl.brdf_lut[idx + 0];
+  *bias = s_ibl.brdf_lut[idx + 1];
 }
 
 /* PCF (Percentage Closer Filtering) shadow test — 3x3 kernel for soft edges.
@@ -466,10 +623,15 @@ void mop_sw_draw_line(MopSwFramebuffer *fb, int x0, int y0, float z0, int x1,
       size_t idx = (size_t)y0 * (size_t)fb->width + (size_t)x0;
 
       if (!depth_test || z < fb->depth[idx]) {
-        fb->color[idx * 4 + 0] = r;
-        fb->color[idx * 4 + 1] = g;
-        fb->color[idx * 4 + 2] = b;
-        fb->color[idx * 4 + 3] = 255;
+        size_t ci = idx * 4;
+        fb->color[ci + 0] = r;
+        fb->color[ci + 1] = g;
+        fb->color[ci + 2] = b;
+        fb->color[ci + 3] = 255;
+        fb->color_hdr[ci + 0] = (float)r / 255.0f;
+        fb->color_hdr[ci + 1] = (float)g / 255.0f;
+        fb->color_hdr[ci + 2] = (float)b / 255.0f;
+        fb->color_hdr[ci + 3] = 1.0f;
         fb->depth[idx] = z;
         fb->object_id[idx] = object_id;
       }
@@ -513,14 +675,27 @@ static inline void aa_plot(MopSwFramebuffer *fb, int x, int y, float z,
 
   /* Alpha-blend with existing pixel */
   size_t ci = idx * 4;
-  uint8_t dr = fb->color[ci + 0];
-  uint8_t dg = fb->color[ci + 1];
-  uint8_t db = fb->color[ci + 2];
+  float fr = (float)r / 255.0f;
+  float fg = (float)g / 255.0f;
+  float fbb = (float)b / 255.0f;
+  float dr = fb->color_hdr[ci + 0];
+  float dg = fb->color_hdr[ci + 1];
+  float db = fb->color_hdr[ci + 2];
 
   float inv = 1.0f - coverage;
-  fb->color[ci + 0] = (uint8_t)(r * coverage + dr * inv);
-  fb->color[ci + 1] = (uint8_t)(g * coverage + dg * inv);
-  fb->color[ci + 2] = (uint8_t)(b * coverage + db * inv);
+  float or_ = fr * coverage + dr * inv;
+  float og = fg * coverage + dg * inv;
+  float ob = fbb * coverage + db * inv;
+  fb->color_hdr[ci + 0] = or_;
+  fb->color_hdr[ci + 1] = og;
+  fb->color_hdr[ci + 2] = ob;
+  fb->color_hdr[ci + 3] = 1.0f;
+  float cr = or_ < 0.0f ? 0.0f : (or_ > 1.0f ? 1.0f : or_);
+  float cg = og < 0.0f ? 0.0f : (og > 1.0f ? 1.0f : og);
+  float cb = ob < 0.0f ? 0.0f : (ob > 1.0f ? 1.0f : ob);
+  fb->color[ci + 0] = (uint8_t)(cr * 255.0f);
+  fb->color[ci + 1] = (uint8_t)(cg * 255.0f);
+  fb->color[ci + 2] = (uint8_t)(cb * 255.0f);
   fb->color[ci + 3] = 255;
 
   if (coverage > 0.5f) {
@@ -536,10 +711,9 @@ static float rfpart(float x) { return 1.0f - fpart(x); }
 static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
                                       float sy0, float sz0, float sx1,
                                       float sy1, float sz1, float sx2,
-                                      float sy2, float sz2, uint8_t cr,
-                                      uint8_t cg, uint8_t cb, uint8_t ca,
-                                      uint32_t object_id, bool depth_test,
-                                      MopBlendMode blend_mode);
+                                      float sy2, float sz2, float cr, float cg,
+                                      float cb, float ca, uint32_t object_id,
+                                      bool depth_test, MopBlendMode blend_mode);
 
 void mop_sw_draw_line_aa(MopSwFramebuffer *fb, float x0, float y0, float z0,
                          float x1, float y1, float z1, uint8_t r, uint8_t g,
@@ -566,12 +740,14 @@ void mop_sw_draw_line_aa(MopSwFramebuffer *fb, float x0, float y0, float z0,
 
     /* Rasterize as two filled triangles with alpha blending.
      * Use the line color as a flat color and MOP_BLEND_OPAQUE. */
-    uint8_t ca = 255;
-    rasterize_filled_triangle(fb, qx0, qy0, z0, qx1, qy1, z0, qx2, qy2, z1, r,
-                              g, b, ca, object_id, depth_test,
+    float fr = (float)r / 255.0f;
+    float fg = (float)g / 255.0f;
+    float fbb = (float)b / 255.0f;
+    rasterize_filled_triangle(fb, qx0, qy0, z0, qx1, qy1, z0, qx2, qy2, z1, fr,
+                              fg, fbb, 1.0f, object_id, depth_test,
                               MOP_BLEND_OPAQUE);
-    rasterize_filled_triangle(fb, qx0, qy0, z0, qx2, qy2, z1, qx3, qy3, z1, r,
-                              g, b, ca, object_id, depth_test,
+    rasterize_filled_triangle(fb, qx0, qy0, z0, qx2, qy2, z1, qx3, qy3, z1, fr,
+                              fg, fbb, 1.0f, object_id, depth_test,
                               MOP_BLEND_OPAQUE);
     return;
   }
@@ -686,13 +862,10 @@ static float clamp01(float x) {
   return x;
 }
 
-static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
-                                      float sy0, float sz0, float sx1,
-                                      float sy1, float sz1, float sx2,
-                                      float sy2, float sz2, uint8_t cr,
-                                      uint8_t cg, uint8_t cb, uint8_t ca,
-                                      uint32_t object_id, bool depth_test,
-                                      MopBlendMode blend_mode) {
+static void rasterize_filled_triangle(
+    MopSwFramebuffer *fb, float sx0, float sy0, float sz0, float sx1, float sy1,
+    float sz1, float sx2, float sy2, float sz2, float cr, float cg, float cb,
+    float ca, uint32_t object_id, bool depth_test, MopBlendMode blend_mode) {
   /* Bounding box */
   float fmin_x = sx0;
   if (sx1 < fmin_x)
@@ -780,7 +953,15 @@ static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
 
   int width = fb->width;
 
-  if (blend_mode == MOP_BLEND_OPAQUE && ca == 255) {
+  /* Clamp source color for uint8 output (HDR values stay unclamped) */
+  uint8_t cr8 =
+      (uint8_t)((cr < 0.0f ? 0.0f : (cr > 1.0f ? 1.0f : cr)) * 255.0f);
+  uint8_t cg8 =
+      (uint8_t)((cg < 0.0f ? 0.0f : (cg > 1.0f ? 1.0f : cg)) * 255.0f);
+  uint8_t cb8 =
+      (uint8_t)((cb < 0.0f ? 0.0f : (cb > 1.0f ? 1.0f : cb)) * 255.0f);
+
+  if (blend_mode == MOP_BLEND_OPAQUE && ca >= 1.0f) {
     /* ── Opaque path — strict interior test ──
      * No per-triangle edge AA; FXAA post-process handles silhouette
      * anti-aliasing.  This avoids seam artifacts at shared mesh edges. */
@@ -793,10 +974,15 @@ static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
         if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
           size_t idx = row + (size_t)x;
           if (!depth_test || z < fb->depth[idx]) {
-            fb->color[idx * 4 + 0] = cr;
-            fb->color[idx * 4 + 1] = cg;
-            fb->color[idx * 4 + 2] = cb;
-            fb->color[idx * 4 + 3] = 255;
+            size_t ci = idx * 4;
+            fb->color_hdr[ci + 0] = cr;
+            fb->color_hdr[ci + 1] = cg;
+            fb->color_hdr[ci + 2] = cb;
+            fb->color_hdr[ci + 3] = 1.0f;
+            fb->color[ci + 0] = cr8;
+            fb->color[ci + 1] = cg8;
+            fb->color[ci + 2] = cb8;
+            fb->color[ci + 3] = 255;
             fb->depth[idx] = z;
             fb->object_id[idx] = object_id;
           }
@@ -813,7 +999,7 @@ static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
     }
   } else {
     /* ── Blended path: ALPHA, ADDITIVE, MULTIPLY ── */
-    float a_f = (float)ca / 255.0f;
+    float a_f = ca;
     float inv_a = 1.0f - a_f;
 
     for (int y = min_y; y <= max_y; y++) {
@@ -826,36 +1012,39 @@ static void rasterize_filled_triangle(MopSwFramebuffer *fb, float sx0,
           size_t idx = row + (size_t)x;
           if (!depth_test || z < fb->depth[idx]) {
             size_t ci = idx * 4;
-            uint8_t dr = fb->color[ci + 0];
-            uint8_t dg = fb->color[ci + 1];
-            uint8_t db = fb->color[ci + 2];
-            uint8_t or_, og, ob;
+            float dr = fb->color_hdr[ci + 0];
+            float dg = fb->color_hdr[ci + 1];
+            float db = fb->color_hdr[ci + 2];
+            float or_, og, ob;
 
             switch (blend_mode) {
-            case MOP_BLEND_ADDITIVE: {
-              int ar = (int)dr + (int)(cr * a_f);
-              int ag = (int)dg + (int)(cg * a_f);
-              int ab = (int)db + (int)(cb * a_f);
-              or_ = (uint8_t)(ar > 255 ? 255 : ar);
-              og = (uint8_t)(ag > 255 ? 255 : ag);
-              ob = (uint8_t)(ab > 255 ? 255 : ab);
+            case MOP_BLEND_ADDITIVE:
+              or_ = dr + cr * a_f;
+              og = dg + cg * a_f;
+              ob = db + cb * a_f;
               break;
-            }
             case MOP_BLEND_MULTIPLY:
-              or_ = (uint8_t)((dr * cr) / 255);
-              og = (uint8_t)((dg * cg) / 255);
-              ob = (uint8_t)((db * cb) / 255);
+              or_ = dr * cr;
+              og = dg * cg;
+              ob = db * cb;
               break;
-            default: /* MOP_BLEND_ALPHA / MOP_BLEND_OPAQUE with alpha < 255 */
-              or_ = (uint8_t)(cr * a_f + dr * inv_a);
-              og = (uint8_t)(cg * a_f + dg * inv_a);
-              ob = (uint8_t)(cb * a_f + db * inv_a);
+            default: /* MOP_BLEND_ALPHA / MOP_BLEND_OPAQUE with alpha < 1 */
+              or_ = cr * a_f + dr * inv_a;
+              og = cg * a_f + dg * inv_a;
+              ob = cb * a_f + db * inv_a;
               break;
             }
 
-            fb->color[ci + 0] = or_;
-            fb->color[ci + 1] = og;
-            fb->color[ci + 2] = ob;
+            fb->color_hdr[ci + 0] = or_;
+            fb->color_hdr[ci + 1] = og;
+            fb->color_hdr[ci + 2] = ob;
+            fb->color_hdr[ci + 3] = 1.0f;
+            float c0 = or_ < 0.0f ? 0.0f : (or_ > 1.0f ? 1.0f : or_);
+            float c1 = og < 0.0f ? 0.0f : (og > 1.0f ? 1.0f : og);
+            float c2 = ob < 0.0f ? 0.0f : (ob > 1.0f ? 1.0f : ob);
+            fb->color[ci + 0] = (uint8_t)(c0 * 255.0f);
+            fb->color[ci + 1] = (uint8_t)(c1 * 255.0f);
+            fb->color[ci + 2] = (uint8_t)(c2 * 255.0f);
             fb->color[ci + 3] = 255;
           }
         }
@@ -998,20 +1187,30 @@ void mop_sw_rasterize_triangle(const MopSwClipVertex vertices[3],
     float avg_g = (v0->color.g + v1->color.g + v2->color.g) * (1.0f / 3.0f);
     float avg_b = (v0->color.b + v1->color.b + v2->color.b) * (1.0f / 3.0f);
 
-    uint8_t cr = (uint8_t)(clamp01(avg_r * lighting) * 255.0f);
-    uint8_t cg = (uint8_t)(clamp01(avg_g * lighting) * 255.0f);
-    uint8_t cb = (uint8_t)(clamp01(avg_b * lighting) * 255.0f);
+    float crf = avg_r * lighting;
+    float cgf = avg_g * lighting;
+    float cbf = avg_b * lighting;
+    if (crf < 0.0f)
+      crf = 0.0f;
+    if (cgf < 0.0f)
+      cgf = 0.0f;
+    if (cbf < 0.0f)
+      cbf = 0.0f;
 
     if (wireframe) {
-      mop_sw_draw_line_aa(fb, sx0, sy0, sz0, sx1, sy1, sz1, cr, cg, cb,
+      uint8_t cr8 = (uint8_t)((crf > 1.0f ? 1.0f : crf) * 255.0f);
+      uint8_t cg8 = (uint8_t)((cgf > 1.0f ? 1.0f : cgf) * 255.0f);
+      uint8_t cb8 = (uint8_t)((cbf > 1.0f ? 1.0f : cbf) * 255.0f);
+      mop_sw_draw_line_aa(fb, sx0, sy0, sz0, sx1, sy1, sz1, cr8, cg8, cb8,
                           object_id, depth_test, 1.0f);
-      mop_sw_draw_line_aa(fb, sx1, sy1, sz1, sx2, sy2, sz2, cr, cg, cb,
+      mop_sw_draw_line_aa(fb, sx1, sy1, sz1, sx2, sy2, sz2, cr8, cg8, cb8,
                           object_id, depth_test, 1.0f);
-      mop_sw_draw_line_aa(fb, sx2, sy2, sz2, sx0, sy0, sz0, cr, cg, cb,
+      mop_sw_draw_line_aa(fb, sx2, sy2, sz2, sx0, sy0, sz0, cr8, cg8, cb8,
                           object_id, depth_test, 1.0f);
     } else {
+      float caf = (float)ca / 255.0f;
       rasterize_filled_triangle(fb, sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2,
-                                cr, cg, cb, ca, object_id, depth_test,
+                                crf, cgf, cbf, caf, object_id, depth_test,
                                 blend_mode);
     }
   }
@@ -1194,9 +1393,15 @@ void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
             spec *= spec; /* ^32 */
             spec *= 0.25f;
 
-            float pr = clamp01(fr * lit + spec);
-            float pg = clamp01(fg * lit + spec);
-            float pb = clamp01(fb_ * lit + spec);
+            float pr = fr * lit + spec;
+            float pg = fg * lit + spec;
+            float pb = fb_ * lit + spec;
+            if (pr < 0.0f)
+              pr = 0.0f;
+            if (pg < 0.0f)
+              pg = 0.0f;
+            if (pb < 0.0f)
+              pb = 0.0f;
 
             /* Edge AA coverage — suppress at interior mesh edges to
              * avoid seam artifacts (only blend at silhouette edges). */
@@ -1207,23 +1412,23 @@ void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
 
             size_t ci = idx * 4;
             if (blend_mode == MOP_BLEND_OPAQUE && final_alpha >= 1.0f) {
-              fb->color[ci + 0] = (uint8_t)(pr * 255.0f);
-              fb->color[ci + 1] = (uint8_t)(pg * 255.0f);
-              fb->color[ci + 2] = (uint8_t)(pb * 255.0f);
-              fb->color[ci + 3] = 255;
+              fb->color_hdr[ci + 0] = pr;
+              fb->color_hdr[ci + 1] = pg;
+              fb->color_hdr[ci + 2] = pb;
+              fb->color_hdr[ci + 3] = 1.0f;
               fb->depth[idx] = z;
               fb->object_id[idx] = object_id;
             } else {
               float inv_fa = 1.0f - final_alpha;
-              float dr = (float)fb->color[ci + 0] / 255.0f;
-              float dg = (float)fb->color[ci + 1] / 255.0f;
-              float db = (float)fb->color[ci + 2] / 255.0f;
+              float dr = fb->color_hdr[ci + 0];
+              float dg = fb->color_hdr[ci + 1];
+              float db = fb->color_hdr[ci + 2];
 
               switch (blend_mode) {
               case MOP_BLEND_ADDITIVE:
-                pr = clamp01(dr + pr * final_alpha);
-                pg = clamp01(dg + pg * final_alpha);
-                pb = clamp01(db + pb * final_alpha);
+                pr = dr + pr * final_alpha;
+                pg = dg + pg * final_alpha;
+                pb = db + pb * final_alpha;
                 break;
               case MOP_BLEND_MULTIPLY:
                 pr = dr * pr;
@@ -1236,10 +1441,10 @@ void mop_sw_rasterize_triangle_smooth(const MopSwScreenVertex verts[3],
                 pb = pb * final_alpha + db * inv_fa;
                 break;
               }
-              fb->color[ci + 0] = (uint8_t)(clamp01(pr) * 255.0f);
-              fb->color[ci + 1] = (uint8_t)(clamp01(pg) * 255.0f);
-              fb->color[ci + 2] = (uint8_t)(clamp01(pb) * 255.0f);
-              fb->color[ci + 3] = 255;
+              fb->color_hdr[ci + 0] = pr;
+              fb->color_hdr[ci + 1] = pg;
+              fb->color_hdr[ci + 2] = pb;
+              fb->color_hdr[ci + 3] = 1.0f;
               if (final_alpha > 0.5f) {
                 fb->depth[idx] = z;
                 fb->object_id[idx] = object_id;
@@ -1765,66 +1970,97 @@ void mop_sw_rasterize_triangle_smooth_ml(
             /* PBR energy balance */
             float diffuse_scale = 1.0f - metallic;
 
-            /* Environment reflection for metallic surfaces.
-             * Approximate IBL with a hemisphere gradient: the reflected
-             * view direction samples a simple sky (bright) / ground (dark)
-             * environment.  This replaces the flat `ambient * metallic`
-             * term with a directionally-varying reflection. */
+            /* IBL (Image-Based Lighting) — uses precomputed maps when
+             * available, falls back to hemisphere gradient otherwise. */
             float env_r = 0.0f, env_g = 0.0f, env_b = 0.0f;
-            if (metallic > 0.01f) {
+            float ibl_diff_r = 0.0f, ibl_diff_g = 0.0f, ibl_diff_b = 0.0f;
+
+            if (s_ibl.irradiance) {
+              /* IBL diffuse: irradiance map at surface normal */
+              float irr[3];
+              ibl_irradiance(n, irr);
+              ibl_diff_r = irr[0];
+              ibl_diff_g = irr[1];
+              ibl_diff_b = irr[2];
+            }
+
+            {
               /* Reflect view direction around normal */
               float vdn = mop_vec3_dot(view_dir, n);
               MopVec3 refl = {2.0f * vdn * n.x - view_dir.x,
                               2.0f * vdn * n.y - view_dir.y,
                               2.0f * vdn * n.z - view_dir.z};
 
-              /* Hemisphere gradient: sky color for up, ground for down.
-               * Blend factor based on reflected Y component. */
-              float sky_t = refl.y * 0.5f + 0.5f; /* 0=down, 1=up */
-              if (sky_t < 0.0f)
-                sky_t = 0.0f;
-              if (sky_t > 1.0f)
-                sky_t = 1.0f;
+              float ndv = mop_vec3_dot(n, view_dir);
+              if (ndv < 0.0f)
+                ndv = 0.0f;
 
-              /* Sky: warm neutral (matching typical EEVEE environment)
-               * Ground: dark warm (floor bounce) */
-              float sky_r = 0.35f, sky_g = 0.38f, sky_b = 0.45f;
-              float gnd_r = 0.08f, gnd_g = 0.07f, gnd_b = 0.06f;
-              float he_r = gnd_r + sky_t * (sky_r - gnd_r);
-              float he_g = gnd_g + sky_t * (sky_g - gnd_g);
-              float he_b = gnd_b + sky_t * (sky_b - gnd_b);
-
-              /* Roughness reduces reflection clarity (blur = average) */
-              float rough_mix = roughness * roughness;
-              float avg_env = (he_r + he_g + he_b) * (1.0f / 3.0f);
-              he_r = he_r + rough_mix * (avg_env - he_r);
-              he_g = he_g + rough_mix * (avg_env - he_g);
-              he_b = he_b + rough_mix * (avg_env - he_b);
-
-              /* Fresnel at normal incidence (F0) for environment */
+              /* F0: Fresnel at normal incidence */
               float f0_r = 0.04f * (1.0f - metallic) + fr * metallic;
               float f0_g = 0.04f * (1.0f - metallic) + fg * metallic;
               float f0_b = 0.04f * (1.0f - metallic) + fb_ * metallic;
 
-              /* Schlick Fresnel for environment (use NdotV) */
-              float ndv = mop_vec3_dot(n, view_dir);
-              if (ndv < 0.0f)
-                ndv = 0.0f;
-              float om = 1.0f - ndv;
-              float om2 = om * om;
-              float om5 = om2 * om2 * om;
-              float fe_r = f0_r + (1.0f - f0_r) * om5;
-              float fe_g = f0_g + (1.0f - f0_g) * om5;
-              float fe_b = f0_b + (1.0f - f0_b) * om5;
+              if (s_ibl.prefiltered && s_ibl.brdf_lut) {
+                /* IBL specular: split-sum approximation */
+                float pf[3];
+                ibl_prefiltered(refl, roughness, pf);
+                float brdf_s, brdf_b;
+                ibl_brdf(ndv, roughness, &brdf_s, &brdf_b);
 
-              env_r = he_r * fe_r * ambient * 3.0f;
-              env_g = he_g * fe_g * ambient * 3.0f;
-              env_b = he_b * fe_b * ambient * 3.0f;
+                env_r = pf[0] * (f0_r * brdf_s + brdf_b);
+                env_g = pf[1] * (f0_g * brdf_s + brdf_b);
+                env_b = pf[2] * (f0_b * brdf_s + brdf_b);
+              } else if (metallic > 0.01f) {
+                /* Fallback hemisphere gradient (no env map loaded) */
+                float sky_t = refl.y * 0.5f + 0.5f;
+                if (sky_t < 0.0f)
+                  sky_t = 0.0f;
+                if (sky_t > 1.0f)
+                  sky_t = 1.0f;
+
+                float sky_rv = 0.35f, sky_gv = 0.38f, sky_bv = 0.45f;
+                float gnd_rv = 0.08f, gnd_gv = 0.07f, gnd_bv = 0.06f;
+                float he_r = gnd_rv + sky_t * (sky_rv - gnd_rv);
+                float he_g = gnd_gv + sky_t * (sky_gv - gnd_gv);
+                float he_b = gnd_bv + sky_t * (sky_bv - gnd_bv);
+
+                float rough_mix = roughness * roughness;
+                float avg_env = (he_r + he_g + he_b) * (1.0f / 3.0f);
+                he_r += rough_mix * (avg_env - he_r);
+                he_g += rough_mix * (avg_env - he_g);
+                he_b += rough_mix * (avg_env - he_b);
+
+                float om = 1.0f - ndv;
+                float om2 = om * om;
+                float om5 = om2 * om2 * om;
+                float fe_r = f0_r + (1.0f - f0_r) * om5;
+                float fe_g = f0_g + (1.0f - f0_g) * om5;
+                float fe_b = f0_b + (1.0f - f0_b) * om5;
+
+                env_r = he_r * fe_r * ambient * 3.0f;
+                env_g = he_g * fe_g * ambient * 3.0f;
+                env_b = he_b * fe_b * ambient * 3.0f;
+              }
             }
 
-            float pr = clamp01(fr * lit_r * diffuse_scale + env_r + spec_r);
-            float pg = clamp01(fg * lit_g * diffuse_scale + env_g + spec_g);
-            float pb = clamp01(fb_ * lit_b * diffuse_scale + env_b + spec_b);
+            /* Final composition: IBL diffuse replaces flat ambient when
+             * irradiance map is available */
+            float pr, pg, pb;
+            if (s_ibl.irradiance) {
+              pr = fr * (lit_r + ibl_diff_r) * diffuse_scale + env_r + spec_r;
+              pg = fg * (lit_g + ibl_diff_g) * diffuse_scale + env_g + spec_g;
+              pb = fb_ * (lit_b + ibl_diff_b) * diffuse_scale + env_b + spec_b;
+            } else {
+              pr = fr * lit_r * diffuse_scale + env_r + spec_r;
+              pg = fg * lit_g * diffuse_scale + env_g + spec_g;
+              pb = fb_ * lit_b * diffuse_scale + env_b + spec_b;
+            }
+            if (pr < 0.0f)
+              pr = 0.0f;
+            if (pg < 0.0f)
+              pg = 0.0f;
+            if (pb < 0.0f)
+              pb = 0.0f;
 
             /* Edge AA coverage — disabled for opaque geometry to avoid
              * seam artifacts at shared mesh edges.  FXAA post-process
@@ -1835,23 +2071,23 @@ void mop_sw_rasterize_triangle_smooth_ml(
 
             size_t ci = idx * 4;
             if (blend_mode == MOP_BLEND_OPAQUE && final_alpha >= 1.0f) {
-              fb->color[ci + 0] = (uint8_t)(pr * 255.0f);
-              fb->color[ci + 1] = (uint8_t)(pg * 255.0f);
-              fb->color[ci + 2] = (uint8_t)(pb * 255.0f);
-              fb->color[ci + 3] = 255;
+              fb->color_hdr[ci + 0] = pr;
+              fb->color_hdr[ci + 1] = pg;
+              fb->color_hdr[ci + 2] = pb;
+              fb->color_hdr[ci + 3] = 1.0f;
               fb->depth[idx] = z;
               fb->object_id[idx] = object_id;
             } else {
               float inv_fa = 1.0f - final_alpha;
-              float dr = (float)fb->color[ci + 0] / 255.0f;
-              float dg = (float)fb->color[ci + 1] / 255.0f;
-              float db = (float)fb->color[ci + 2] / 255.0f;
+              float dr = fb->color_hdr[ci + 0];
+              float dg = fb->color_hdr[ci + 1];
+              float db = fb->color_hdr[ci + 2];
 
               switch (blend_mode) {
               case MOP_BLEND_ADDITIVE:
-                pr = clamp01(dr + pr * final_alpha);
-                pg = clamp01(dg + pg * final_alpha);
-                pb = clamp01(db + pb * final_alpha);
+                pr = dr + pr * final_alpha;
+                pg = dg + pg * final_alpha;
+                pb = db + pb * final_alpha;
                 break;
               case MOP_BLEND_MULTIPLY:
                 pr = dr * pr;
@@ -1864,10 +2100,10 @@ void mop_sw_rasterize_triangle_smooth_ml(
                 pb = pb * final_alpha + db * inv_fa;
                 break;
               }
-              fb->color[ci + 0] = (uint8_t)(clamp01(pr) * 255.0f);
-              fb->color[ci + 1] = (uint8_t)(clamp01(pg) * 255.0f);
-              fb->color[ci + 2] = (uint8_t)(clamp01(pb) * 255.0f);
-              fb->color[ci + 3] = 255;
+              fb->color_hdr[ci + 0] = pr;
+              fb->color_hdr[ci + 1] = pg;
+              fb->color_hdr[ci + 2] = pb;
+              fb->color_hdr[ci + 3] = 1.0f;
               if (final_alpha > 0.5f) {
                 fb->depth[idx] = z;
                 fb->object_id[idx] = object_id;
@@ -2112,9 +2348,15 @@ void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
             spec *= spec;
             spec *= 0.25f;
 
-            float pr = clamp01(fr * lit + spec);
-            float pg = clamp01(fg * lit + spec);
-            float pb = clamp01(fb_ * lit + spec);
+            float pr = fr * lit + spec;
+            float pg = fg * lit + spec;
+            float pb = fb_ * lit + spec;
+            if (pr < 0.0f)
+              pr = 0.0f;
+            if (pg < 0.0f)
+              pg = 0.0f;
+            if (pb < 0.0f)
+              pb = 0.0f;
 
             /* Edge AA coverage — disabled for opaque geometry to avoid
              * seam artifacts at shared mesh edges.  FXAA post-process
@@ -2125,23 +2367,23 @@ void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
 
             size_t ci = idx * 4;
             if (blend_mode == MOP_BLEND_OPAQUE && final_alpha >= 1.0f) {
-              fb->color[ci + 0] = (uint8_t)(pr * 255.0f);
-              fb->color[ci + 1] = (uint8_t)(pg * 255.0f);
-              fb->color[ci + 2] = (uint8_t)(pb * 255.0f);
-              fb->color[ci + 3] = 255;
+              fb->color_hdr[ci + 0] = pr;
+              fb->color_hdr[ci + 1] = pg;
+              fb->color_hdr[ci + 2] = pb;
+              fb->color_hdr[ci + 3] = 1.0f;
               fb->depth[idx] = z;
               fb->object_id[idx] = object_id;
             } else {
               float inv_fa = 1.0f - final_alpha;
-              float dr = (float)fb->color[ci + 0] / 255.0f;
-              float dg = (float)fb->color[ci + 1] / 255.0f;
-              float db = (float)fb->color[ci + 2] / 255.0f;
+              float dr = fb->color_hdr[ci + 0];
+              float dg = fb->color_hdr[ci + 1];
+              float db = fb->color_hdr[ci + 2];
 
               switch (blend_mode) {
               case MOP_BLEND_ADDITIVE:
-                pr = clamp01(dr + pr * final_alpha);
-                pg = clamp01(dg + pg * final_alpha);
-                pb = clamp01(db + pb * final_alpha);
+                pr = dr + pr * final_alpha;
+                pg = dg + pg * final_alpha;
+                pb = db + pb * final_alpha;
                 break;
               case MOP_BLEND_MULTIPLY:
                 pr = dr * pr;
@@ -2154,10 +2396,10 @@ void mop_sw_rasterize_triangle_smooth_nm(const MopSwScreenVertex verts[3],
                 pb = pb * final_alpha + db * inv_fa;
                 break;
               }
-              fb->color[ci + 0] = (uint8_t)(clamp01(pr) * 255.0f);
-              fb->color[ci + 1] = (uint8_t)(clamp01(pg) * 255.0f);
-              fb->color[ci + 2] = (uint8_t)(clamp01(pb) * 255.0f);
-              fb->color[ci + 3] = 255;
+              fb->color_hdr[ci + 0] = pr;
+              fb->color_hdr[ci + 1] = pg;
+              fb->color_hdr[ci + 2] = pb;
+              fb->color_hdr[ci + 3] = 1.0f;
               if (final_alpha > 0.5f) {
                 fb->depth[idx] = z;
                 fb->object_id[idx] = object_id;
@@ -2235,7 +2477,6 @@ void mop_sw_rasterize_triangle_full(
   MopVec3 norm_light = mop_vec3_normalize(light_dir);
   float half_w = (float)fb->width * 0.5f;
   float half_h = (float)fb->height * 0.5f;
-  uint8_t ca = (uint8_t)(clamp01(opacity) * 255.0f);
 
   for (int i = 1; i < poly_count - 1; i++) {
     const MopSwClipVertex *v0 = &poly[0];
@@ -2312,26 +2553,30 @@ void mop_sw_rasterize_triangle_full(
     float diffuse_scale = 1.0f - metallic;
     float env_flat =
         ambient * metallic * 0.3f; /* simplified env for flat path */
-    uint8_t cr =
-        (uint8_t)(clamp01(avg_r * (lighting * diffuse_scale + env_flat)) *
-                  255.0f);
-    uint8_t cg =
-        (uint8_t)(clamp01(avg_g * (lighting * diffuse_scale + env_flat)) *
-                  255.0f);
-    uint8_t cb =
-        (uint8_t)(clamp01(avg_b * (lighting * diffuse_scale + env_flat)) *
-                  255.0f);
+    float crf = avg_r * (lighting * diffuse_scale + env_flat);
+    float cgf = avg_g * (lighting * diffuse_scale + env_flat);
+    float cbf = avg_b * (lighting * diffuse_scale + env_flat);
+    if (crf < 0.0f)
+      crf = 0.0f;
+    if (cgf < 0.0f)
+      cgf = 0.0f;
+    if (cbf < 0.0f)
+      cbf = 0.0f;
 
     if (wireframe) {
-      mop_sw_draw_line_aa(fb, sx0, sy0, sz0, sx1, sy1, sz1, cr, cg, cb,
+      uint8_t cr8 = (uint8_t)((crf > 1.0f ? 1.0f : crf) * 255.0f);
+      uint8_t cg8 = (uint8_t)((cgf > 1.0f ? 1.0f : cgf) * 255.0f);
+      uint8_t cb8 = (uint8_t)((cbf > 1.0f ? 1.0f : cbf) * 255.0f);
+      mop_sw_draw_line_aa(fb, sx0, sy0, sz0, sx1, sy1, sz1, cr8, cg8, cb8,
                           object_id, depth_test, 1.0f);
-      mop_sw_draw_line_aa(fb, sx1, sy1, sz1, sx2, sy2, sz2, cr, cg, cb,
+      mop_sw_draw_line_aa(fb, sx1, sy1, sz1, sx2, sy2, sz2, cr8, cg8, cb8,
                           object_id, depth_test, 1.0f);
-      mop_sw_draw_line_aa(fb, sx2, sy2, sz2, sx0, sy0, sz0, cr, cg, cb,
+      mop_sw_draw_line_aa(fb, sx2, sy2, sz2, sx0, sy0, sz0, cr8, cg8, cb8,
                           object_id, depth_test, 1.0f);
     } else {
+      float caf = clamp01(opacity);
       rasterize_filled_triangle(fb, sx0, sy0, sz0, sx1, sy1, sz1, sx2, sy2, sz2,
-                                cr, cg, cb, ca, object_id, depth_test,
+                                crf, cgf, cbf, caf, object_id, depth_test,
                                 blend_mode);
     }
   }
@@ -2486,4 +2731,33 @@ void mop_sw_fxaa(MopSwFramebuffer *fb) {
 #undef FXAA_LUMA
 
   free(src);
+}
+
+/* -------------------------------------------------------------------------
+ * HDR → LDR resolve — ACES Filmic tonemapping
+ *
+ * Converts the HDR float accumulation buffer to uint8 with ACES Filmic
+ * tonemapping and exposure control.
+ * ------------------------------------------------------------------------- */
+
+static float aces_tonemap(float x) {
+  float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+  float m = (x * (a * x + b)) / (x * (c * x + d) + e);
+  return m < 0.0f ? 0.0f : (m > 1.0f ? 1.0f : m);
+}
+
+void mop_sw_hdr_resolve(MopSwFramebuffer *fb, float exposure) {
+  if (!fb || !fb->color_hdr)
+    return;
+  size_t n = (size_t)fb->width * fb->height;
+  for (size_t i = 0; i < n; i++) {
+    size_t ci = i * 4;
+    float r = aces_tonemap(fb->color_hdr[ci + 0] * exposure);
+    float g = aces_tonemap(fb->color_hdr[ci + 1] * exposure);
+    float b = aces_tonemap(fb->color_hdr[ci + 2] * exposure);
+    fb->color[ci + 0] = (uint8_t)(r * 255.0f + 0.5f);
+    fb->color[ci + 1] = (uint8_t)(g * 255.0f + 0.5f);
+    fb->color[ci + 2] = (uint8_t)(b * 255.0f + 0.5f);
+    fb->color[ci + 3] = (uint8_t)(fb->color_hdr[ci + 3] * 255.0f + 0.5f);
+  }
 }

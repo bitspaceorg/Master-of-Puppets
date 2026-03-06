@@ -176,3 +176,12 @@ void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog) {
     return;
   viewport->fog_params = *fog;
 }
+
+void mop_viewport_set_exposure(MopViewport *vp, float exposure) {
+  if (vp)
+    vp->exposure = exposure > 0.0f ? exposure : 0.001f;
+}
+
+float mop_viewport_get_exposure(const MopViewport *vp) {
+  return vp ? vp->exposure : 1.0f;
+}

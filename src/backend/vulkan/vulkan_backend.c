@@ -423,13 +423,15 @@ static MopRhiDevice *vk_device_create(void) {
 
   /* ---- Descriptor pool ---- */
   VkDescriptorPoolSize pool_sizes[] = {
-      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, MOP_VK_MAX_DRAWS_PER_FRAME},
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+       MOP_VK_MAX_DRAWS_PER_FRAME + 2}, /* +2 for skybox + tonemap */
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       MOP_VK_MAX_DRAWS_PER_FRAME * 2}, /* texture + shadow sampler */
+       MOP_VK_MAX_DRAWS_PER_FRAME * 5 +
+           2}, /* texture + shadow + IBL×3 + skybox + tonemap */
   };
   VkDescriptorPoolCreateInfo dp_ci = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = MOP_VK_MAX_DRAWS_PER_FRAME,
+      .maxSets = MOP_VK_MAX_DRAWS_PER_FRAME + 2,
       .poolSizeCount = 2,
       .pPoolSizes = pool_sizes,
   };
@@ -495,6 +497,31 @@ static MopRhiDevice *vk_device_create(void) {
   {
     uint8_t white[4] = {255, 255, 255, 255};
     staging_upload_image(dev, dev->white_image, 1, 1, white);
+  }
+
+  /* ---- 1x1 black fallback texture (for IBL when no env map loaded) ---- */
+  r = mop_vk_create_image(dev->device, &dev->mem_props, 1, 1,
+                          VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                          VK_IMAGE_USAGE_SAMPLED_BIT |
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                          &dev->black_image, &dev->black_memory);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] black image: %d", r);
+    goto fail;
+  }
+
+  r = mop_vk_create_image_view(dev->device, dev->black_image,
+                               VK_FORMAT_R8G8B8A8_UNORM,
+                               VK_IMAGE_ASPECT_COLOR_BIT, &dev->black_view);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] black view: %d", r);
+    goto fail;
+  }
+
+  /* Upload black pixel */
+  {
+    uint8_t black[4] = {0, 0, 0, 255};
+    staging_upload_image(dev, dev->black_image, 1, 1, black);
   }
 
   /* ---- GPU timestamp query pool ---- */
@@ -760,6 +787,85 @@ shadow_done:
   }
 postprocess_done:
 
+  /* ---- HDR Tonemap resources ---- */
+  {
+    VkResult tr = mop_vk_create_tonemap_render_pass(dev->device,
+                                                    &dev->tonemap_render_pass);
+    if (tr != VK_SUCCESS) {
+      MOP_WARN("[VK] tonemap render pass failed: %d", tr);
+    } else {
+      /* Descriptor set layout: single combined image sampler */
+      VkDescriptorSetLayoutBinding tm_binding = {
+          .binding = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      };
+      VkDescriptorSetLayoutCreateInfo tm_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 1,
+          .pBindings = &tm_binding,
+      };
+      tr = vkCreateDescriptorSetLayout(dev->device, &tm_layout_ci, NULL,
+                                       &dev->tonemap_desc_layout);
+      if (tr != VK_SUCCESS) {
+        MOP_WARN("[VK] tonemap desc layout failed: %d", tr);
+        goto tonemap_done;
+      }
+
+      /* Pipeline layout: desc set + push constant (float exposure) */
+      VkPushConstantRange tm_push = {
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .offset = 0,
+          .size = 4, /* float */
+      };
+      VkPipelineLayoutCreateInfo tm_pl_ci = {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = 1,
+          .pSetLayouts = &dev->tonemap_desc_layout,
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges = &tm_push,
+      };
+      tr = vkCreatePipelineLayout(dev->device, &tm_pl_ci, NULL,
+                                  &dev->tonemap_pipeline_layout);
+      if (tr != VK_SUCCESS) {
+        MOP_WARN("[VK] tonemap pipeline layout failed: %d", tr);
+        goto tonemap_done;
+      }
+
+#if defined(MOP_VK_HAS_TONEMAP_SHADERS)
+      dev->tonemap_frag = create_shader_module(
+          dev->device, mop_tonemap_frag_spv, mop_tonemap_frag_spv_size);
+      if (dev->fullscreen_vert && dev->tonemap_frag) {
+        dev->tonemap_pipeline = mop_vk_create_tonemap_pipeline(dev);
+        if (dev->tonemap_pipeline) {
+          dev->tonemap_enabled = true;
+          dev->hdr_exposure = 1.0f;
+          MOP_INFO("[VK] HDR tonemap pipeline enabled");
+        }
+      }
+#else
+      MOP_INFO("[VK] tonemap resources allocated (pipeline pending shader "
+               "compilation)");
+#endif
+    }
+  }
+tonemap_done:
+
+  /* ---- Skybox pipeline (equirectangular env map) ---- */
+#if defined(MOP_VK_HAS_SKYBOX_SHADERS)
+  if (dev->fullscreen_vert) {
+    dev->skybox_frag = create_shader_module(dev->device, mop_skybox_frag_spv,
+                                            mop_skybox_frag_spv_size);
+    if (dev->skybox_frag) {
+      dev->skybox_pipeline = mop_vk_create_skybox_pipeline(dev);
+      if (dev->skybox_pipeline) {
+        MOP_INFO("[VK] skybox pipeline created");
+      }
+    }
+  }
+#endif
+
   MOP_INFO("[VK] device created successfully");
   return dev;
 
@@ -785,6 +891,13 @@ fail:
         vkDestroyImage(d, dev->white_image, NULL);
       if (dev->white_memory)
         vkFreeMemory(d, dev->white_memory, NULL);
+
+      if (dev->black_view)
+        vkDestroyImageView(d, dev->black_view, NULL);
+      if (dev->black_image)
+        vkDestroyImage(d, dev->black_image, NULL);
+      if (dev->black_memory)
+        vkFreeMemory(d, dev->black_memory, NULL);
 
       if (dev->default_sampler)
         vkDestroySampler(d, dev->default_sampler, NULL);
@@ -875,6 +988,28 @@ static void vk_device_destroy(MopRhiDevice *dev) {
     if (dev->fxaa_frag)
       vkDestroyShaderModule(d, dev->fxaa_frag, NULL);
 
+    /* Tonemap cleanup */
+    if (dev->tonemap_pipeline)
+      vkDestroyPipeline(d, dev->tonemap_pipeline, NULL);
+    if (dev->tonemap_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->tonemap_pipeline_layout, NULL);
+    if (dev->tonemap_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->tonemap_desc_layout, NULL);
+    if (dev->tonemap_render_pass)
+      vkDestroyRenderPass(d, dev->tonemap_render_pass, NULL);
+    if (dev->tonemap_frag)
+      vkDestroyShaderModule(d, dev->tonemap_frag, NULL);
+
+    /* Skybox cleanup */
+    if (dev->skybox_pipeline)
+      vkDestroyPipeline(d, dev->skybox_pipeline, NULL);
+    if (dev->skybox_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->skybox_pipeline_layout, NULL);
+    if (dev->skybox_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->skybox_desc_layout, NULL);
+    if (dev->skybox_frag)
+      vkDestroyShaderModule(d, dev->skybox_frag, NULL);
+
     /* Pipelines */
     for (int i = 0; i < MOP_VK_MAX_PIPELINES; i++) {
       if (dev->pipelines[i])
@@ -902,6 +1037,14 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyImage(d, dev->white_image, NULL);
     if (dev->white_memory)
       vkFreeMemory(d, dev->white_memory, NULL);
+
+    /* Black texture */
+    if (dev->black_view)
+      vkDestroyImageView(d, dev->black_view, NULL);
+    if (dev->black_image)
+      vkDestroyImage(d, dev->black_image, NULL);
+    if (dev->black_memory)
+      vkFreeMemory(d, dev->black_memory, NULL);
 
     if (dev->default_sampler)
       vkDestroySampler(d, dev->default_sampler, NULL);
@@ -1056,12 +1199,12 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
 
   VkResult r;
 
-  /* ---- Color (R8G8B8A8_SRGB) — TRANSFER_DST for MSAA manual resolve ---- */
+  /* ---- Color (R16G16B16A16_SFLOAT — HDR accumulation) ---- */
   r = mop_vk_create_image(
       dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
-      VK_FORMAT_R8G8B8A8_SRGB, VK_SAMPLE_COUNT_1_BIT,
+      VK_FORMAT_R16G16B16A16_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-          VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
       &fb->color_image, &fb->color_memory);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] fb color image: %d", r);
@@ -1069,10 +1212,29 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   }
 
   r = mop_vk_create_image_view(dev->device, fb->color_image,
-                               VK_FORMAT_R8G8B8A8_SRGB,
+                               VK_FORMAT_R16G16B16A16_SFLOAT,
                                VK_IMAGE_ASPECT_COLOR_BIT, &fb->color_view);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] fb color view: %d", r);
+    return;
+  }
+
+  /* ---- LDR color (R8G8B8A8_SRGB — tonemap resolve target) ---- */
+  r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+      VK_FORMAT_R8G8B8A8_SRGB, VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      &fb->ldr_color_image, &fb->ldr_color_memory);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] fb ldr color image: %d", r);
+    return;
+  }
+
+  r = mop_vk_create_image_view(dev->device, fb->ldr_color_image,
+                               VK_FORMAT_R8G8B8A8_SRGB,
+                               VK_IMAGE_ASPECT_COLOR_BIT, &fb->ldr_color_view);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] fb ldr color view: %d", r);
     return;
   }
 
@@ -1117,10 +1279,10 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
 
   /* ---- MSAA render targets (when msaa_samples > 1) ---- */
   if (dev->msaa_samples > VK_SAMPLE_COUNT_1_BIT) {
-    /* MSAA color — TRANSFER_SRC for manual resolve */
+    /* MSAA color (HDR) — TRANSFER_SRC for manual resolve */
     r = mop_vk_create_image(
         dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
-        VK_FORMAT_R8G8B8A8_SRGB, dev->msaa_samples,
+        VK_FORMAT_R16G16B16A16_SFLOAT, dev->msaa_samples,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         &fb->msaa_color_image, &fb->msaa_color_memory);
     if (r != VK_SUCCESS) {
@@ -1128,7 +1290,7 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       return;
     }
     r = mop_vk_create_image_view(
-        dev->device, fb->msaa_color_image, VK_FORMAT_R8G8B8A8_SRGB,
+        dev->device, fb->msaa_color_image, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_ASPECT_COLOR_BIT, &fb->msaa_color_view);
     if (r != VK_SUCCESS) {
       MOP_ERROR("[VK] fb msaa color view: %d", r);
@@ -1204,6 +1366,24 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] vkCreateFramebuffer failed: %d", r);
     return;
+  }
+
+  /* ---- Tonemap framebuffer (LDR output) ---- */
+  if (dev->tonemap_render_pass && fb->ldr_color_view) {
+    VkImageView tm_views[1] = {fb->ldr_color_view};
+    VkFramebufferCreateInfo tm_fb_ci = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass = dev->tonemap_render_pass,
+        .attachmentCount = 1,
+        .pAttachments = tm_views,
+        .width = (uint32_t)width,
+        .height = (uint32_t)height,
+        .layers = 1,
+    };
+    r = vkCreateFramebuffer(dev->device, &tm_fb_ci, NULL,
+                            &fb->tonemap_framebuffer);
+    if (r != VK_SUCCESS)
+      MOP_WARN("[VK] tonemap framebuffer failed: %d", r);
   }
 
   /* ---- Readback staging buffers (host-visible, persistently mapped) ---- */
@@ -1301,6 +1481,16 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
 
   if (fb->framebuffer)
     vkDestroyFramebuffer(d, fb->framebuffer, NULL);
+
+  /* Tonemap framebuffer + LDR color */
+  if (fb->tonemap_framebuffer)
+    vkDestroyFramebuffer(d, fb->tonemap_framebuffer, NULL);
+  if (fb->ldr_color_view)
+    vkDestroyImageView(d, fb->ldr_color_view, NULL);
+  if (fb->ldr_color_image)
+    vkDestroyImage(d, fb->ldr_color_image, NULL);
+  if (fb->ldr_color_memory)
+    vkFreeMemory(d, fb->ldr_color_memory, NULL);
 
   /* Color */
   if (fb->color_view)
@@ -1656,6 +1846,9 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     memset(ubo->cascade_splits, 0, sizeof(ubo->cascade_splits));
   }
 
+  /* Background (object_id 0) keeps exposure=1 so it doesn't shift with +/- */
+  ubo->exposure = (call->object_id == 0) ? 1.0f : dev->hdr_exposure;
+
   uint32_t dynamic_offset = (uint32_t)fb->ubo_offset;
   fb->ubo_offset += aligned_size;
 
@@ -1702,7 +1895,26 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     shadow_img_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }
 
-  VkWriteDescriptorSet writes[3] = {
+  /* IBL texture bindings — use real textures if available, black fallback */
+  VkDescriptorImageInfo irr_img_info = {
+      .sampler = dev->default_sampler,
+      .imageView =
+          dev->irradiance_view ? dev->irradiance_view : dev->black_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo pf_img_info = {
+      .sampler = dev->default_sampler,
+      .imageView =
+          dev->prefiltered_view ? dev->prefiltered_view : dev->black_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo brdf_img_info = {
+      .sampler = dev->default_sampler,
+      .imageView = dev->brdf_lut_view ? dev->brdf_lut_view : dev->black_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  VkWriteDescriptorSet writes[6] = {
       {
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = ds,
@@ -1727,8 +1939,32 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo = &shadow_img_info,
       },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 3,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &irr_img_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 4,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &pf_img_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 5,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &brdf_img_info,
+      },
   };
-  vkUpdateDescriptorSets(dev->device, 3, writes, 0, NULL);
+  vkUpdateDescriptorSets(dev->device, 6, writes, 0, NULL);
 
   /* Bind descriptor set with dynamic offset */
   vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1910,6 +2146,8 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     memset(ubo->cascade_splits, 0, sizeof(ubo->cascade_splits));
   }
 
+  ubo->exposure = (call->object_id == 0) ? 1.0f : dev->hdr_exposure;
+
   uint32_t dynamic_offset = (uint32_t)fb->ubo_offset;
   fb->ubo_offset += aligned_size;
 
@@ -1946,7 +2184,27 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
                          ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
-  VkWriteDescriptorSet writes[3] = {
+
+  /* IBL texture bindings — same as regular draw path */
+  VkDescriptorImageInfo irr_img_info = {
+      .sampler = dev->default_sampler,
+      .imageView =
+          dev->irradiance_view ? dev->irradiance_view : dev->black_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo pf_img_info = {
+      .sampler = dev->default_sampler,
+      .imageView =
+          dev->prefiltered_view ? dev->prefiltered_view : dev->black_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo brdf_img_info = {
+      .sampler = dev->default_sampler,
+      .imageView = dev->brdf_lut_view ? dev->brdf_lut_view : dev->black_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  VkWriteDescriptorSet writes[6] = {
       {
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = ds,
@@ -1971,8 +2229,32 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo = &shadow_img_info,
       },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 3,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &irr_img_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 4,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &pf_img_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 5,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &brdf_img_info,
+      },
   };
-  vkUpdateDescriptorSets(dev->device, 3, writes, 0, NULL);
+  vkUpdateDescriptorSets(dev->device, 6, writes, 0, NULL);
 
   vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           dev->pipeline_layout, 0, 1, &ds, 1, &dynamic_offset);
@@ -2006,11 +2288,95 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
    * VkSubpassDescriptionDepthStencilResolve.  Render pass transitions
    * the 1x resolve targets to TRANSFER_SRC_OPTIMAL automatically. */
 
+  /* ---- HDR Tonemap pass: color_image (HDR) → ldr_color_image (LDR) ---- */
+  if (dev->tonemap_enabled && fb->tonemap_framebuffer) {
+    /* Transition HDR color from TRANSFER_SRC → SHADER_READ_ONLY */
+    mop_vk_transition_image(
+        dev->cmd_buf, fb->color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    /* Allocate descriptor set for HDR sampler */
+    VkDescriptorSetAllocateInfo ds_ai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = dev->desc_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &dev->tonemap_desc_layout,
+    };
+    VkDescriptorSet tm_ds;
+    VkResult dr = vkAllocateDescriptorSets(dev->device, &ds_ai, &tm_ds);
+    if (dr == VK_SUCCESS) {
+      /* Update descriptor with HDR color image */
+      VkDescriptorImageInfo img_info = {
+          .sampler = dev->default_sampler,
+          .imageView = fb->color_view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet write = {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = tm_ds,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &img_info,
+      };
+      vkUpdateDescriptorSets(dev->device, 1, &write, 0, NULL);
+
+      /* Begin tonemap render pass */
+      VkClearValue clear = {.color = {{0, 0, 0, 1}}};
+      VkRenderPassBeginInfo rp_bi = {
+          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+          .renderPass = dev->tonemap_render_pass,
+          .framebuffer = fb->tonemap_framebuffer,
+          .renderArea = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}},
+          .clearValueCount = 1,
+          .pClearValues = &clear,
+      };
+      vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+      /* Set dynamic viewport/scissor — match scene's Y-flip viewport so the
+       * fullscreen shader's UV flip produces correct orientation */
+      VkViewport vp = {
+          .y = (float)fb->height,
+          .width = (float)fb->width,
+          .height = -(float)fb->height,
+          .maxDepth = 1.0f,
+      };
+      VkRect2D sc = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}};
+      vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
+      vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
+
+      /* Bind tonemap pipeline and push exposure */
+      vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        dev->tonemap_pipeline);
+      vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              dev->tonemap_pipeline_layout, 0, 1, &tm_ds, 0,
+                              NULL);
+      float exposure =
+          1.0f; /* scene objects already have exposure in frag UBO */
+      vkCmdPushConstants(dev->cmd_buf, dev->tonemap_pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float),
+                         &exposure);
+      vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0); /* fullscreen triangle */
+
+      vkCmdEndRenderPass(dev->cmd_buf);
+      /* tonemap render pass transitions ldr_color_image to
+       * TRANSFER_SRC_OPTIMAL */
+    }
+  }
+
   /* Copy images to readback staging buffers.
    * Render pass transitions images to TRANSFER_SRC_OPTIMAL. */
 
-  /* Color readback */
+  /* Color readback — from LDR image (tonemapped) if available,
+   * otherwise fall back to HDR color image */
   {
+    VkImage readback_src = (dev->tonemap_enabled && fb->ldr_color_image)
+                               ? fb->ldr_color_image
+                               : fb->color_image;
     VkBufferImageCopy region = {
         .imageSubresource =
             {
@@ -2019,7 +2385,7 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
             },
         .imageExtent = {(uint32_t)fb->width, (uint32_t)fb->height, 1},
     };
-    vkCmdCopyImageToBuffer(dev->cmd_buf, fb->color_image,
+    vkCmdCopyImageToBuffer(dev->cmd_buf, readback_src,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            fb->readback_color_buf, 1, &region);
   }
@@ -2201,6 +2567,110 @@ static MopRhiTexture *vk_texture_create(MopRhiDevice *dev, int width,
 }
 
 /* =========================================================================
+ * 16b. texture_create_hdr (R32G32B32A32_SFLOAT)
+ * ========================================================================= */
+
+static void staging_upload_image_float(MopRhiDevice *dev, VkImage image,
+                                       uint32_t width, uint32_t height,
+                                       const float *rgba_data) {
+  size_t row_bytes = (size_t)width * 4 * sizeof(float);
+  uint32_t rows_per_batch = (uint32_t)(MOP_VK_STAGING_SIZE / row_bytes);
+  if (rows_per_batch == 0) {
+    MOP_ERROR("[VK] HDR image row too large for staging: %zu", row_bytes);
+    return;
+  }
+  if (rows_per_batch > height)
+    rows_per_batch = height;
+
+  /* Transition to TRANSFER_DST once */
+  {
+    VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+    mop_vk_transition_image(
+        cb, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
+  }
+
+  /* Upload in row batches */
+  for (uint32_t y = 0; y < height; y += rows_per_batch) {
+    uint32_t batch_rows =
+        (y + rows_per_batch > height) ? (height - y) : rows_per_batch;
+    size_t batch_bytes = (size_t)batch_rows * row_bytes;
+
+    memcpy(dev->staging_mapped, rgba_data + (size_t)y * width * 4, batch_bytes);
+
+    VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+
+    VkBufferImageCopy region = {
+        .bufferOffset = 0,
+        .imageSubresource =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .layerCount = 1,
+            },
+        .imageOffset = {0, (int32_t)y, 0},
+        .imageExtent = {width, batch_rows, 1},
+    };
+    vkCmdCopyBufferToImage(cb, dev->staging_buf, image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
+  }
+
+  /* Transition to SHADER_READ_ONLY */
+  {
+    VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+    mop_vk_transition_image(
+        cb, image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
+  }
+}
+
+static MopRhiTexture *vk_texture_create_hdr(MopRhiDevice *dev, int width,
+                                            int height,
+                                            const float *rgba_float_data) {
+  MopRhiTexture *tex = calloc(1, sizeof(MopRhiTexture));
+  if (!tex)
+    return NULL;
+
+  tex->width = width;
+  tex->height = height;
+  tex->is_hdr = true;
+
+  VkResult r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+      VK_FORMAT_R32G32B32A32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &tex->image,
+      &tex->memory);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] HDR texture image create failed: %d", r);
+    free(tex);
+    return NULL;
+  }
+
+  r = mop_vk_create_image_view(dev->device, tex->image,
+                               VK_FORMAT_R32G32B32A32_SFLOAT,
+                               VK_IMAGE_ASPECT_COLOR_BIT, &tex->view);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] HDR texture view create failed: %d", r);
+    vkDestroyImage(dev->device, tex->image, NULL);
+    vkFreeMemory(dev->device, tex->memory, NULL);
+    free(tex);
+    return NULL;
+  }
+
+  staging_upload_image_float(dev, tex->image, (uint32_t)width, (uint32_t)height,
+                             rgba_float_data);
+
+  return tex;
+}
+
+/* =========================================================================
  * 17. texture_destroy
  * ========================================================================= */
 
@@ -2229,6 +2699,19 @@ static const void *vk_buffer_read(MopRhiBuffer *buf) {
 
 static float vk_frame_gpu_time_ms(MopRhiDevice *dev) {
   return (float)dev->last_timing.gpu_frame_ms;
+}
+
+static void vk_set_exposure(MopRhiDevice *dev, float exposure) {
+  dev->hdr_exposure = exposure > 0.0f ? exposure : 0.001f;
+}
+
+static void vk_set_ibl_textures(MopRhiDevice *dev, MopRhiTexture *irradiance,
+                                MopRhiTexture *prefiltered,
+                                MopRhiTexture *brdf_lut) {
+  dev->irradiance_view = irradiance ? irradiance->view : VK_NULL_HANDLE;
+  dev->prefiltered_view = prefiltered ? prefiltered->view : VK_NULL_HANDLE;
+  dev->brdf_lut_view = brdf_lut ? brdf_lut->view : VK_NULL_HANDLE;
+  dev->env_map_view = VK_NULL_HANDLE; /* set separately for skybox */
 }
 
 /* =========================================================================
@@ -2373,6 +2856,93 @@ void vk_compute_cascades(MopRhiDevice *dev, const MopMat4 *view,
  * Backend function table
  * ========================================================================= */
 
+/* Skybox UBO — must match SkyboxUBO in mop_skybox.frag */
+typedef struct MopVkSkyboxUBO {
+  float inv_view_proj[16]; /* mat4 */
+  float cam_pos[4];        /* vec4 (xyz + pad) */
+  float rotation;
+  float intensity;
+  float _pad[2];
+} MopVkSkyboxUBO; /* 96 bytes */
+
+static void vk_draw_skybox(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                           MopRhiTexture *env_map, const float *inv_vp,
+                           const float *cam_pos, float rotation,
+                           float intensity) {
+  if (!dev->skybox_pipeline || !env_map)
+    return;
+
+  /* Write UBO data into the shared UBO buffer */
+  size_t aligned_size =
+      mop_vk_align(sizeof(MopVkSkyboxUBO), dev->min_ubo_alignment);
+  if (fb->ubo_offset + aligned_size > MOP_VK_UBO_SIZE)
+    return;
+
+  MopVkSkyboxUBO *ubo =
+      (MopVkSkyboxUBO *)((uint8_t *)fb->ubo_mapped + fb->ubo_offset);
+  memcpy(ubo->inv_view_proj, inv_vp, 64);
+  ubo->cam_pos[0] = cam_pos[0];
+  ubo->cam_pos[1] = cam_pos[1];
+  ubo->cam_pos[2] = cam_pos[2];
+  ubo->cam_pos[3] = 0.0f;
+  ubo->rotation = rotation;
+  ubo->intensity = intensity;
+
+  uint32_t dynamic_offset = (uint32_t)fb->ubo_offset;
+  fb->ubo_offset += aligned_size;
+
+  /* Allocate descriptor set */
+  VkDescriptorSetAllocateInfo ds_ai = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = dev->desc_pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &dev->skybox_desc_layout,
+  };
+  VkDescriptorSet ds;
+  VkResult r = vkAllocateDescriptorSets(dev->device, &ds_ai, &ds);
+  if (r != VK_SUCCESS)
+    return;
+
+  /* Update descriptors: UBO + env map sampler */
+  VkDescriptorBufferInfo buf_info = {
+      .buffer = fb->ubo_buf,
+      .offset = 0,
+      .range = sizeof(MopVkSkyboxUBO),
+  };
+  VkDescriptorImageInfo img_info = {
+      .sampler = dev->default_sampler,
+      .imageView = env_map->view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkWriteDescriptorSet writes[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .pBufferInfo = &buf_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 1,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &img_info,
+      },
+  };
+  vkUpdateDescriptorSets(dev->device, 2, writes, 0, NULL);
+
+  /* Bind skybox pipeline and draw fullscreen triangle */
+  vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    dev->skybox_pipeline);
+  vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          dev->skybox_pipeline_layout, 0, 1, &ds, 1,
+                          &dynamic_offset);
+  vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
+}
+
 static const MopRhiBackend VK_BACKEND = {
     .name = "vulkan",
     .device_create = vk_device_create,
@@ -2391,11 +2961,15 @@ static const MopRhiBackend VK_BACKEND = {
     .framebuffer_read_object_id = vk_framebuffer_read_object_id,
     .framebuffer_read_depth = vk_framebuffer_read_depth,
     .texture_create = vk_texture_create,
+    .texture_create_hdr = vk_texture_create_hdr,
     .texture_destroy = vk_texture_destroy,
     .draw_instanced = vk_draw_instanced,
     .buffer_update = vk_buffer_update,
     .buffer_read = vk_buffer_read,
     .frame_gpu_time_ms = vk_frame_gpu_time_ms,
+    .set_exposure = vk_set_exposure,
+    .set_ibl_textures = vk_set_ibl_textures,
+    .draw_skybox = vk_draw_skybox,
 };
 
 const MopRhiBackend *mop_rhi_backend_vulkan(void) { return &VK_BACKEND; }

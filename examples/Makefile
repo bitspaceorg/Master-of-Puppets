@@ -19,7 +19,7 @@ CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror \
 ifdef RELEASE
   CFLAGS += -O2 -DNDEBUG
 else
-  CFLAGS += -O0 -g
+  CFLAGS += -O2 -g
 endif
 
 # -----------------------------------------------------------------------------

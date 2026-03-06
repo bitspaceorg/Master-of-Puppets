@@ -416,9 +416,15 @@ static MopVec3 axis_screen_dir(MopVec3 origin, int axis, MopVec3 rot,
  * ------------------------------------------------------------------------- */
 
 static void update_handle_transforms(MopGizmo *g) {
-  /* Fixed world-size — gizmo scales with the scene like regular objects */
-  (void)g->viewport;
-  float s = 1.2f;
+  /* Screen-space scaling: gizmo maintains constant screen size regardless
+   * of camera distance, like Blender's gizmo behavior. */
+  MopVec3 to_gizmo = mop_vec3_sub(g->position, g->viewport->cam_eye);
+  float cam_dist = mop_vec3_length(to_gizmo);
+  if (cam_dist < 0.1f)
+    cam_dist = 0.1f;
+  float s = cam_dist * 0.15f;
+  if (s < 0.3f)
+    s = 0.3f;
 
   MopMat4 sc = mop_mat4_scale((MopVec3){s, s, s});
   MopMat4 r = gizmo_rotation_matrix(g->rotation);

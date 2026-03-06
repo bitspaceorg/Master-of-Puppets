@@ -74,6 +74,9 @@ typedef struct MopTheme {
   MopColor axis_x;
   MopColor axis_y;
   MopColor axis_z;
+  MopColor axis_neg_x;
+  MopColor axis_neg_y;
+  MopColor axis_neg_z;
 
   /* Camera frustum visualization */
   MopColor camera_frustum_color;

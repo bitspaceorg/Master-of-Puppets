@@ -15,18 +15,15 @@
  * ------------------------------------------------------------------------- */
 
 #define CAM_ID_BASE 0xFFFE0000u
-#define CAM_ICON_SIZE 0.08f
+#define CAM_ICON_SIZE 0.02f /* tiny — picking handled via screen-space */
 #define CAM_PI 3.14159265358979323846f
 
 /* -------------------------------------------------------------------------
  * Forward declarations for internal helpers
  * ------------------------------------------------------------------------- */
 
-static void regenerate_frustum(MopViewport *vp, MopCameraObject *cam);
 static void regenerate_icon(MopViewport *vp, MopCameraObject *cam,
                             uint32_t cam_index);
-static uint32_t cam_slot_index(const MopViewport *vp,
-                               const MopCameraObject *cam);
 
 /* -------------------------------------------------------------------------
  * Add / remove cameras
@@ -79,8 +76,7 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
 
   vp->camera_count++;
 
-  /* Generate visual meshes */
-  regenerate_frustum(vp, cam);
+  /* Generate picking mesh (icon only — 2D overlay handles visuals) */
   regenerate_icon(vp, cam, slot);
 
   return cam;
@@ -197,8 +193,6 @@ void mop_camera_object_set_frustum_visible(MopCameraObject *cam, bool visible) {
   if (!cam || !cam->active)
     return;
   cam->frustum_visible = visible;
-  if (cam->frustum_mesh)
-    mop_mesh_set_opacity(cam->frustum_mesh, visible ? 1.0f : 0.0f);
 }
 
 bool mop_camera_object_get_frustum_visible(const MopCameraObject *cam) {
@@ -214,18 +208,7 @@ bool mop_camera_object_get_frustum_visible(const MopCameraObject *cam) {
 void mop_viewport_set_active_camera(MopViewport *vp, MopCameraObject *cam) {
   if (!vp)
     return;
-
-  /* Restore frustum visibility on previously active camera */
-  if (vp->active_camera && vp->active_camera->frustum_mesh) {
-    if (vp->active_camera->frustum_visible)
-      mop_mesh_set_opacity(vp->active_camera->frustum_mesh, 1.0f);
-  }
-
   vp->active_camera = cam;
-
-  /* Hide frustum of the active camera (don't see your own frustum) */
-  if (cam && cam->frustum_mesh)
-    mop_mesh_set_opacity(cam->frustum_mesh, 0.0f);
 }
 
 MopCameraObject *mop_viewport_get_active_camera(const MopViewport *vp) {
@@ -265,116 +248,9 @@ MopCameraObject *mop_viewport_get_camera(const MopViewport *vp,
  * Internal helpers
  * ------------------------------------------------------------------------- */
 
-static uint32_t cam_slot_index(const MopViewport *vp,
-                               const MopCameraObject *cam) {
-  return (uint32_t)(cam - vp->cameras);
-}
-
 /* -------------------------------------------------------------------------
- * Frustum mesh generation
- *
- * Computes the 8 frustum corners in world space by inverting the
- * view-projection matrix, then creates 12 degenerate triangles
- * (one per frustum edge) for wireframe rendering.
- * ------------------------------------------------------------------------- */
-
-static void regenerate_frustum(MopViewport *vp, MopCameraObject *cam) {
-  if (!vp || !cam)
-    return;
-
-  uint32_t slot = cam_slot_index(vp, cam);
-  uint32_t frustum_id = CAM_ID_BASE + slot * 2u;
-
-  /* Build view and projection matrices from camera params */
-  float fov_rad = cam->fov_degrees * (CAM_PI / 180.0f);
-  MopMat4 view = mop_mat4_look_at(cam->position, cam->target, cam->up);
-  MopMat4 proj = mop_mat4_perspective(fov_rad, cam->aspect_ratio,
-                                      cam->near_plane, cam->far_plane);
-  MopMat4 vp_mat = mop_mat4_multiply(proj, view);
-  MopMat4 inv_vp = mop_mat4_inverse(vp_mat);
-
-  /* NDC corners: 8 points of the [-1,1]^3 cube */
-  static const float ndc[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1},
-                                  {-1, 1, -1},  {-1, -1, 1}, {1, -1, 1},
-                                  {1, 1, 1},    {-1, 1, 1}};
-
-  MopVec3 corners[8];
-  for (int i = 0; i < 8; i++) {
-    MopVec4 clip = {ndc[i][0], ndc[i][1], ndc[i][2], 1.0f};
-    MopVec4 world = mop_mat4_mul_vec4(inv_vp, clip);
-    if (fabsf(world.w) > 1e-8f) {
-      float inv_w = 1.0f / world.w;
-      corners[i] = (MopVec3){world.x * inv_w, world.y * inv_w, world.z * inv_w};
-    } else {
-      corners[i] = (MopVec3){0, 0, 0};
-    }
-  }
-
-  /* 12 frustum edges: 4 near, 4 far, 4 connecting near-to-far */
-  static const int edges[12][2] = {/* Near face */
-                                   {0, 1},
-                                   {1, 2},
-                                   {2, 3},
-                                   {3, 0},
-                                   /* Far face */
-                                   {4, 5},
-                                   {5, 6},
-                                   {6, 7},
-                                   {7, 4},
-                                   /* Connecting edges */
-                                   {0, 4},
-                                   {1, 5},
-                                   {2, 6},
-                                   {3, 7}};
-
-  /* Build mesh: 8 vertices, 12 degenerate triangles (v0, v1, v0) = 36 idx */
-  MopColor color = vp->theme.camera_frustum_color;
-  MopVec3 up_n = {0, 1, 0};
-
-  MopVertex verts[8];
-  for (int i = 0; i < 8; i++) {
-    verts[i].position = corners[i];
-    verts[i].normal = up_n;
-    verts[i].color = color;
-    verts[i].u = 0.0f;
-    verts[i].v = 0.0f;
-  }
-
-  uint32_t indices[36];
-  for (int i = 0; i < 12; i++) {
-    int a = edges[i][0];
-    int b = edges[i][1];
-    indices[i * 3 + 0] = (uint32_t)a;
-    indices[i * 3 + 1] = (uint32_t)b;
-    indices[i * 3 + 2] = (uint32_t)a; /* degenerate */
-  }
-
-  MopMeshDesc desc;
-  memset(&desc, 0, sizeof(desc));
-  desc.vertices = verts;
-  desc.vertex_count = 8;
-  desc.indices = indices;
-  desc.index_count = 36;
-  desc.object_id = frustum_id;
-
-  if (cam->frustum_mesh) {
-    /* Update existing mesh geometry in-place */
-    mop_mesh_update_geometry(cam->frustum_mesh, vp, verts, 8, indices, 36);
-  } else {
-    cam->frustum_mesh = mop_viewport_add_mesh(vp, &desc);
-    if (cam->frustum_mesh) {
-      mop_mesh_set_opacity(cam->frustum_mesh,
-                           cam->frustum_visible ? 1.0f : 0.0f);
-    }
-  }
-
-  /* If this camera is the active one, hide its frustum */
-  if (vp->active_camera == cam && cam->frustum_mesh)
-    mop_mesh_set_opacity(cam->frustum_mesh, 0.0f);
-}
-
-/* -------------------------------------------------------------------------
- * Camera icon mesh — small box at camera position
+ * Camera icon mesh — tiny pick target at camera position
+ * Frustum visuals are handled entirely by the 2D overlay.
  * ------------------------------------------------------------------------- */
 
 static void regenerate_icon(MopViewport *vp, MopCameraObject *cam,
@@ -382,18 +258,19 @@ static void regenerate_icon(MopViewport *vp, MopCameraObject *cam,
   if (!vp || !cam)
     return;
 
-  uint32_t icon_id = CAM_ID_BASE + cam_index * 2u + 1u;
+  /* Use the camera's object_id so clicking the icon selects it */
+  uint32_t icon_id = cam->object_id;
 
-  /* Small box centered at camera position */
+  /* Tiny box in local space (centered at origin).
+   * mesh->position places it at the camera world position.
+   * Picking is handled via screen-space — this just provides the
+   * gizmo target mesh and a few-pixel pick buffer entry. */
   float s = CAM_ICON_SIZE;
-  MopVec3 p = cam->position;
   MopColor color = vp->theme.camera_frustum_color;
 
-  /* 8 corners of a cube */
-  MopVec3 box[8] = {{p.x - s, p.y - s, p.z - s}, {p.x + s, p.y - s, p.z - s},
-                    {p.x + s, p.y + s, p.z - s}, {p.x - s, p.y + s, p.z - s},
-                    {p.x - s, p.y - s, p.z + s}, {p.x + s, p.y - s, p.z + s},
-                    {p.x + s, p.y + s, p.z + s}, {p.x - s, p.y + s, p.z + s}};
+  /* 8 corners of a cube centered at origin */
+  MopVec3 box[8] = {{-s, -s, -s}, {s, -s, -s}, {s, s, -s}, {-s, s, -s},
+                    {-s, -s, s},  {s, -s, s},  {s, s, s},  {-s, s, s}};
 
   /* 6 faces, 2 triangles each = 12 triangles = 36 indices */
   /* Each face has its own 4 vertices with proper normals = 24 total verts */
@@ -442,4 +319,9 @@ static void regenerate_icon(MopViewport *vp, MopCameraObject *cam,
   } else {
     cam->icon_mesh = mop_viewport_add_mesh(vp, &desc);
   }
+
+  /* Place the mesh at the camera's world position via TRS transform.
+   * This ensures gizmo->target->position is correct for gizmo placement. */
+  if (cam->icon_mesh)
+    mop_mesh_set_position(cam->icon_mesh, cam->position);
 }

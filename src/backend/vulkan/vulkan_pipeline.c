@@ -34,10 +34,10 @@ VkResult mop_vk_create_render_pass(VkDevice device,
      * Depth resolve uses VK_RESOLVE_MODE_SAMPLE_ZERO_BIT (mandatory in 1.2).
      */
     VkAttachmentDescription2 attachments[6] = {
-        /* 0: MSAA color */
+        /* 0: MSAA color (HDR) */
         {
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
-            .format = VK_FORMAT_R8G8B8A8_SRGB,
+            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
             .samples = samples,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -70,10 +70,10 @@ VkResult mop_vk_create_render_pass(VkDevice device,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         },
-        /* 3: Resolve color (1x) */
+        /* 3: Resolve color (1x, HDR) */
         {
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
-            .format = VK_FORMAT_R8G8B8A8_SRGB,
+            .format = VK_FORMAT_R16G16B16A16_SFLOAT,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -188,9 +188,9 @@ VkResult mop_vk_create_render_pass(VkDevice device,
 
   /* ---- Non-MSAA: original 3-attachment render pass ---- */
   VkAttachmentDescription attachments[3] = {
-      /* 0: Color */
+      /* 0: Color (HDR) */
       {
-          .format = VK_FORMAT_R8G8B8A8_SRGB,
+          .format = VK_FORMAT_R16G16B16A16_SFLOAT,
           .samples = VK_SAMPLE_COUNT_1_BIT,
           .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -271,7 +271,7 @@ VkResult mop_vk_create_render_pass(VkDevice device,
 
 VkResult mop_vk_create_desc_set_layout(VkDevice device,
                                        VkDescriptorSetLayout *out) {
-  VkDescriptorSetLayoutBinding bindings[3] = {
+  VkDescriptorSetLayoutBinding bindings[6] = {
       {
           .binding = 0,
           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
@@ -290,11 +290,32 @@ VkResult mop_vk_create_desc_set_layout(VkDevice device,
           .descriptorCount = 1,
           .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       },
+      /* IBL: irradiance map (diffuse) */
+      {
+          .binding = 3,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+      /* IBL: prefiltered specular map */
+      {
+          .binding = 4,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+      /* IBL: BRDF LUT */
+      {
+          .binding = 5,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
   };
 
   VkDescriptorSetLayoutCreateInfo ci = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 3,
+      .bindingCount = 6,
       .pBindings = bindings,
   };
 
@@ -1065,6 +1086,319 @@ VkPipeline mop_vk_create_postprocess_pipeline(struct MopRhiDevice *dev) {
     return VK_NULL_HANDLE;
   }
   return pipeline;
+}
+
+/* -------------------------------------------------------------------------
+ * HDR Tonemap render pass + pipeline
+ *
+ * Single R8G8B8A8_SRGB attachment — LDR output after ACES tonemapping.
+ * Final layout is TRANSFER_SRC_OPTIMAL for readback copy.
+ * ------------------------------------------------------------------------- */
+
+VkResult mop_vk_create_tonemap_render_pass(VkDevice device, VkRenderPass *out) {
+  VkAttachmentDescription attachment = {
+      .format = VK_FORMAT_R8G8B8A8_SRGB,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+  };
+
+  VkAttachmentReference color_ref = {
+      .attachment = 0,
+      .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+  };
+
+  VkSubpassDescription subpass = {
+      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &color_ref,
+  };
+
+  VkSubpassDependency dep = {
+      .srcSubpass = VK_SUBPASS_EXTERNAL,
+      .dstSubpass = 0,
+      .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      .srcAccessMask = 0,
+      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+  };
+
+  VkRenderPassCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &attachment,
+      .subpassCount = 1,
+      .pSubpasses = &subpass,
+      .dependencyCount = 1,
+      .pDependencies = &dep,
+  };
+
+  return vkCreateRenderPass(device, &ci, NULL, out);
+}
+
+VkPipeline mop_vk_create_tonemap_pipeline(struct MopRhiDevice *dev) {
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = dev->fullscreen_vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = dev->tonemap_frag,
+          .pName = "main",
+      },
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_FALSE,
+      .depthWriteEnable = VK_FALSE,
+  };
+
+  VkPipelineColorBlendAttachmentState blend_att = {
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+
+  VkPipelineColorBlendStateCreateInfo color_blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &blend_att,
+  };
+
+  VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &input_assembly,
+      .pViewportState = &viewport_state,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth_stencil,
+      .pColorBlendState = &color_blend,
+      .pDynamicState = &dynamic_state,
+      .layout = dev->tonemap_pipeline_layout,
+      .renderPass = dev->tonemap_render_pass,
+      .subpass = 0,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkResult r = vkCreateGraphicsPipelines(dev->device, VK_NULL_HANDLE, 1, &ci,
+                                         NULL, &pipeline);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] tonemap pipeline creation failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
+}
+
+/* =========================================================================
+ * Skybox pipeline (equirectangular env map, fullscreen triangle)
+ *
+ * Renders into the main render pass (color + picking attachments).
+ * No depth test/write — draws as background behind everything.
+ * ========================================================================= */
+
+VkPipeline mop_vk_create_skybox_pipeline(struct MopRhiDevice *dev) {
+#if defined(MOP_VK_HAS_SKYBOX_SHADERS)
+  if (!dev->skybox_frag || !dev->fullscreen_vert)
+    return VK_NULL_HANDLE;
+
+  /* Descriptor set layout: binding 0 = UBO (dynamic), binding 1 = env map
+   * sampler */
+  VkDescriptorSetLayoutBinding bindings[2] = {
+      {
+          .binding = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+      {
+          .binding = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+  };
+
+  VkDescriptorSetLayoutCreateInfo desc_ci = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 2,
+      .pBindings = bindings,
+  };
+  VkResult r = vkCreateDescriptorSetLayout(dev->device, &desc_ci, NULL,
+                                           &dev->skybox_desc_layout);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] skybox descriptor set layout failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+
+  VkPipelineLayoutCreateInfo layout_ci = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &dev->skybox_desc_layout,
+  };
+  r = vkCreatePipelineLayout(dev->device, &layout_ci, NULL,
+                             &dev->skybox_pipeline_layout);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] skybox pipeline layout failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = dev->fullscreen_vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = dev->skybox_frag,
+          .pName = "main",
+      },
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = dev->msaa_samples,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_FALSE,
+      .depthWriteEnable = VK_FALSE,
+  };
+
+  /* Two color attachments: color (HDR) + picking (R32_UINT) */
+  VkPipelineColorBlendAttachmentState blend_atts[2] = {
+      {
+          .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                            VK_COLOR_COMPONENT_G_BIT |
+                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+      },
+      {
+          .colorWriteMask = VK_COLOR_COMPONENT_R_BIT,
+      },
+  };
+
+  VkPipelineColorBlendStateCreateInfo color_blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 2,
+      .pAttachments = blend_atts,
+  };
+
+  VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &input_assembly,
+      .pViewportState = &viewport_state,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth_stencil,
+      .pColorBlendState = &color_blend,
+      .pDynamicState = &dynamic_state,
+      .layout = dev->skybox_pipeline_layout,
+      .renderPass = dev->render_pass,
+      .subpass = 0,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  r = vkCreateGraphicsPipelines(dev->device, VK_NULL_HANDLE, 1, &ci, NULL,
+                                &pipeline);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] skybox pipeline creation failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
+#else
+  (void)dev;
+  return VK_NULL_HANDLE;
+#endif
 }
 
 #endif /* MOP_HAS_VULKAN */

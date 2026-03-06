@@ -10,6 +10,7 @@
  */
 
 #include "core/viewport_internal.h"
+#include <mop/interact/camera.h>
 #include <mop/mop.h>
 
 #include <string.h>
@@ -151,6 +152,15 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
     }
 
     if (vp->interact_state == MOP_INTERACT_CLICK_PENDING) {
+      /* Check axis indicator click — highest priority, snaps camera */
+      int axis_hit = mop_viewport_pick_axis_indicator(vp, event->x, event->y);
+      if (axis_hit > 0) {
+        mop_orbit_camera_snap_to_view(&vp->camera, (MopViewAxis)(axis_hit - 1));
+        vp->interact_state = MOP_INTERACT_IDLE;
+        vp->drag_axis = MOP_GIZMO_AXIS_NONE;
+        break;
+      }
+
       /* Mouse barely moved — this is a click */
       MopPickResult p = mop_viewport_pick(vp, (int)event->x, (int)event->y);
       MopGizmoAxis axis = mop_gizmo_test_pick(vp->gizmo, p);

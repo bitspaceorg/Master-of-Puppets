@@ -445,6 +445,9 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   vp->ambient = 0.25f;
   vp->shading_mode = MOP_SHADING_SMOOTH;
   vp->post_effects = MOP_POST_GAMMA | MOP_POST_FXAA;
+  vp->exposure = 1.0f;
+  vp->env_type = MOP_ENV_GRADIENT;
+  vp->env_intensity = 1.0f;
   vp->mesh_count = 0;
 
   /* Theme: MOP design language — must be initialized before visual resource
@@ -553,6 +556,20 @@ void mop_viewport_destroy(MopViewport *viewport) {
       im->active = false;
     }
   }
+
+  /* Destroy environment map resources */
+  if (viewport->env_texture)
+    viewport->rhi->texture_destroy(viewport->device, viewport->env_texture);
+  if (viewport->env_irradiance)
+    viewport->rhi->texture_destroy(viewport->device, viewport->env_irradiance);
+  if (viewport->env_prefiltered)
+    viewport->rhi->texture_destroy(viewport->device, viewport->env_prefiltered);
+  if (viewport->env_brdf_lut)
+    viewport->rhi->texture_destroy(viewport->device, viewport->env_brdf_lut);
+  free(viewport->env_hdr_data);
+  free(viewport->env_irradiance_data);
+  free(viewport->env_prefiltered_data);
+  free(viewport->env_brdf_lut_data);
 
   /* Destroy gradient background buffers */
   if (viewport->bg_vb)
@@ -1170,6 +1187,7 @@ void mop_overlay_builtin_selection(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_outline(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_grid(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_camera_objects(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data);
 
@@ -1225,7 +1243,106 @@ static uint32_t s_triangle_count;
   } while (0)
 
 /* ---- Pass: gradient background ---- */
+
+/* Declared in environment.c — sampling functions for CPU skybox + IBL */
+void mop_env_sample_irradiance(const MopViewport *vp, MopVec3 normal,
+                               float out[3]);
+void mop_env_sample_prefiltered(const MopViewport *vp, MopVec3 reflect_dir,
+                                float roughness, float out[3]);
+void mop_env_sample_brdf_lut(const MopViewport *vp, float ndotv,
+                             float roughness, float *scale, float *bias);
+
+/* Bilinear sample from RGBA float image (local helper for skybox) */
+static void env_sample_bilinear(const float *data, int w, int h, float u,
+                                float v, float out[4]) {
+  u = u - floorf(u);
+  v = v - floorf(v);
+  float fx = u * (float)(w - 1);
+  float fy = v * (float)(h - 1);
+  int x0 = (int)fx;
+  int y0 = (int)fy;
+  int x1 = (x0 + 1) % w;
+  int y1 = y0 + 1;
+  if (y1 >= h)
+    y1 = h - 1;
+  float sx = fx - (float)x0;
+  float sy = fy - (float)y0;
+  const float *p00 = &data[((size_t)y0 * w + x0) * 4];
+  const float *p10 = &data[((size_t)y0 * w + x1) * 4];
+  const float *p01 = &data[((size_t)y1 * w + x0) * 4];
+  const float *p11 = &data[((size_t)y1 * w + x1) * 4];
+  for (int c = 0; c < 4; c++) {
+    float top = p00[c] * (1.0f - sx) + p10[c] * sx;
+    float bot = p01[c] * (1.0f - sx) + p11[c] * sx;
+    out[c] = top * (1.0f - sy) + bot * sy;
+  }
+}
+
+/* CPU skybox: renders equirectangular HDR environment to color_hdr buffer.
+ * Writes to all pixels (as background — depth test happens later). */
+static void pass_background_hdri_cpu(MopViewport *vp) {
+  MopSwFramebuffer *fb = (MopSwFramebuffer *)vp->framebuffer;
+  if (!fb->color_hdr || !vp->env_hdr_data)
+    return;
+
+  int sw = fb->width, sh = fb->height;
+  float fov = vp->cam_fov_radians;
+  float aspect = (float)sw / (float)sh;
+  float half_h = tanf(fov * 0.5f);
+  float half_w = half_h * aspect;
+
+  /* Camera basis vectors */
+  MopVec3 fwd = mop_vec3_normalize(mop_vec3_sub(vp->cam_target, vp->cam_eye));
+  MopVec3 right = mop_vec3_normalize(mop_vec3_cross(fwd, vp->cam_up));
+  MopVec3 up = mop_vec3_cross(right, fwd);
+
+  float rotation = vp->env_rotation;
+  float intensity = vp->env_intensity;
+  const float pi = 3.14159265358979f;
+
+  for (int y = 0; y < sh; y++) {
+    float ndc_y = 1.0f - 2.0f * ((float)y + 0.5f) / (float)sh;
+    for (int x = 0; x < sw; x++) {
+      float ndc_x = 2.0f * ((float)x + 0.5f) / (float)sw - 1.0f;
+
+      /* Ray direction through pixel */
+      float dx = fwd.x + right.x * ndc_x * half_w + up.x * ndc_y * half_h;
+      float dy = fwd.y + right.y * ndc_x * half_w + up.y * ndc_y * half_h;
+      float dz = fwd.z + right.z * ndc_x * half_w + up.z * ndc_y * half_h;
+      float len = sqrtf(dx * dx + dy * dy + dz * dz);
+      dx /= len;
+      dy /= len;
+      dz /= len;
+
+      /* Equirectangular UV */
+      float phi_val = atan2f(dz, dx) + rotation;
+      float clamped_dy = dy < -1.0f ? -1.0f : (dy > 1.0f ? 1.0f : dy);
+      float theta_val = asinf(clamped_dy);
+      float eu = phi_val / (2.0f * pi) + 0.5f;
+      float ev = theta_val / pi + 0.5f;
+
+      float sample[4];
+      env_sample_bilinear(vp->env_hdr_data, vp->env_width, vp->env_height, eu,
+                          ev, sample);
+
+      size_t idx = ((size_t)y * sw + x) * 4;
+      fb->color_hdr[idx + 0] = sample[0] * intensity;
+      fb->color_hdr[idx + 1] = sample[1] * intensity;
+      fb->color_hdr[idx + 2] = sample[2] * intensity;
+      fb->color_hdr[idx + 3] = 1.0f;
+    }
+  }
+}
+
 static void pass_background(MopViewport *vp) {
+  /* HDRI/procedural sky as skybox — only on CPU backend (GPU keeps gray bg) */
+  if ((vp->env_type == MOP_ENV_HDRI ||
+       vp->env_type == MOP_ENV_PROCEDURAL_SKY) &&
+      vp->env_hdr_data && vp->backend_type == MOP_BACKEND_CPU) {
+    pass_background_hdri_cpu(vp);
+    return;
+  }
+
   if (!vp->bg_vb || !vp->bg_ib)
     return;
 
@@ -1608,6 +1725,14 @@ void mop_viewport_render(MopViewport *viewport) {
   if (viewport->frame_cb)
     viewport->frame_cb(viewport, true, viewport->frame_cb_data);
 
+  /* Tick camera inertia (smooth orbit/zoom deceleration) */
+  {
+    float dt = viewport->last_frame_time - viewport->prev_frame_time;
+    if (dt > 0.0f && dt < 0.5f)
+      mop_orbit_camera_tick(&viewport->camera, dt);
+    viewport->prev_frame_time = viewport->last_frame_time;
+  }
+
   /* Apply owned camera each frame */
   mop_orbit_camera_apply(&viewport->camera, viewport);
 
@@ -1691,6 +1816,10 @@ void mop_viewport_render(MopViewport *viewport) {
                              viewport->clear_color);
   double t_clear_end = mop_profile_now_ms();
 
+  /* Set HDR exposure on the backend before any draws (UBOs read it) */
+  if (viewport->rhi->set_exposure)
+    viewport->rhi->set_exposure(viewport->device, viewport->exposure);
+
   /* --- POST_CLEAR hooks --- */
   dispatch_hooks(viewport, MOP_STAGE_POST_CLEAR);
 
@@ -1704,6 +1833,24 @@ void mop_viewport_render(MopViewport *viewport) {
   /* --- Shadow map pass (CPU backend only) --- */
   if (viewport->backend_type == MOP_BACKEND_CPU)
     pass_shadow(viewport);
+
+  /* --- Set IBL state for rendering --- */
+  /* Update GPU IBL texture bindings for all backends */
+  if (viewport->rhi->set_ibl_textures) {
+    viewport->rhi->set_ibl_textures(viewport->device, viewport->env_irradiance,
+                                    viewport->env_prefiltered,
+                                    viewport->env_brdf_lut);
+  }
+
+  if (viewport->backend_type == MOP_BACKEND_CPU &&
+      viewport->env_irradiance_data) {
+    mop_sw_ibl_set(viewport->env_irradiance_data, viewport->env_irradiance_w,
+                   viewport->env_irradiance_h, viewport->env_prefiltered_data,
+                   viewport->env_prefiltered_w, viewport->env_prefiltered_h,
+                   viewport->env_prefiltered_levels,
+                   viewport->env_brdf_lut_data, 256, /* BRDF_LUT_SIZE */
+                   viewport->env_rotation, viewport->env_intensity);
+  }
 
   /* --- Rasterize phase --- */
   double t_rasterize_start = mop_profile_now_ms();
@@ -1728,7 +1875,18 @@ void mop_viewport_render(MopViewport *viewport) {
 
   /* Geometry HUD skipped — 2D overlay replaces it (pass_hud removed) */
 
+  /* Set HDR exposure on the backend before frame_end (GPU tonemap uses it) */
+  if (viewport->rhi->set_exposure)
+    viewport->rhi->set_exposure(viewport->device, viewport->exposure);
+
   viewport->rhi->frame_end(viewport->device, viewport->framebuffer);
+
+  /* HDR → LDR resolve (ACES tonemap + exposure) — converts float HDR
+   * accumulation buffer to uint8 color buffer before overlays/postprocess. */
+  if (viewport->backend_type == MOP_BACKEND_CPU) {
+    MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)viewport->framebuffer;
+    mop_sw_hdr_resolve(sw_fb, viewport->exposure);
+  }
 
   /* Post-process overlays — run after frame_end so that readback buffers
    * (color, object_id, depth) are populated (GPU copies happen in frame_end).
@@ -1741,13 +1899,23 @@ void mop_viewport_render(MopViewport *viewport) {
   if (viewport->show_chrome) {
     mop_overlay_builtin_grid(viewport, NULL); /* grid on below-Y=0 objects */
     mop_overlay_builtin_light_indicators(viewport, NULL);
+
+    /* Sync camera object positions from icon mesh (gizmo drag updates mesh) */
+    for (uint32_t ci = 0; ci < MOP_MAX_CAMERAS; ci++) {
+      struct MopCameraObject *cam = &viewport->cameras[ci];
+      if (cam->active && cam->icon_mesh)
+        cam->position = cam->icon_mesh->position;
+    }
+    mop_overlay_builtin_camera_objects(viewport, NULL);
     mop_overlay_builtin_gizmo_2d(viewport, NULL);
     mop_overlay_builtin_axis_indicator_2d(viewport, NULL);
   }
 
-  /* Clear shadow state */
-  if (viewport->backend_type == MOP_BACKEND_CPU)
+  /* Clear shadow + IBL state */
+  if (viewport->backend_type == MOP_BACKEND_CPU) {
     mop_sw_shadow_clear();
+    mop_sw_ibl_clear();
+  }
 
   /* Post-render subsystems (postprocess effects, etc.) */
   mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_POST_RENDER,
@@ -1885,7 +2053,7 @@ static uint32_t pick_gizmo_screen(const MopViewport *vp, float mx, float my) {
   if (s < 0.05f)
     s = 0.05f;
 
-  float threshold = 12.0f; /* pixels */
+  float threshold = 16.0f; /* pixels — widened for easier clicking */
   float best_dist = threshold;
   int best_axis = -1;
 
@@ -2003,6 +2171,36 @@ static uint32_t pick_light_screen(const MopViewport *vp, float mx, float my) {
   return best_id;
 }
 
+/* Screen-space camera object pick — returns the camera's object_id, or 0 */
+static uint32_t pick_camera_screen(const MopViewport *vp, float mx, float my) {
+  if (vp->camera_count == 0)
+    return 0;
+
+  float threshold = 20.0f; /* pixels — generous for 2D overlay click target */
+  float best_dist = threshold;
+  uint32_t best_id = 0;
+
+  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+    const struct MopCameraObject *cam = &vp->cameras[i];
+    if (!cam->active)
+      continue;
+    if (vp->active_camera == cam)
+      continue; /* don't pick the active camera */
+
+    float sx, sy;
+    if (!pick_project(cam->position, vp, &sx, &sy))
+      continue;
+
+    float d = sqrtf((mx - sx) * (mx - sx) + (my - sy) * (my - sy));
+    if (d < best_dist) {
+      best_dist = d;
+      best_id = cam->object_id;
+    }
+  }
+
+  return best_id;
+}
+
 /* -------------------------------------------------------------------------
  * Picking
  * ------------------------------------------------------------------------- */
@@ -2025,12 +2223,30 @@ MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y) {
    * These have priority over scene objects — they're always "on top". */
   float mx = (float)x, my = (float)y;
   uint32_t chrome_id = pick_gizmo_screen(viewport, mx, my);
-  if (chrome_id == 0)
+  if (chrome_id == 0) {
     chrome_id = pick_light_screen(viewport, mx, my);
+    /* Don't let the selected light's indicator steal clicks from gizmo handles.
+     * When a light is selected and the gizmo is visible, clicking near the
+     * light indicator would re-select it instead of starting a gizmo drag. */
+    if (chrome_id == viewport->selected_id &&
+        (chrome_id & 0xFFFE0000u) == 0xFFFE0000u &&
+        mop_gizmo_is_visible(viewport->gizmo)) {
+      chrome_id = 0;
+    }
+  }
   if (chrome_id != 0) {
     result.hit = true;
     result.object_id = chrome_id;
     result.depth = 0.0f; /* always on top */
+    return result;
+  }
+
+  /* Screen-space camera pick — generous click target around 2D overlay */
+  uint32_t cam_id = pick_camera_screen(viewport, mx, my);
+  if (cam_id != 0) {
+    result.hit = true;
+    result.object_id = cam_id;
+    result.depth = 0.0f;
     return result;
   }
 
@@ -2264,4 +2480,65 @@ void mop_viewport_set_chrome(MopViewport *viewport, bool visible) {
   /* Hide/show the grid mesh */
   if (viewport->grid)
     mop_mesh_set_opacity(viewport->grid, visible ? 1.0f : 0.0f);
+}
+
+int mop_viewport_pick_axis_indicator(MopViewport *vp, float mx, float my) {
+  if (!vp)
+    return 0;
+
+  int w = vp->width, h = vp->height;
+  if (w <= 0 || h <= 0)
+    return 0;
+
+  /* Same layout as axis indicator overlay — uniform scale from min(w,h) */
+  float cx = roundf(0.09f * (float)w);
+  float cy = roundf(0.89f * (float)h);
+  float scale = fminf((float)w, (float)h) * 0.06f;
+
+  /* View rotation only (strip translation) */
+  MopMat4 view_rot = vp->view_matrix;
+  view_rot.d[12] = 0.0f;
+  view_rot.d[13] = 0.0f;
+  view_rot.d[14] = 0.0f;
+  view_rot.d[15] = 1.0f;
+
+  MopVec3 dirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+
+  /* Map: axis index → MopViewAxis
+   * +X → LEFT(3),   +Y → BOTTOM(5), +Z → FRONT(0)
+   * -X → RIGHT(2),  -Y → TOP(4),    -Z → BACK(1) */
+  static const int pos_view[] = {3, 5, 0}; /* MOP_VIEW_LEFT, BOTTOM, FRONT */
+  static const int neg_view[] = {2, 4, 1}; /* MOP_VIEW_RIGHT, TOP, BACK */
+
+  float hit_radius = 16.0f * (float)vp->ssaa_factor;
+  float best_dist = hit_radius * hit_radius;
+  int best_hit = 0;
+
+  for (int a = 0; a < 3; a++) {
+    MopVec4 dir4 = {dirs[a].x, dirs[a].y, dirs[a].z, 0.0f};
+    MopVec4 rot = mop_mat4_mul_vec4(view_rot, dir4);
+
+    /* Positive axis tip */
+    float sx = cx + rot.x * scale;
+    float sy = cy - rot.y * scale;
+    float dx = mx - sx, dy = my - sy;
+    float d2 = dx * dx + dy * dy;
+    if (d2 < best_dist) {
+      best_dist = d2;
+      best_hit = pos_view[a] + 1; /* +1 so 0=miss */
+    }
+
+    /* Negative axis tip */
+    sx = cx - rot.x * scale;
+    sy = cy + rot.y * scale;
+    dx = mx - sx;
+    dy = my - sy;
+    d2 = dx * dx + dy * dy;
+    if (d2 < best_dist) {
+      best_dist = d2;
+      best_hit = neg_view[a] + 1;
+    }
+  }
+
+  return best_hit;
 }

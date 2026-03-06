@@ -31,4 +31,9 @@ typedef struct MopFogParams {
 void mop_viewport_set_post_effects(MopViewport *viewport, uint32_t effects);
 void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog);
 
+/* HDR exposure control — multiplier applied before ACES Filmic tonemapping.
+ * Default is 1.0.  Higher values brighten, lower values darken. */
+void mop_viewport_set_exposure(MopViewport *viewport, float exposure);
+float mop_viewport_get_exposure(const MopViewport *viewport);
+
 #endif /* MOP_RENDER_POSTPROCESS_H */

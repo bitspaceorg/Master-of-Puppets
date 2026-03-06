@@ -8,6 +8,7 @@
 #include <math.h>
 #include <mop/core/viewport.h>
 #include <mop/interact/camera.h>
+#include <stdbool.h>
 
 MopOrbitCamera mop_orbit_camera_default(void) {
   return (MopOrbitCamera){
@@ -19,6 +20,7 @@ MopOrbitCamera mop_orbit_camera_default(void) {
       .near_plane = 0.1f,
       .far_plane = 100.0f,
       .max_pitch = 1.5f,
+      .target_distance = 4.5f,
   };
 }
 
@@ -57,11 +59,11 @@ void mop_orbit_camera_pan(MopOrbitCamera *cam, float dx, float dy) {
 }
 
 void mop_orbit_camera_zoom(MopOrbitCamera *cam, float delta) {
-  cam->distance -= delta * 0.3f;
-  if (cam->distance < 0.5f)
-    cam->distance = 0.5f;
-  if (cam->distance > 500.0f)
-    cam->distance = 500.0f;
+  cam->target_distance = cam->distance - delta * 0.3f;
+  if (cam->target_distance < 0.5f)
+    cam->target_distance = 0.5f;
+  if (cam->target_distance > 500.0f)
+    cam->target_distance = 500.0f;
 }
 
 void mop_orbit_camera_move(MopOrbitCamera *cam, float forward, float right) {
@@ -69,4 +71,39 @@ void mop_orbit_camera_move(MopOrbitCamera *cam, float forward, float right) {
   float rgt_x = cosf(cam->yaw), rgt_z = -sinf(cam->yaw);
   cam->target.x += fwd_x * forward + rgt_x * right;
   cam->target.z += fwd_z * forward + rgt_z * right;
+}
+
+bool mop_orbit_camera_tick(MopOrbitCamera *cam, float dt) {
+  if (dt <= 0.0f)
+    return false;
+
+  /* Smooth zoom — lerp distance toward target */
+  float zoom_diff = cam->target_distance - cam->distance;
+  if (fabsf(zoom_diff) > 0.001f) {
+    float zoom_speed = 1.0f - expf(-16.0f * dt);
+    cam->distance += zoom_diff * zoom_speed;
+    return true;
+  }
+  cam->distance = cam->target_distance;
+  return false;
+}
+
+void mop_orbit_camera_snap_to_view(MopOrbitCamera *cam, MopViewAxis view) {
+  if (!cam)
+    return;
+  /* Spherical coords: eye = target + d*(cos(p)*sin(y), sin(p), cos(p)*cos(y))
+   * Front view: looking along -Z, eye on +Z side → yaw=0, pitch=0
+   * Back:  yaw=π       Right: yaw=-π/2     Left: yaw=π/2
+   * Top:   pitch=π/2   Bottom: pitch=-π/2 */
+  static const float views[][2] = {
+      /* {yaw, pitch} */
+      [MOP_VIEW_FRONT] = {3.14159265f, 0.0f},
+      [MOP_VIEW_BACK] = {0.0f, 0.0f},
+      [MOP_VIEW_RIGHT] = {-1.57079633f, 0.0f},
+      [MOP_VIEW_LEFT] = {1.57079633f, 0.0f},
+      [MOP_VIEW_TOP] = {0.0f, 1.57079633f},
+      [MOP_VIEW_BOTTOM] = {0.0f, -1.57079633f},
+  };
+  cam->yaw = views[view][0];
+  cam->pitch = views[view][1];
 }

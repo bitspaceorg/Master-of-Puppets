@@ -46,6 +46,11 @@
                         else
                           echo "  Lua:          NOT FOUND"
                         fi
+                    ''
+                    + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                        export VK_ICD_FILENAMES=${pkgs.moltenvk}/share/vulkan/icd.d/MoltenVK_icd.json
+                        export VK_DRIVER_FILES=${pkgs.moltenvk}/share/vulkan/icd.d/MoltenVK_icd.json
+                        echo "  MoltenVK:     ${pkgs.moltenvk.version}"
                     '';
                 };
             }

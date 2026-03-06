@@ -71,7 +71,9 @@ typedef struct MopVkFragUniforms {
   float _pad_shadow[2];    /* align to vec4 boundary */
   float cascade_vp[4][16]; /* 4 x mat4 (column-major) = 256 bytes */
   float cascade_splits[4]; /* view-space Z split distances */
-} MopVkFragUniforms;       /* Total: 576 + 16 + 256 + 16 = 864 bytes */
+  float exposure;          /* HDR exposure multiplier (scene only) */
+  float _pad_exposure[3];  /* align to vec4 */
+} MopVkFragUniforms;
 
 /* -------------------------------------------------------------------------
  * Pipeline cache key
@@ -157,6 +159,11 @@ struct MopRhiDevice {
   VkDeviceMemory white_memory;
   VkImageView white_view;
 
+  /* 1x1 black fallback texture (for IBL when no env map loaded) */
+  VkImage black_image;
+  VkDeviceMemory black_memory;
+  VkImageView black_view;
+
   /* Staging buffer for uploads */
   VkBuffer staging_buf;
   VkDeviceMemory staging_mem;
@@ -203,6 +210,29 @@ struct MopRhiDevice {
   VkShaderModule fullscreen_vert;
   VkShaderModule fxaa_frag;
   bool postprocess_enabled; /* controlled by MOP_POST_FXAA flag */
+
+  /* HDR tonemapping */
+  VkRenderPass tonemap_render_pass;
+  VkPipeline tonemap_pipeline;
+  VkPipelineLayout tonemap_pipeline_layout;
+  VkDescriptorSetLayout tonemap_desc_layout;
+  VkShaderModule tonemap_frag;
+  float hdr_exposure; /* set per-frame before frame_end */
+  bool tonemap_enabled;
+
+  /* Skybox (equirectangular environment map) */
+  VkPipeline skybox_pipeline;
+  VkPipelineLayout skybox_pipeline_layout;
+  VkDescriptorSetLayout skybox_desc_layout;
+  VkShaderModule skybox_frag;
+  bool skybox_enabled;
+
+  /* IBL descriptor bindings (binding 3 = irradiance, 4 = prefiltered,
+   * 5 = BRDF LUT) — textures stored on viewport, views cached here */
+  VkImageView env_map_view;     /* environment map for skybox */
+  VkImageView irradiance_view;  /* diffuse irradiance */
+  VkImageView prefiltered_view; /* prefiltered specular */
+  VkImageView brdf_lut_view;    /* BRDF LUT */
 };
 
 /* -------------------------------------------------------------------------
@@ -242,6 +272,12 @@ struct MopRhiFramebuffer {
   VkImageView msaa_depth_view;
 
   VkFramebuffer framebuffer;
+
+  /* LDR output image (R8G8B8A8_SRGB — tonemap resolve target) */
+  VkImage ldr_color_image;
+  VkDeviceMemory ldr_color_memory;
+  VkImageView ldr_color_view;
+  VkFramebuffer tonemap_framebuffer;
 
   /* Readback staging buffers (host-visible, persistently mapped) */
   VkBuffer readback_color_buf;
@@ -296,6 +332,7 @@ struct MopRhiTexture {
   VkImageView view;
   int width;
   int height;
+  bool is_hdr; /* true = R32G32B32A32_SFLOAT format */
 };
 
 /* -------------------------------------------------------------------------
@@ -370,6 +407,16 @@ VkResult mop_vk_create_postprocess_render_pass(VkDevice device,
 
 /* Create the FXAA post-process pipeline. */
 VkPipeline mop_vk_create_postprocess_pipeline(struct MopRhiDevice *dev);
+
+/* Create the HDR tonemap render pass (single R8G8B8A8_SRGB attachment). */
+VkResult mop_vk_create_tonemap_render_pass(VkDevice device, VkRenderPass *out);
+
+/* Create the HDR tonemap pipeline (fullscreen triangle + ACES). */
+VkPipeline mop_vk_create_tonemap_pipeline(struct MopRhiDevice *dev);
+
+/* Create the skybox pipeline (fullscreen triangle + equirectangular env map).
+ * Writes to the main render pass color + picking attachments. */
+VkPipeline mop_vk_create_skybox_pipeline(struct MopRhiDevice *dev);
 
 /* -------------------------------------------------------------------------
  * Utility: one-shot command buffer for upload/transition

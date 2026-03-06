@@ -13,6 +13,7 @@
 #include "rhi/rhi.h"
 #include <mop/core/camera_object.h>
 #include <mop/core/display.h>
+#include <mop/core/environment.h>
 #include <mop/core/light.h>
 #include <mop/core/overlay.h>
 #include <mop/core/pipeline.h>
@@ -322,6 +323,7 @@ struct MopViewport {
 
   /* Time tracking for simulation */
   float last_frame_time;
+  float prev_frame_time; /* previous last_frame_time, for computing dt */
 
   /* Post-processing (Phase 6C) */
   uint32_t post_effects;
@@ -366,6 +368,27 @@ struct MopViewport {
   /* Chrome visibility (grid, axis indicator, background, gizmo) */
   bool show_chrome; /* true by default */
 
+  /* HDR exposure multiplier (default 1.0) */
+  float exposure;
+
+  /* Environment map (HDRI / procedural sky) */
+  MopEnvironmentType env_type;
+  MopRhiTexture *env_texture; /* GPU-side HDR texture */
+  float *env_hdr_data;        /* raw float RGBA data for CPU sampling */
+  int env_width, env_height;
+  float env_rotation;            /* Y-axis rotation in radians */
+  float env_intensity;           /* brightness multiplier (default 1.0) */
+  MopRhiTexture *env_irradiance; /* precomputed diffuse irradiance map */
+  float *env_irradiance_data;    /* raw float RGBA irradiance for CPU */
+  int env_irradiance_w, env_irradiance_h;
+  MopRhiTexture *env_prefiltered; /* prefiltered specular map */
+  float *env_prefiltered_data;    /* raw float RGBA prefiltered for CPU */
+  int env_prefiltered_w, env_prefiltered_h;
+  int env_prefiltered_levels;    /* number of roughness mip levels */
+  MopRhiTexture *env_brdf_lut;   /* split-sum BRDF LUT texture */
+  float *env_brdf_lut_data;      /* raw float RG BRDF LUT for CPU */
+  MopProceduralSkyDesc sky_desc; /* procedural sky parameters */
+
   /* Reversed-Z depth buffer — improves depth precision for large scenes */
   bool reverse_z;
 
@@ -388,6 +411,9 @@ void mop_postprocess_apply(MopSwFramebuffer *fb, uint32_t effects,
 /* Light indicator management — create/destroy/update visual indicators */
 void mop_light_update_indicators(MopViewport *vp);
 void mop_light_destroy_indicators(MopViewport *vp);
+
+/* Axis indicator pick — returns MopViewAxis+1, or 0 for miss */
+int mop_viewport_pick_axis_indicator(MopViewport *vp, float mx, float my);
 
 /* Gizmo internal accessors — used by 2D overlay renderer */
 bool mop_gizmo_is_visible(const MopGizmo *gizmo);

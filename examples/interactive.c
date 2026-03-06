@@ -29,6 +29,7 @@
 
 #include "common/geometry.h"
 #include <SDL3/SDL.h>
+#include <mop/core/environment.h>
 #include <mop/mop.h>
 
 #include <math.h>
@@ -99,10 +100,16 @@ typedef struct {
   /* Texture */
   MopTexture *checker_tex;
 
+  /* Camera object */
+  MopCameraObject *scene_camera;
+
   /* Display state */
   bool overlays_on;
   bool bounds_on;
   MopShadingMode shading;
+
+  /* HDR exposure */
+  float exposure;
 } Scene;
 
 /* =========================================================================
@@ -135,21 +142,17 @@ static void build_scene(MopViewport *vp, Scene *sc) {
   memset(sc, 0, sizeof(*sc));
   sc->next_id = 100;
   sc->shading = MOP_SHADING_SMOOTH;
+  sc->exposure = 1.0f;
 
   /* ---- Lighting ---- */
   mop_viewport_set_ambient(vp, 0.15f);
 
-  /* Single spot light — wide cone, soft falloff */
-  mop_viewport_add_light(vp, &(MopLight){.type = MOP_LIGHT_SPOT,
-                                         .position = {0.0f, 8.0f, 0.0f},
-                                         .direction = {0.0f, -1.0f, 0.0f},
-                                         .color = {1.0f, 0.97f, 0.92f, 1.0f},
-                                         .intensity = 3.0f,
-                                         .range = 30.0f,
-                                         .spot_inner_cos = 0.7f,
-                                         .spot_outer_cos = 0.3f,
-                                         .active = true,
-                                         .cast_shadows = true});
+  /* Bright point light — creates HDR highlights on metallic surfaces */
+  mop_viewport_add_light(vp, &(MopLight){.type = MOP_LIGHT_POINT,
+                                         .position = {2.0f, 4.0f, 3.0f},
+                                         .color = {1.0f, 0.95f, 0.85f, 1.0f},
+                                         .intensity = 80.0f,
+                                         .active = true});
 
   /* Ground plane removed — grid provides spatial reference */
   sc->ground = NULL;
@@ -280,6 +283,20 @@ static void build_scene(MopViewport *vp, Scene *sc) {
   /* ---- Camera ---- */
   mop_viewport_set_camera(vp, (MopVec3){6, 5, 8}, (MopVec3){0, 1.2f, 0},
                           (MopVec3){0, 1, 0}, 55.0f, 0.1f, 200.0f);
+
+  /* ---- Camera object (visible in scene with frustum) ---- */
+  sc->scene_camera =
+      mop_viewport_add_camera(vp, &(MopCameraObjectDesc){
+                                      .position = {-5.0f, 3.0f, 6.0f},
+                                      .target = {0.0f, 1.0f, 0.0f},
+                                      .up = {0.0f, 1.0f, 0.0f},
+                                      .fov_degrees = 45.0f,
+                                      .near_plane = 0.1f,
+                                      .far_plane = 30.0f,
+                                      .aspect_ratio = 16.0f / 9.0f,
+                                      .object_id = 90,
+                                      .name = "Camera",
+                                  });
 }
 
 /* =========================================================================
@@ -341,6 +358,11 @@ static void draw_hud(SDL_Renderer *r, int w, int h, const Scene *sc,
   SDL_SetRenderDrawColor(r, 200, 200, 200, 255);
   SDL_RenderDebugText(r, 250, 9, buf);
 
+  /* Exposure */
+  snprintf(buf, sizeof(buf), "Exp: %.2f", sc->exposure);
+  SDL_SetRenderDrawColor(r, 255, 200, 100, 255);
+  SDL_RenderDebugText(r, 370, 9, buf);
+
   /* Overlays */
   if (sc->overlays_on) {
     SDL_SetRenderDrawColor(r, 100, 255, 100, 255);
@@ -369,7 +391,7 @@ static void draw_hud(SDL_Renderer *r, int w, int h, const Scene *sc,
   SDL_RenderDebugText(
       r, 10, (float)h - 14,
       "LMB=orbit  RMB=pan  Scroll=zoom  W=wire  F=shading  "
-      "O=overlays  S=spawn  Del=remove  1/2/3=gizmo  R=reset  Q=quit");
+      "O=overlays  +/-=exposure  S=spawn  Del=remove  R=reset  Q=quit");
 }
 
 /* =========================================================================
@@ -402,7 +424,7 @@ int main(int argc, char *argv[]) {
     SDL_Quit();
     return 1;
   }
-  SDL_SetRenderVSync(renderer, 1);
+  SDL_SetRenderVSync(renderer, 0); /* no VSync — minimize input latency */
 
   /* Backend selection */
   MopBackendType backend = MOP_BACKEND_CPU;
@@ -441,6 +463,24 @@ int main(int argc, char *argv[]) {
   /* Build scene */
   Scene sc;
   build_scene(vp, &sc);
+
+  /* Load HDRI environment map if MOP_HDRI env var is set */
+  {
+    const char *hdri = getenv("MOP_HDRI");
+    if (hdri) {
+      MopEnvironmentDesc edesc = {
+          .type = MOP_ENV_HDRI,
+          .hdr_path = hdri,
+          .rotation = 0.0f,
+          .intensity = 1.0f,
+      };
+      if (mop_viewport_set_environment(vp, &edesc)) {
+        printf("[mop] HDRI loaded: %s\n", hdri);
+      } else {
+        fprintf(stderr, "[mop] Failed to load HDRI: %s\n", hdri);
+      }
+    }
+  }
 
   /* SDL texture for framebuffer blit */
   SDL_Texture *tex =
@@ -516,6 +556,21 @@ int main(int argc, char *argv[]) {
         case SDLK_R:
           mop_viewport_input(vp,
                              &(MopInputEvent){.type = MOP_INPUT_RESET_VIEW});
+          break;
+
+        case SDLK_EQUALS: /* +/= key — increase exposure */
+          sc.exposure *= 1.2f;
+          if (sc.exposure > 16.0f)
+            sc.exposure = 16.0f;
+          mop_viewport_set_exposure(vp, sc.exposure);
+          printf("[hdr] exposure = %.2f\n", sc.exposure);
+          break;
+        case SDLK_MINUS: /* - key — decrease exposure */
+          sc.exposure /= 1.2f;
+          if (sc.exposure < 0.05f)
+            sc.exposure = 0.05f;
+          mop_viewport_set_exposure(vp, sc.exposure);
+          printf("[hdr] exposure = %.2f\n", sc.exposure);
           break;
 
         case SDLK_S: {
@@ -623,8 +678,8 @@ int main(int argc, char *argv[]) {
           /* Two-finger scroll = orbit (both axes) */
           mop_viewport_input(vp,
                              &(MopInputEvent){.type = MOP_INPUT_SCROLL_ORBIT,
-                                              .dx = -ev.wheel.x * 8.0f,
-                                              .dy = ev.wheel.y * 8.0f});
+                                              .dx = -ev.wheel.x * 5.0f,
+                                              .dy = ev.wheel.y * 5.0f});
         }
         break;
       }

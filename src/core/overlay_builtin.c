@@ -959,6 +959,25 @@ static inline float ov_smoothstep(float lo, float hi, float x) {
   return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
+/* Blender's grid line AA from GPU Gems 2, Ch.22 "Fast Pre-filtered Lines".
+ * Approximates pixel-circle vs. line-segment intersection area.
+ * DISC_RADIUS = 1/sqrt(pi) * 1.05 treats the square pixel as a circle
+ * with equivalent area and adds 5% for better coverage. */
+#define MOP_DISC_RADIUS 0.5923f /* M_1_SQRTPI * 1.05 */
+#define MOP_GRID_LINE_SMOOTH_START (0.5f + MOP_DISC_RADIUS)
+#define MOP_GRID_LINE_SMOOTH_END (0.5f - MOP_DISC_RADIUS)
+
+static inline float grid_line_step(float dist) {
+  /* smoothstep(start, end, dist) where start > end → inverted */
+  if (dist <= MOP_GRID_LINE_SMOOTH_END)
+    return 1.0f;
+  if (dist >= MOP_GRID_LINE_SMOOTH_START)
+    return 0.0f;
+  float t = (dist - MOP_GRID_LINE_SMOOTH_END) /
+            (MOP_GRID_LINE_SMOOTH_START - MOP_GRID_LINE_SMOOTH_END);
+  return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
 void mop_overlay_builtin_grid(MopViewport *vp, void *user_data) {
   (void)user_data;
   if (!vp)
@@ -1013,18 +1032,33 @@ void mop_overlay_builtin_grid(MopViewport *vp, void *user_data) {
   Hi[8] = (H[0] * H[4] - H[1] * H[3]) * idet;
 
   bool is_cpu = (vp->backend_type == MOP_BACKEND_CPU);
-  float grid_half = 7.5f; /* 15x15 */
+  float grid_half = 25.0f; /* 50x50 */
 
-  /* Accent color → sRGB */
-  MopColor ac = vp->theme.accent;
-  uint8_t cr = (uint8_t)(sqrtf(ac.r) * 255.0f);
-  uint8_t cg_c = (uint8_t)(sqrtf(ac.g) * 255.0f);
-  uint8_t cb = (uint8_t)(sqrtf(ac.b) * 255.0f);
+  /* Grid line colors from theme */
+  MopColor minor_c = vp->theme.grid_minor;
+  MopColor major_c = vp->theme.grid_major;
+  MopColor ax_x_c = vp->theme.grid_axis_x;
+  MopColor ax_z_c = vp->theme.grid_axis_z;
 
-  /* Dimmed accent for minor grid lines */
-  uint8_t dr = (uint8_t)(sqrtf(ac.r * 0.25f) * 255.0f);
-  uint8_t dg = (uint8_t)(sqrtf(ac.g * 0.25f) * 255.0f);
-  uint8_t db = (uint8_t)(sqrtf(ac.b * 0.25f) * 255.0f);
+  /* Minor grid → sRGB */
+  uint8_t dr = (uint8_t)(sqrtf(minor_c.r) * 255.0f);
+  uint8_t dg = (uint8_t)(sqrtf(minor_c.g) * 255.0f);
+  uint8_t db = (uint8_t)(sqrtf(minor_c.b) * 255.0f);
+
+  /* Major grid → sRGB */
+  uint8_t cr = (uint8_t)(sqrtf(major_c.r) * 255.0f);
+  uint8_t cg_c = (uint8_t)(sqrtf(major_c.g) * 255.0f);
+  uint8_t cb = (uint8_t)(sqrtf(major_c.b) * 255.0f);
+
+  /* X-axis (red) → sRGB */
+  uint8_t ax_xr = (uint8_t)(sqrtf(ax_x_c.r) * 255.0f);
+  uint8_t ax_xg = (uint8_t)(sqrtf(ax_x_c.g) * 255.0f);
+  uint8_t ax_xb = (uint8_t)(sqrtf(ax_x_c.b) * 255.0f);
+
+  /* Z-axis (green) → sRGB */
+  uint8_t ax_zr = (uint8_t)(sqrtf(ax_z_c.r) * 255.0f);
+  uint8_t ax_zg = (uint8_t)(sqrtf(ax_z_c.g) * 255.0f);
+  uint8_t ax_zb = (uint8_t)(sqrtf(ax_z_c.b) * 255.0f);
 
   float inv_w2 = 2.0f / (float)w;
   float inv_h2 = 2.0f / (float)h;
@@ -1126,25 +1160,27 @@ void mop_overlay_builtin_grid(MopViewport *vp, void *user_data) {
       if (fw_z < 1e-7f)
         fw_z = 1e-7f;
 
-      /* --- Three grid levels: subgrid (1/3), major (1), axis (0) ---
-       * For each: compute proximity in pixels, then smoothstep AA.
-       * proximity_px = world_distance_to_line / fwidth */
+      /* --- Three grid levels using Blender's GPU Gems 2 disc-radius AA ---
+       * For each level: distance to nearest line / fwidth → pixel dist,
+       * then grid_line_step() for smooth pixel-circle coverage. */
 
       /* Subgrid: every 1/3 unit */
       float sub3x = wx * 3.0f, sub3z = wz * 3.0f;
       float sub_px_x = fabsf(sub3x - roundf(sub3x)) / (3.0f * fw_x);
       float sub_px_z = fabsf(sub3z - roundf(sub3z)) / (3.0f * fw_z);
-      float a_sub = ov_smoothstep(0.0f, 1.5f, fminf(sub_px_x, sub_px_z));
+      float a_sub = grid_line_step(fminf(sub_px_x, sub_px_z));
 
       /* Major grid: every 1 unit */
       float maj_px_x = fabsf(wx - roundf(wx)) / fw_x;
       float maj_px_z = fabsf(wz - roundf(wz)) / fw_z;
-      float a_maj = ov_smoothstep(0.0f, 1.5f, fminf(maj_px_x, maj_px_z));
+      float a_maj = grid_line_step(fminf(maj_px_x, maj_px_z));
 
-      /* Axis: X-axis (wz=0), Z-axis (wx=0) — 2px wide */
+      /* Axis: X-axis (wz=0), Z-axis (wx=0) — use line_size=0.1 like Blender */
       float ax_px_x = fabsf(wz) / fw_z;
       float ax_px_z = fabsf(wx) / fw_x;
-      float a_ax = ov_smoothstep(0.5f, 2.0f, fminf(ax_px_x, ax_px_z));
+      float a_ax_x = grid_line_step(ax_px_x - 0.1f);
+      float a_ax_z = grid_line_step(ax_px_z - 0.1f);
+      float a_ax = fmaxf(a_ax_x, a_ax_z);
 
       /* Nothing visible? */
       if (a_sub < 0.01f && a_maj < 0.01f && a_ax < 0.01f)
@@ -1180,18 +1216,25 @@ void mop_overlay_builtin_grid(MopViewport *vp, void *user_data) {
         }
       }
 
-      /* Edge fade — last 1.5 units of grid extent */
+      /* Edge fade — smooth fade over last 20% of grid extent (Blender-style) */
       float edge = fmaxf(fabsf(wx), fabsf(wz));
-      float edge_fade = ov_smoothstep(grid_half - 1.5f, grid_half, edge);
+      float fade_start = grid_half * 0.8f;
+      float edge_fade = ov_smoothstep(fade_start, grid_half, edge);
 
       /* Pick dominant level: axis > major > subgrid */
       float alpha;
       uint8_t fr, fg, fb;
       if (a_ax > 0.01f) {
         alpha = a_ax * 0.9f;
-        fr = cr;
-        fg = cg_c;
-        fb = cb;
+        if (a_ax_x >= a_ax_z) {
+          fr = ax_xr;
+          fg = ax_xg;
+          fb = ax_xb; /* X-axis → red */
+        } else {
+          fr = ax_zr;
+          fg = ax_zg;
+          fb = ax_zb; /* Z-axis → green */
+        }
       } else if (a_maj > 0.01f) {
         alpha = a_maj * 0.45f;
         fr = cr;
@@ -1285,27 +1328,118 @@ static void draw_aa_line(uint8_t *rgba, int w, int h, float x0, float y0,
   }
 }
 
+/* Depth-aware AA line: same as draw_aa_line but interpolates depth along the
+ * segment and skips pixels that are behind scene geometry in the depth buffer.
+ * d0/d1 are NDC depth at (x0,y0) and (x1,y1). */
+static void draw_aa_line_depth(uint8_t *rgba, const float *depth_buf, int w,
+                               int h, float x0, float y0, float d0, float x1,
+                               float y1, float d1, uint8_t cr, uint8_t cg,
+                               uint8_t cb, float line_width, float opacity,
+                               bool reverse_z, bool is_cpu) {
+  float margin = line_width + 1.5f;
+  int bx0 = (int)fmaxf(0, fminf(x0, x1) - margin);
+  int by0 = (int)fmaxf(0, fminf(y0, y1) - margin);
+  int bx1 = (int)fminf((float)(w - 1), fmaxf(x0, x1) + margin);
+  int by1 = (int)fminf((float)(h - 1), fmaxf(y0, y1) + margin);
+
+  float dx = x1 - x0, dy = y1 - y0;
+  float seg_len = sqrtf(dx * dx + dy * dy);
+  if (seg_len < 0.5f)
+    return;
+  float inv_len = 1.0f / seg_len;
+  float ux = dx * inv_len, uy = dy * inv_len;
+  float hw = line_width * 0.5f;
+
+  for (int py = by0; py <= by1; py++) {
+    for (int px = bx0; px <= bx1; px++) {
+      float fx = (float)px + 0.5f - x0;
+      float fy = (float)py + 0.5f - y0;
+
+      float along = fx * ux + fy * uy;
+      if (along < -1.0f || along > seg_len + 1.0f)
+        continue;
+
+      float perp = fabsf(fx * (-uy) + fy * ux);
+
+      float alpha;
+      if (perp <= hw - 0.5f)
+        alpha = 1.0f;
+      else if (perp >= hw + 0.5f)
+        continue;
+      else
+        alpha = 1.0f - (perp - (hw - 0.5f));
+
+      if (along < 0.0f)
+        alpha *= fmaxf(0.0f, 1.0f + along);
+      else if (along > seg_len)
+        alpha *= fmaxf(0.0f, 1.0f - (along - seg_len));
+
+      alpha *= opacity;
+      if (alpha < 0.004f)
+        continue;
+
+      /* Per-pixel depth test: interpolate depth along segment */
+      if (depth_buf) {
+        float t = along / seg_len;
+        if (t < 0.0f)
+          t = 0.0f;
+        if (t > 1.0f)
+          t = 1.0f;
+        float ndc_z = d0 + (d1 - d0) * t;
+        float gd = is_cpu ? ndc_z * 0.5f + 0.5f : ndc_z;
+        float scene_d = depth_buf[py * w + px];
+        float bias = 0.002f;
+        bool occluded;
+        if (reverse_z) {
+          occluded = (scene_d > 0.0001f) && (gd + bias < scene_d);
+        } else {
+          occluded = (scene_d < 0.9999f) && (gd - bias > scene_d);
+        }
+        if (occluded)
+          continue;
+      }
+
+      int idx = (py * w + px) * 4;
+      rgba[idx + 0] = (uint8_t)(rgba[idx + 0] * (1.0f - alpha) + cr * alpha);
+      rgba[idx + 1] = (uint8_t)(rgba[idx + 1] * (1.0f - alpha) + cg * alpha);
+      rgba[idx + 2] = (uint8_t)(rgba[idx + 2] * (1.0f - alpha) + cb * alpha);
+    }
+  }
+}
+
 /* Project world point to screen pixel coordinates. Returns false if behind
- * camera. */
-static bool project_to_screen(MopVec3 p, const MopMat4 *vp_mat, int w, int h,
-                              float *sx, float *sy) {
+ * camera. Optionally returns NDC depth in *out_depth (0..1). */
+static bool project_to_screen_depth(MopVec3 p, const MopMat4 *vp_mat, int w,
+                                    int h, float *sx, float *sy,
+                                    float *out_depth) {
   MopVec4 clip = mop_mat4_mul_vec4(*vp_mat, (MopVec4){p.x, p.y, p.z, 1.0f});
   if (clip.w <= 0.001f)
     return false;
-  float nx = clip.x / clip.w;
-  float ny = clip.y / clip.w;
+  float inv_w = 1.0f / clip.w;
+  float nx = clip.x * inv_w;
+  float ny = clip.y * inv_w;
   *sx = (nx * 0.5f + 0.5f) * (float)w;
   *sy = (1.0f - (ny * 0.5f + 0.5f)) * (float)h;
+  if (out_depth)
+    *out_depth = clip.z * inv_w; /* raw NDC z (Vulkan: [0,1], GL: [-1,1]) */
   return true;
 }
 
-/* Draw a circle as line segments between projected points */
-static void draw_circle_2d(uint8_t *rgba, int w, int h, MopVec3 center,
-                           float radius, MopVec3 axis_u, MopVec3 axis_v,
-                           const MopMat4 *vp_mat, uint8_t cr, uint8_t cg,
-                           uint8_t cb, float line_w, float opacity) {
-  int segs = 24;
-  float prev_sx, prev_sy;
+static bool project_to_screen(MopVec3 p, const MopMat4 *vp_mat, int w, int h,
+                              float *sx, float *sy) {
+  return project_to_screen_depth(p, vp_mat, w, h, sx, sy, NULL);
+}
+
+/* Draw a circle as line segments between projected points.
+ * If depth_buf is non-NULL, does per-pixel depth testing. */
+static void draw_circle_2d_ex(uint8_t *rgba, const float *depth_buf, int w,
+                              int h, MopVec3 center, float radius,
+                              MopVec3 axis_u, MopVec3 axis_v,
+                              const MopMat4 *vp_mat, uint8_t cr, uint8_t cg,
+                              uint8_t cb, float line_w, float opacity,
+                              bool reverse_z, bool is_cpu) {
+  int segs = 32;
+  float prev_sx, prev_sy, prev_d;
   bool prev_ok = false;
   for (int i = 0; i <= segs; i++) {
     float a = (float)i * 2.0f * 3.14159265f / (float)segs;
@@ -1313,16 +1447,43 @@ static void draw_circle_2d(uint8_t *rgba, int w, int h, MopVec3 center,
     MopVec3 pt = {center.x + (axis_u.x * ca + axis_v.x * sa) * radius,
                   center.y + (axis_u.y * ca + axis_v.y * sa) * radius,
                   center.z + (axis_u.z * ca + axis_v.z * sa) * radius};
-    float cur_sx, cur_sy;
-    bool cur_ok = project_to_screen(pt, vp_mat, w, h, &cur_sx, &cur_sy);
-    if (prev_ok && cur_ok)
-      draw_aa_line(rgba, w, h, prev_sx, prev_sy, cur_sx, cur_sy, cr, cg, cb,
-                   line_w, opacity);
+    float cur_sx, cur_sy, cur_d = 0.0f;
+    bool cur_ok =
+        project_to_screen_depth(pt, vp_mat, w, h, &cur_sx, &cur_sy, &cur_d);
+    if (prev_ok && cur_ok) {
+      if (depth_buf)
+        draw_aa_line_depth(rgba, depth_buf, w, h, prev_sx, prev_sy, prev_d,
+                           cur_sx, cur_sy, cur_d, cr, cg, cb, line_w, opacity,
+                           reverse_z, is_cpu);
+      else
+        draw_aa_line(rgba, w, h, prev_sx, prev_sy, cur_sx, cur_sy, cr, cg, cb,
+                     line_w, opacity);
+    }
     prev_sx = cur_sx;
     prev_sy = cur_sy;
+    prev_d = cur_d;
     prev_ok = cur_ok;
   }
 }
+
+static void draw_circle_2d(uint8_t *rgba, int w, int h, MopVec3 center,
+                           float radius, MopVec3 axis_u, MopVec3 axis_v,
+                           const MopMat4 *vp_mat, uint8_t cr, uint8_t cg,
+                           uint8_t cb, float line_w, float opacity) {
+  draw_circle_2d_ex(rgba, NULL, w, h, center, radius, axis_u, axis_v, vp_mat,
+                    cr, cg, cb, line_w, opacity, false, false);
+}
+
+/* Forward declarations for helpers defined later (used by axis navigator too)
+ */
+static void draw_filled_circle_depth(uint8_t *rgba, const float *depth_buf,
+                                     int w, int h, float cx, float cy,
+                                     float radius, uint8_t cr, uint8_t cg,
+                                     uint8_t cb, float opacity, float ndc_depth,
+                                     bool reverse_z, bool is_cpu);
+static void draw_filled_circle(uint8_t *rgba, int w, int h, float cx, float cy,
+                               float radius, uint8_t cr, uint8_t cg, uint8_t cb,
+                               float opacity);
 
 void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
   (void)user_data;
@@ -1336,21 +1497,45 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
     return;
   uint8_t *rgba = (uint8_t *)(uintptr_t)color_ro;
 
-  /* Light indicators use theme accent (UI object color) */
-  MopColor lac = vp->theme.accent;
-  uint8_t cr = (uint8_t)(sqrtf(lac.r) * 255.0f);
-  uint8_t cg = (uint8_t)(sqrtf(lac.g) * 255.0f);
-  uint8_t cb = (uint8_t)(sqrtf(lac.b) * 255.0f);
+  const float *li_depth_buf =
+      vp->rhi->framebuffer_read_depth(vp->device, vp->framebuffer, &w, &h);
+  bool li_is_cpu = (vp->backend_type == MOP_BACKEND_CPU);
+  bool li_rev_z = vp->reverse_z && !li_is_cpu;
 
   MopMat4 vp_mat = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
 
-  float line_w = 1.5f;
-  float opacity = 0.9f;
+  /* Blender-style: thin clean lines, 1px linear ramp AA */
+  float line_w = 1.0f;
+  float opacity = 0.85f;
 
   for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
     if (!vp->lights[i].active)
       continue;
     const MopLight *light = &vp->lights[i];
+
+    /* Use light's own color for indicator (clamped to visible brightness).
+     * Blender tints light icons with the light color. */
+    MopColor lc = light->color;
+    float max_c = fmaxf(lc.r, fmaxf(lc.g, lc.b));
+    if (max_c < 0.01f) {
+      lc = (MopColor){0.85f, 0.85f, 0.85f, 1.0f};
+    } else if (max_c > 1.0f) {
+      lc.r /= max_c;
+      lc.g /= max_c;
+      lc.b /= max_c;
+    }
+    /* Ensure minimum brightness for visibility */
+    float lum = lc.r * 0.299f + lc.g * 0.587f + lc.b * 0.114f;
+    if (lum < 0.3f) {
+      float boost = 0.3f / fmaxf(lum, 0.001f);
+      lc.r = fminf(1.0f, lc.r * boost);
+      lc.g = fminf(1.0f, lc.g * boost);
+      lc.b = fminf(1.0f, lc.b * boost);
+    }
+    /* Linear-to-sRGB */
+    uint8_t cr = (uint8_t)(sqrtf(lc.r) * 255.0f);
+    uint8_t cg = (uint8_t)(sqrtf(lc.g) * 255.0f);
+    uint8_t cb = (uint8_t)(sqrtf(lc.b) * 255.0f);
 
     /* Compute indicator world position */
     MopVec3 pos;
@@ -1361,33 +1546,37 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
       pos = light->position;
     }
 
-    /* Fixed world-size — indicators scale with the scene like regular objects
-     */
-    (void)vp;
     float s = 1.0f;
 
-    float csx, csy;
-    if (!project_to_screen(pos, &vp_mat, w, h, &csx, &csy))
+    float csx, csy, csd;
+    if (!project_to_screen_depth(pos, &vp_mat, w, h, &csx, &csy, &csd))
       continue;
+    /* Pixel alignment */
+    csx = roundf(csx);
+    csy = roundf(csy);
 
     if (light->type == MOP_LIGHT_POINT) {
-      /* 6 rays: ±X, ±Y, ±Z */
       float inner = 0.04f * s, outer = 0.14f * s;
-      static const float dirs[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                       {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
-      for (int r = 0; r < 6; r++) {
-        MopVec3 d = {dirs[r][0], dirs[r][1], dirs[r][2]};
+      draw_filled_circle_depth(rgba, li_depth_buf, w, h, csx, csy, 2.5f, cr, cg,
+                               cb, opacity, csd, li_rev_z, li_is_cpu);
+      static const float ray_angles[8] = {0.0f,       0.7853982f, 1.5707963f,
+                                          2.3561945f, 3.1415927f, 3.9269908f,
+                                          4.7123890f, 5.4977871f};
+      for (int r = 0; r < 8; r++) {
+        float ca = cosf(ray_angles[r]), sa = sinf(ray_angles[r]);
+        MopVec3 d = {ca, sa, 0.0f};
         MopVec3 a = {pos.x + d.x * inner, pos.y + d.y * inner,
                      pos.z + d.z * inner};
         MopVec3 b = {pos.x + d.x * outer, pos.y + d.y * outer,
                      pos.z + d.z * outer};
-        float ax, ay, bx, by;
-        if (project_to_screen(a, &vp_mat, w, h, &ax, &ay) &&
-            project_to_screen(b, &vp_mat, w, h, &bx, &by))
-          draw_aa_line(rgba, w, h, ax, ay, bx, by, cr, cg, cb, line_w, opacity);
+        float ax, ay, ad, bx, by, bd;
+        if (project_to_screen_depth(a, &vp_mat, w, h, &ax, &ay, &ad) &&
+            project_to_screen_depth(b, &vp_mat, w, h, &bx, &by, &bd))
+          draw_aa_line_depth(rgba, li_depth_buf, w, h, roundf(ax), roundf(ay),
+                             ad, roundf(bx), roundf(by), bd, cr, cg, cb, line_w,
+                             opacity, li_rev_z, li_is_cpu);
       }
     } else if (light->type == MOP_LIGHT_DIRECTIONAL) {
-      /* Circle in XY plane + 4 rays along direction */
       float radius = 0.10f * s;
       float ray_len = 0.30f * s;
       MopVec3 dir = mop_vec3_normalize(light->direction);
@@ -1397,10 +1586,12 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
       MopVec3 right = mop_vec3_normalize(mop_vec3_cross(up, dir));
       MopVec3 u = mop_vec3_cross(dir, right);
 
-      draw_circle_2d(rgba, w, h, pos, radius, right, u, &vp_mat, cr, cg, cb,
-                     line_w, opacity);
+      draw_filled_circle_depth(rgba, li_depth_buf, w, h, csx, csy, 2.0f, cr, cg,
+                               cb, opacity, csd, li_rev_z, li_is_cpu);
+      draw_circle_2d_ex(rgba, li_depth_buf, w, h, pos, radius, right, u,
+                        &vp_mat, cr, cg, cb, line_w, opacity, li_rev_z,
+                        li_is_cpu);
 
-      /* 4 rays */
       float angles[4] = {0, 1.5707963f, 3.1415927f, 4.7123890f};
       for (int r = 0; r < 4; r++) {
         float ca = cosf(angles[r]), sa = sinf(angles[r]);
@@ -1409,14 +1600,14 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
                         pos.z + (right.z * ca + u.z * sa) * radius};
         MopVec3 tip = {base.x + dir.x * ray_len, base.y + dir.y * ray_len,
                        base.z + dir.z * ray_len};
-        float bsx, bsy, tsx, tsy;
-        if (project_to_screen(base, &vp_mat, w, h, &bsx, &bsy) &&
-            project_to_screen(tip, &vp_mat, w, h, &tsx, &tsy))
-          draw_aa_line(rgba, w, h, bsx, bsy, tsx, tsy, cr, cg, cb, line_w,
-                       opacity);
+        float bsx, bsy, bd, tsx, tsy, td;
+        if (project_to_screen_depth(base, &vp_mat, w, h, &bsx, &bsy, &bd) &&
+            project_to_screen_depth(tip, &vp_mat, w, h, &tsx, &tsy, &td))
+          draw_aa_line_depth(rgba, li_depth_buf, w, h, roundf(bsx), roundf(bsy),
+                             bd, roundf(tsx), roundf(tsy), td, cr, cg, cb,
+                             line_w, opacity, li_rev_z, li_is_cpu);
       }
     } else if (light->type == MOP_LIGHT_SPOT) {
-      /* Cone: apex at position, base circle + 4 edge lines */
       float base_r = 0.15f * s;
       float height = 0.30f * s;
       MopVec3 dir = mop_vec3_normalize(light->direction);
@@ -1426,23 +1617,27 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
       MopVec3 right = mop_vec3_normalize(mop_vec3_cross(up, dir));
       MopVec3 u = mop_vec3_cross(dir, right);
 
+      draw_filled_circle_depth(rgba, li_depth_buf, w, h, csx, csy, 2.0f, cr, cg,
+                               cb, opacity, csd, li_rev_z, li_is_cpu);
+
       MopVec3 base_center = {pos.x + dir.x * height, pos.y + dir.y * height,
                              pos.z + dir.z * height};
-      draw_circle_2d(rgba, w, h, base_center, base_r, right, u, &vp_mat, cr, cg,
-                     cb, line_w, opacity);
+      draw_circle_2d_ex(rgba, li_depth_buf, w, h, base_center, base_r, right, u,
+                        &vp_mat, cr, cg, cb, line_w, opacity, li_rev_z,
+                        li_is_cpu);
 
-      /* 4 edge lines from apex to base ring */
       float angles[4] = {0, 1.5707963f, 3.1415927f, 4.7123890f};
       for (int e = 0; e < 4; e++) {
         float ca = cosf(angles[e]), sa = sinf(angles[e]);
         MopVec3 bp = {base_center.x + (right.x * ca + u.x * sa) * base_r,
                       base_center.y + (right.y * ca + u.y * sa) * base_r,
                       base_center.z + (right.z * ca + u.z * sa) * base_r};
-        float psx, psy, bsx, bsy;
-        if (project_to_screen(pos, &vp_mat, w, h, &psx, &psy) &&
-            project_to_screen(bp, &vp_mat, w, h, &bsx, &bsy))
-          draw_aa_line(rgba, w, h, psx, psy, bsx, bsy, cr, cg, cb, line_w,
-                       opacity);
+        float psx, psy, pd, bsx, bsy, bd;
+        if (project_to_screen_depth(pos, &vp_mat, w, h, &psx, &psy, &pd) &&
+            project_to_screen_depth(bp, &vp_mat, w, h, &bsx, &bsy, &bd))
+          draw_aa_line_depth(rgba, li_depth_buf, w, h, roundf(psx), roundf(psy),
+                             pd, roundf(bsx), roundf(bsy), bd, cr, cg, cb,
+                             line_w, opacity, li_rev_z, li_is_cpu);
       }
     }
   }
@@ -1455,29 +1650,6 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
  * anti-aliased lines directly on the framebuffer.  The 3D geometry
  * handles remain at opacity=0 for picking (object_id buffer).
  * ========================================================================= */
-
-/* Draw an arrowhead "V" at a screen-space tip position */
-static void draw_arrowhead_2d(uint8_t *rgba, int w, int h, float tip_x,
-                              float tip_y, float from_x, float from_y,
-                              uint8_t cr, uint8_t cg, uint8_t cb, float line_w,
-                              float opacity, float wing_len) {
-  float dx = tip_x - from_x, dy = tip_y - from_y;
-  float len = sqrtf(dx * dx + dy * dy);
-  if (len < 1.0f)
-    return;
-  float ux = dx / len, uy = dy / len;
-  float bx = -ux, by = -uy;
-  /* ±25° wings */
-  float cos25 = 0.906f, sin25 = 0.423f;
-  float lx = bx * cos25 - by * sin25;
-  float ly = bx * sin25 + by * cos25;
-  float rx = bx * cos25 + by * sin25;
-  float ry = -bx * sin25 + by * cos25;
-  draw_aa_line(rgba, w, h, tip_x, tip_y, tip_x + lx * wing_len,
-               tip_y + ly * wing_len, cr, cg, cb, line_w, opacity);
-  draw_aa_line(rgba, w, h, tip_x, tip_y, tip_x + rx * wing_len,
-               tip_y + ry * wing_len, cr, cg, cb, line_w, opacity);
-}
 
 /* Draw a small diamond (4 lines) at a screen-space position */
 static void draw_diamond_2d(uint8_t *rgba, int w, int h, float cx, float cy,
@@ -1492,6 +1664,18 @@ static void draw_diamond_2d(uint8_t *rgba, int w, int h, float cx, float cy,
   draw_aa_line(rgba, w, h, cx, cy + radius, cx - radius, cy, cr, cg, cb, line_w,
                opacity);
 }
+
+/* Forward declarations for stroke letter drawing (defined later in file) */
+static void draw_stroke_X(uint8_t *, int, int, float, float, float, float,
+                          uint8_t, uint8_t, uint8_t, float);
+static void draw_stroke_Y(uint8_t *, int, int, float, float, float, float,
+                          uint8_t, uint8_t, uint8_t, float);
+static void draw_stroke_Z(uint8_t *, int, int, float, float, float, float,
+                          uint8_t, uint8_t, uint8_t, float);
+typedef void (*StrokeLetterFn)(uint8_t *, int, int, float, float, float, float,
+                               uint8_t, uint8_t, uint8_t, float);
+static const StrokeLetterFn gizmo_stroke_letters[3] = {
+    draw_stroke_X, draw_stroke_Y, draw_stroke_Z};
 
 void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
   (void)user_data;
@@ -1513,15 +1697,53 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
   MopGizmoMode mode = mop_gizmo_get_mode(vp->gizmo);
   MopGizmoAxis hover = mop_gizmo_get_hover_axis(vp->gizmo);
 
-  /* Fixed world-size — gizmo scales with the scene like regular objects */
-  float s = 1.2f;
+  /* Screen-space scaling: constant screen size regardless of distance */
+  MopVec3 to_gizmo = {pos.x - vp->cam_eye.x, pos.y - vp->cam_eye.y,
+                      pos.z - vp->cam_eye.z};
+  float cam_dist = sqrtf(to_gizmo.x * to_gizmo.x + to_gizmo.y * to_gizmo.y +
+                         to_gizmo.z * to_gizmo.z);
+  if (cam_dist < 0.1f)
+    cam_dist = 0.1f;
+  float s = cam_dist * 0.15f;
+  if (s < 0.3f)
+    s = 0.3f;
 
   float line_w = vp->theme.gizmo_line_width;
   float opacity = vp->theme.gizmo_opacity;
   float ssaa = (float)vp->ssaa_factor;
 
-  /* Per-axis handles */
+  /* View rotation for depth sorting (Blender draws back axes first) */
+  MopMat4 view_rot = vp->view_matrix;
+  view_rot.d[12] = 0.0f;
+  view_rot.d[13] = 0.0f;
+  view_rot.d[14] = 0.0f;
+  view_rot.d[15] = 1.0f;
+
+  /* Compute depth of each axis for back-to-front ordering */
+  MopVec3 axis_dirs[3];
+  float axis_depth[3];
   for (int a = 0; a < 3; a++) {
+    axis_dirs[a] = mop_gizmo_get_axis_dir(vp->gizmo, a);
+    MopVec4 d4 = {axis_dirs[a].x, axis_dirs[a].y, axis_dirs[a].z, 0.0f};
+    MopVec4 rot = mop_mat4_mul_vec4(view_rot, d4);
+    axis_depth[a] = rot.z; /* negative = pointing away */
+  }
+
+  /* Sort indices back-to-front (lowest depth first) */
+  int draw_order[3] = {0, 1, 2};
+  for (int i = 0; i < 2; i++) {
+    for (int j = i + 1; j < 3; j++) {
+      if (axis_depth[draw_order[j]] < axis_depth[draw_order[i]]) {
+        int tmp = draw_order[i];
+        draw_order[i] = draw_order[j];
+        draw_order[j] = tmp;
+      }
+    }
+  }
+
+  /* Per-axis handles — drawn back-to-front */
+  for (int di = 0; di < 3; di++) {
+    int a = draw_order[di];
     MopColor c;
     switch (a) {
     case 0:
@@ -1534,18 +1756,28 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
       c = vp->theme.gizmo_z;
       break;
     }
+
+    /* Depth-based opacity: back axes slightly dimmer (Blender style) */
+    float depth_fade = (axis_depth[a] + 1.0f) * 0.15f + 0.7f;
+    if (depth_fade > 1.0f)
+      depth_fade = 1.0f;
+    if (depth_fade < 0.5f)
+      depth_fade = 0.5f;
+    float ax_opacity = opacity * depth_fade;
+
     if ((MopGizmoAxis)a == hover) {
       MopColor hc = vp->theme.gizmo_hover;
       float t = 0.5f;
       c.r += (hc.r - c.r) * t;
       c.g += (hc.g - c.g) * t;
       c.b += (hc.b - c.b) * t;
+      ax_opacity = opacity; /* hovered axis always full brightness */
     }
     uint8_t cr = (uint8_t)(c.r * 255.0f);
     uint8_t cg = (uint8_t)(c.g * 255.0f);
     uint8_t cb = (uint8_t)(c.b * 255.0f);
 
-    MopVec3 dir = mop_gizmo_get_axis_dir(vp->gizmo, a);
+    MopVec3 dir = axis_dirs[a];
 
     if (mode == MOP_GIZMO_TRANSLATE || mode == MOP_GIZMO_SCALE) {
       /* Shaft from pos + 0.20*s*dir to pos + 1.05*s*dir */
@@ -1557,25 +1789,38 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
       if (!project_to_screen(shaft_s, &vp_mat, w, h, &ss_x, &ss_y) ||
           !project_to_screen(shaft_e, &vp_mat, w, h, &se_x, &se_y))
         continue;
+      /* Pixel alignment */
+      ss_x = roundf(ss_x);
+      ss_y = roundf(ss_y);
+      se_x = roundf(se_x);
+      se_y = roundf(se_y);
 
       draw_aa_line(rgba, w, h, ss_x, ss_y, se_x, se_y, cr, cg, cb, line_w,
-                   opacity);
+                   ax_opacity);
 
       if (mode == MOP_GIZMO_TRANSLATE) {
-        /* Arrowhead at tip */
+        /* Axis ball at tip: filled circle + axis letter (like navigator) */
         MopVec3 tip = {pos.x + dir.x * 1.20f * s, pos.y + dir.y * 1.20f * s,
                        pos.z + dir.z * 1.20f * s};
         float tx, ty;
         if (project_to_screen(tip, &vp_mat, w, h, &tx, &ty)) {
+          tx = roundf(tx);
+          ty = roundf(ty);
           draw_aa_line(rgba, w, h, se_x, se_y, tx, ty, cr, cg, cb,
-                       line_w + 0.5f, opacity);
-          draw_arrowhead_2d(rgba, w, h, tx, ty, se_x, se_y, cr, cg, cb, line_w,
-                            opacity, 8.0f * ssaa);
+                       line_w + 0.5f, ax_opacity);
+          float ball_r = 7.0f * ssaa;
+          draw_filled_circle(rgba, w, h, tx, ty, ball_r, cr, cg, cb,
+                             ax_opacity);
+          /* Axis letter (dark text on colored disc) */
+          float lsz = 3.0f * ssaa;
+          float llw = 1.2f * ssaa;
+          gizmo_stroke_letters[a](rgba, w, h, tx, ty, lsz, llw, 15, 15, 15,
+                                  ax_opacity * 0.9f);
         }
       } else {
-        /* Scale mode: diamond at tip */
+        /* Scale mode: filled square (diamond) at tip */
         draw_diamond_2d(rgba, w, h, se_x, se_y, 4.0f * ssaa, cr, cg, cb, line_w,
-                        opacity);
+                        ax_opacity);
       }
     } else {
       /* Rotate mode: torus ring as a circle */
@@ -1586,11 +1831,11 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
       MopVec3 axis_v = mop_vec3_cross(dir, axis_u);
 
       draw_circle_2d(rgba, w, h, pos, 1.0f * s, axis_u, axis_v, &vp_mat, cr, cg,
-                     cb, line_w, opacity);
+                     cb, line_w, ax_opacity);
     }
   }
 
-  /* Center handle: small circle */
+  /* Center handle: filled circle (Blender uses a filled disc, not a ring) */
   MopColor cc = vp->theme.gizmo_center;
   if (hover == MOP_GIZMO_AXIS_CENTER) {
     MopColor hc = vp->theme.gizmo_hover;
@@ -1601,17 +1846,190 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
   }
   float csx, csy;
   if (project_to_screen(pos, &vp_mat, w, h, &csx, &csy)) {
+    csx = roundf(csx);
+    csy = roundf(csy);
     uint8_t ccr = (uint8_t)(cc.r * 255.0f);
     uint8_t ccg = (uint8_t)(cc.g * 255.0f);
     uint8_t ccb = (uint8_t)(cc.b * 255.0f);
-    float r = 3.5f * ssaa;
-    int segs = 8;
-    for (int i = 0; i < segs; i++) {
-      float a0 = (float)i * 2.0f * 3.14159265f / (float)segs;
-      float a1 = (float)(i + 1) * 2.0f * 3.14159265f / (float)segs;
-      draw_aa_line(rgba, w, h, csx + cosf(a0) * r, csy + sinf(a0) * r,
-                   csx + cosf(a1) * r, csy + sinf(a1) * r, ccr, ccg, ccb,
-                   line_w, opacity);
+    draw_filled_circle(rgba, w, h, csx, csy, 3.5f * ssaa, ccr, ccg, ccb,
+                       opacity * 0.85f);
+  }
+}
+
+/* =========================================================================
+ * 2D camera object overlay
+ *
+ * Draws camera frustum wireframes and camera icons for all camera objects
+ * in the scene using clean AA lines (same style as gizmo/light overlays).
+ * ========================================================================= */
+
+void mop_overlay_builtin_camera_objects(MopViewport *vp, void *user_data) {
+  (void)user_data;
+  if (!vp || vp->camera_count == 0)
+    return;
+
+  int w, h;
+  const uint8_t *color_ro =
+      vp->rhi->framebuffer_read_color(vp->device, vp->framebuffer, &w, &h);
+  if (!color_ro || w <= 0 || h <= 0)
+    return;
+  uint8_t *rgba = (uint8_t *)(uintptr_t)color_ro;
+
+  const float *depth_buf =
+      vp->rhi->framebuffer_read_depth(vp->device, vp->framebuffer, &w, &h);
+  bool is_cpu = (vp->backend_type == MOP_BACKEND_CPU);
+  bool rev_z = vp->reverse_z && !is_cpu;
+
+  MopColor ac = vp->theme.camera_frustum_color;
+  uint8_t cr = (uint8_t)(sqrtf(ac.r) * 255.0f);
+  uint8_t cg = (uint8_t)(sqrtf(ac.g) * 255.0f);
+  uint8_t cb = (uint8_t)(sqrtf(ac.b) * 255.0f);
+
+  MopMat4 vp_mat = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+  float line_w = vp->theme.camera_frustum_line_width;
+  float opacity = 0.85f;
+
+  for (uint32_t ci = 0; ci < MOP_MAX_CAMERAS; ci++) {
+    const struct MopCameraObject *cam = &vp->cameras[ci];
+    if (!cam->active)
+      continue;
+    if (vp->active_camera == cam)
+      continue;
+    if (!cam->frustum_visible)
+      continue;
+
+    /* Blender-style camera: frame rectangle + 4 pyramid lines + up triangle.
+     *
+     * Build camera local axes from position/target/up, then place the
+     * frame at a fixed display distance (drawsize) from the camera origin.
+     * The frame is sized by FOV and aspect ratio at that depth. */
+
+    MopVec3 pos = cam->position;
+    MopVec3 fwd = {cam->target.x - pos.x, cam->target.y - pos.y,
+                   cam->target.z - pos.z};
+    float fwd_len = sqrtf(fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z);
+    if (fwd_len < 1e-6f)
+      continue;
+    fwd.x /= fwd_len;
+    fwd.y /= fwd_len;
+    fwd.z /= fwd_len;
+
+    /* Right = normalize(fwd × up) */
+    MopVec3 right = {fwd.y * cam->up.z - fwd.z * cam->up.y,
+                     fwd.z * cam->up.x - fwd.x * cam->up.z,
+                     fwd.x * cam->up.y - fwd.y * cam->up.x};
+    float rlen =
+        sqrtf(right.x * right.x + right.y * right.y + right.z * right.z);
+    if (rlen < 1e-6f)
+      continue;
+    right.x /= rlen;
+    right.y /= rlen;
+    right.z /= rlen;
+
+    /* True up = right × fwd */
+    MopVec3 up = {right.y * fwd.z - right.z * fwd.y,
+                  right.z * fwd.x - right.x * fwd.z,
+                  right.x * fwd.y - right.y * fwd.x};
+
+    /* Frame at drawsize depth, sized by FOV */
+    float drawsize = 1.0f;
+    float fov_rad = cam->fov_degrees * (3.14159265f / 180.0f);
+    float half_h = drawsize * tanf(fov_rad * 0.5f);
+    float half_w = half_h * cam->aspect_ratio;
+
+    /* Frame center = pos + fwd * drawsize */
+    MopVec3 fc = {pos.x + fwd.x * drawsize, pos.y + fwd.y * drawsize,
+                  pos.z + fwd.z * drawsize};
+
+    /* 4 frame corners: fc ± right*half_w ± up*half_h */
+    MopVec3 frame[4];
+    frame[0] = (MopVec3){fc.x - right.x * half_w - up.x * half_h,
+                         fc.y - right.y * half_w - up.y * half_h,
+                         fc.z - right.z * half_w - up.z * half_h}; /* BL */
+    frame[1] = (MopVec3){fc.x + right.x * half_w - up.x * half_h,
+                         fc.y + right.y * half_w - up.y * half_h,
+                         fc.z + right.z * half_w - up.z * half_h}; /* BR */
+    frame[2] = (MopVec3){fc.x + right.x * half_w + up.x * half_h,
+                         fc.y + right.y * half_w + up.y * half_h,
+                         fc.z + right.z * half_w + up.z * half_h}; /* TR */
+    frame[3] = (MopVec3){fc.x - right.x * half_w + up.x * half_h,
+                         fc.y - right.y * half_w + up.y * half_h,
+                         fc.z - right.z * half_w + up.z * half_h}; /* TL */
+
+    /* --- Draw frame rectangle (4 edges) with per-pixel depth --- */
+    float sx[4], sy[4], sd[4];
+    bool frame_ok = true;
+    for (int i = 0; i < 4; i++) {
+      if (!project_to_screen_depth(frame[i], &vp_mat, w, h, &sx[i], &sy[i],
+                                   &sd[i])) {
+        frame_ok = false;
+        break;
+      }
+      sx[i] = roundf(sx[i]);
+      sy[i] = roundf(sy[i]);
+    }
+
+    float psx, psy, psd; /* camera origin screen pos + depth */
+    bool pos_ok = project_to_screen_depth(pos, &vp_mat, w, h, &psx, &psy, &psd);
+    if (pos_ok) {
+      psx = roundf(psx);
+      psy = roundf(psy);
+    }
+
+    if (frame_ok) {
+      for (int i = 0; i < 4; i++) {
+        int j = (i + 1) % 4;
+        draw_aa_line_depth(rgba, depth_buf, w, h, sx[i], sy[i], sd[i], sx[j],
+                           sy[j], sd[j], cr, cg, cb, line_w, opacity, rev_z,
+                           is_cpu);
+      }
+
+      if (pos_ok) {
+        for (int i = 0; i < 4; i++)
+          draw_aa_line_depth(rgba, depth_buf, w, h, sx[i], sy[i], sd[i], psx,
+                             psy, psd, cr, cg, cb, line_w, opacity, rev_z,
+                             is_cpu);
+      }
+
+      /* --- Up triangle above the top edge (Blender style) --- */
+      float tria_size = 0.7f * drawsize;
+      float tria_margin = 0.1f * drawsize;
+
+      MopVec3 top_mid = {(frame[2].x + frame[3].x) * 0.5f,
+                         (frame[2].y + frame[3].y) * 0.5f,
+                         (frame[2].z + frame[3].z) * 0.5f};
+      MopVec3 tria_base_center = {top_mid.x + up.x * tria_margin,
+                                  top_mid.y + up.y * tria_margin,
+                                  top_mid.z + up.z * tria_margin};
+      MopVec3 tria_apex = {tria_base_center.x + up.x * tria_size,
+                           tria_base_center.y + up.y * tria_size,
+                           tria_base_center.z + up.z * tria_size};
+      float tria_half_w = tria_size * 0.5f;
+      MopVec3 tria_left = {tria_base_center.x - right.x * tria_half_w,
+                           tria_base_center.y - right.y * tria_half_w,
+                           tria_base_center.z - right.z * tria_half_w};
+      MopVec3 tria_right = {tria_base_center.x + right.x * tria_half_w,
+                            tria_base_center.y + right.y * tria_half_w,
+                            tria_base_center.z + right.z * tria_half_w};
+
+      float tlx, tly, tld, trx, try_, trd, tax, tay, tad;
+      if (project_to_screen_depth(tria_left, &vp_mat, w, h, &tlx, &tly, &tld) &&
+          project_to_screen_depth(tria_right, &vp_mat, w, h, &trx, &try_,
+                                  &trd) &&
+          project_to_screen_depth(tria_apex, &vp_mat, w, h, &tax, &tay, &tad)) {
+        tlx = roundf(tlx);
+        tly = roundf(tly);
+        trx = roundf(trx);
+        try_ = roundf(try_);
+        tax = roundf(tax);
+        tay = roundf(tay);
+        draw_aa_line_depth(rgba, depth_buf, w, h, tlx, tly, tld, trx, try_, trd,
+                           cr, cg, cb, line_w, opacity, rev_z, is_cpu);
+        draw_aa_line_depth(rgba, depth_buf, w, h, trx, try_, trd, tax, tay, tad,
+                           cr, cg, cb, line_w, opacity, rev_z, is_cpu);
+        draw_aa_line_depth(rgba, depth_buf, w, h, tax, tay, tad, tlx, tly, tld,
+                           cr, cg, cb, line_w, opacity, rev_z, is_cpu);
+      }
     }
   }
 }
@@ -1622,6 +2040,117 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
  * Replaces the geometry-based axis indicator (pass_hud) with clean 2D
  * anti-aliased lines.  Uses the view rotation matrix for orientation.
  * ========================================================================= */
+
+/* -------------------------------------------------------------------------
+ * Stroke-based axis label rendering (resolution-independent)
+ *
+ * Draw "X", "Y", "Z" as AA line strokes.  Each letter is defined as line
+ * segments in a ±1 unit box, scaled and centered at the given position.
+ * Uses draw_aa_line for identical quality to Blender's polyline shader:
+ * linear 1px alpha ramp from perpendicular distance.
+ * ------------------------------------------------------------------------- */
+
+static void draw_stroke_X(uint8_t *rgba, int w, int h, float cx, float cy,
+                          float sz, float lw, uint8_t cr, uint8_t cg,
+                          uint8_t cb, float op) {
+  draw_aa_line(rgba, w, h, cx - sz, cy - sz, cx + sz, cy + sz, cr, cg, cb, lw,
+               op);
+  draw_aa_line(rgba, w, h, cx + sz, cy - sz, cx - sz, cy + sz, cr, cg, cb, lw,
+               op);
+}
+
+static void draw_stroke_Y(uint8_t *rgba, int w, int h, float cx, float cy,
+                          float sz, float lw, uint8_t cr, uint8_t cg,
+                          uint8_t cb, float op) {
+  draw_aa_line(rgba, w, h, cx - sz, cy - sz, cx, cy, cr, cg, cb, lw, op);
+  draw_aa_line(rgba, w, h, cx + sz, cy - sz, cx, cy, cr, cg, cb, lw, op);
+  draw_aa_line(rgba, w, h, cx, cy, cx, cy + sz, cr, cg, cb, lw, op);
+}
+
+static void draw_stroke_Z(uint8_t *rgba, int w, int h, float cx, float cy,
+                          float sz, float lw, uint8_t cr, uint8_t cg,
+                          uint8_t cb, float op) {
+  draw_aa_line(rgba, w, h, cx - sz, cy - sz, cx + sz, cy - sz, cr, cg, cb, lw,
+               op);
+  draw_aa_line(rgba, w, h, cx + sz, cy - sz, cx - sz, cy + sz, cr, cg, cb, lw,
+               op);
+  draw_aa_line(rgba, w, h, cx - sz, cy + sz, cx + sz, cy + sz, cr, cg, cb, lw,
+               op);
+}
+
+typedef void (*StrokeLetterFn)(uint8_t *, int, int, float, float, float, float,
+                               uint8_t, uint8_t, uint8_t, float);
+static const StrokeLetterFn stroke_letters[3] = {draw_stroke_X, draw_stroke_Y,
+                                                 draw_stroke_Z};
+
+/* Draw a filled anti-aliased circle with optional per-pixel depth testing.
+ * ndc_depth is the NDC depth at the circle center. */
+static void draw_filled_circle_depth(uint8_t *rgba, const float *depth_buf,
+                                     int w, int h, float cx, float cy,
+                                     float radius, uint8_t cr, uint8_t cg,
+                                     uint8_t cb, float opacity, float ndc_depth,
+                                     bool reverse_z, bool is_cpu) {
+  int bx0 = (int)(cx - radius - 1.5f);
+  int by0 = (int)(cy - radius - 1.5f);
+  int bx1 = (int)(cx + radius + 1.5f);
+  int by1 = (int)(cy + radius + 1.5f);
+  if (bx0 < 0)
+    bx0 = 0;
+  if (by0 < 0)
+    by0 = 0;
+  if (bx1 >= w)
+    bx1 = w - 1;
+  if (by1 >= h)
+    by1 = h - 1;
+  float gd = is_cpu ? ndc_depth * 0.5f + 0.5f : ndc_depth;
+  float bias = 0.002f;
+  for (int py = by0; py <= by1; py++) {
+    for (int px = bx0; px <= bx1; px++) {
+      float fx = (float)px + 0.5f - cx;
+      float fy = (float)py + 0.5f - cy;
+      float d = sqrtf(fx * fx + fy * fy);
+      float a = radius + 0.5f - d;
+      if (a <= 0.0f)
+        continue;
+      if (a > 1.0f)
+        a = 1.0f;
+      a *= opacity;
+      if (a < 0.004f)
+        continue;
+      /* Per-pixel depth test */
+      if (depth_buf) {
+        float scene_d = depth_buf[py * w + px];
+        bool occluded;
+        if (reverse_z)
+          occluded = (scene_d > 0.0001f) && (gd + bias < scene_d);
+        else
+          occluded = (scene_d < 0.9999f) && (gd - bias > scene_d);
+        if (occluded)
+          continue;
+      }
+      int idx = (py * w + px) * 4;
+      float ia = 1.0f - a;
+      rgba[idx + 0] = (uint8_t)((float)rgba[idx + 0] * ia + (float)cr * a);
+      rgba[idx + 1] = (uint8_t)((float)rgba[idx + 1] * ia + (float)cg * a);
+      rgba[idx + 2] = (uint8_t)((float)rgba[idx + 2] * ia + (float)cb * a);
+    }
+  }
+}
+
+static void draw_filled_circle(uint8_t *rgba, int w, int h, float cx, float cy,
+                               float radius, uint8_t cr, uint8_t cg, uint8_t cb,
+                               float opacity) {
+  draw_filled_circle_depth(rgba, NULL, w, h, cx, cy, radius, cr, cg, cb,
+                           opacity, 0.0f, false, false);
+}
+
+/* Interpolate two colors: result = a + (b - a) * t */
+static inline void lerp_color(float *out, const float *a, const float *b,
+                              float t) {
+  out[0] = a[0] + (b[0] - a[0]) * t;
+  out[1] = a[1] + (b[1] - a[1]) * t;
+  out[2] = a[2] + (b[2] - a[2]) * t;
+}
 
 void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
   (void)user_data;
@@ -1642,35 +2171,117 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
   view_rot.d[14] = 0.0f;
   view_rot.d[15] = 1.0f;
 
-  /* Match geometry HUD position: NDC center = (-0.82, -0.78)
-   * NDC to screen: sx = (ndc_x * 0.5 + 0.5) * w
-   *                sy = (1.0 - (ndc_y * 0.5 + 0.5)) * h */
-  float cx = 0.09f * (float)w;
-  float cy = 0.89f * (float)h;
-  float scale_x = 0.06f * (float)w;
-  float scale_y = 0.06f * (float)h;
-
-  MopColor colors[3] = {vp->theme.axis_x, vp->theme.axis_y, vp->theme.axis_z};
-  MopVec3 dirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-
-  float line_w = 1.5f;
-  float opacity = 0.9f;
+  /* Pixel-aligned center position (Blender uses roundf for all screen coords)
+   */
+  float cx = roundf(0.09f * (float)w);
+  float cy = roundf(0.89f * (float)h);
+  float scale = fminf((float)w, (float)h) * 0.06f;
   float ssaa = (float)vp->ssaa_factor;
 
+  /* Background color (viewport bg for depth desaturation) */
+  float bg_col[3] = {sqrtf(vp->theme.bg_bottom.r) * 255.0f,
+                     sqrtf(vp->theme.bg_bottom.g) * 255.0f,
+                     sqrtf(vp->theme.bg_bottom.b) * 255.0f};
+
+  /* Axis colors as floats for interpolation */
+  float axis_col[3][3] = {
+      {vp->theme.axis_x.r * 255.0f, vp->theme.axis_x.g * 255.0f,
+       vp->theme.axis_x.b * 255.0f},
+      {vp->theme.axis_y.r * 255.0f, vp->theme.axis_y.g * 255.0f,
+       vp->theme.axis_y.b * 255.0f},
+      {vp->theme.axis_z.r * 255.0f, vp->theme.axis_z.g * 255.0f,
+       vp->theme.axis_z.b * 255.0f},
+  };
+
+  MopVec3 dirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+
+  /* Build 6 axis entries with Blender's depth-based properties */
+  struct {
+    float sx, sy; /* pixel-aligned screen tip */
+    float depth;  /* view-space Z: -1=back, +1=front */
+    float col[3]; /* depth-faded sRGB color */
+    float ball_r; /* circle radius with size parallax */
+    bool positive;
+    int axis;
+  } axes[6];
+
   for (int a = 0; a < 3; a++) {
-    /* Transform axis direction by view rotation */
     MopVec4 dir4 = {dirs[a].x, dirs[a].y, dirs[a].z, 0.0f};
     MopVec4 rot = mop_mat4_mul_vec4(view_rot, dir4);
 
-    float sx = cx + rot.x * scale_x;
-    float sy = cy - rot.y * scale_y; /* Y inverted for screen */
+    /* Positive axis */
+    float depth_pos = rot.z; /* -1..+1 */
+    axes[a].sx = roundf(cx + rot.x * scale);
+    axes[a].sy = roundf(cy - rot.y * scale);
+    axes[a].depth = depth_pos;
+    axes[a].positive = true;
+    axes[a].axis = a;
 
-    uint8_t cr = (uint8_t)(colors[a].r * 255.0f);
-    uint8_t cg = (uint8_t)(colors[a].g * 255.0f);
-    uint8_t cb = (uint8_t)(colors[a].b * 255.0f);
+    /* Blender color fading: lerp(bg, axis_color, (depth+1)*0.25 + 0.5)
+     * Maps depth in [-1,+1] to lerp factor [0.5, 1.0] — back desaturates
+     * toward background, front is fully saturated */
+    float fade_t = (depth_pos + 1.0f) * 0.25f + 0.5f;
+    lerp_color(axes[a].col, bg_col, axis_col[a], fade_t);
 
-    draw_aa_line(rgba, w, h, cx, cy, sx, sy, cr, cg, cb, line_w, opacity);
-    draw_arrowhead_2d(rgba, w, h, sx, sy, cx, cy, cr, cg, cb, line_w, opacity,
-                      5.0f * ssaa);
+    /* Blender size parallax: scale = (depth+1)*0.08 + 0.92
+     * Gives ±8% size variation from back to front */
+    float size_scale = (depth_pos + 1.0f) * 0.08f + 0.92f;
+    axes[a].ball_r = 8.0f * ssaa * size_scale;
+
+    /* Negative axis */
+    float depth_neg = -rot.z;
+    axes[a + 3].sx = roundf(cx - rot.x * scale);
+    axes[a + 3].sy = roundf(cy + rot.y * scale);
+    axes[a + 3].depth = depth_neg;
+    axes[a + 3].positive = false;
+    axes[a + 3].axis = a;
+
+    float fade_t_neg = (depth_neg + 1.0f) * 0.25f + 0.5f;
+    /* Negative axes: same color as positive (no pale tint) */
+    lerp_color(axes[a + 3].col, bg_col, axis_col[a], fade_t_neg);
+
+    float size_scale_neg = (depth_neg + 1.0f) * 0.08f + 0.92f;
+    axes[a + 3].ball_r = 8.0f * ssaa * size_scale_neg;
+  }
+
+  /* Depth sort back-to-front (Blender uses qsort on float depth) */
+  int order[6] = {0, 1, 2, 3, 4, 5};
+  for (int i = 0; i < 5; i++) {
+    for (int j = i + 1; j < 6; j++) {
+      if (axes[order[j]].depth < axes[order[i]].depth) {
+        int tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+      }
+    }
+  }
+
+  /* Draw back-to-front */
+  for (int i = 0; i < 6; i++) {
+    int ai = order[i];
+    uint8_t r8 = (uint8_t)fminf(255.0f, fmaxf(0.0f, axes[ai].col[0]));
+    uint8_t g8 = (uint8_t)fminf(255.0f, fmaxf(0.0f, axes[ai].col[1]));
+    uint8_t b8 = (uint8_t)fminf(255.0f, fmaxf(0.0f, axes[ai].col[2]));
+    float lw = axes[ai].positive ? 4.0f : 3.5f;
+
+    /* Shaft line — depth-faded color */
+    draw_aa_line(rgba, w, h, cx, cy, axes[ai].sx, axes[ai].sy, r8, g8, b8, lw,
+                 0.9f);
+
+    if (axes[ai].positive) {
+      /* Filled circle at tip */
+      draw_filled_circle(rgba, w, h, axes[ai].sx, axes[ai].sy, axes[ai].ball_r,
+                         r8, g8, b8, 0.95f);
+
+      /* Stroke-based letter label (dark text on colored disc) */
+      float letter_sz = 3.4f * ssaa;
+      float letter_lw = 1.4f * ssaa;
+      stroke_letters[axes[ai].axis](rgba, w, h, axes[ai].sx, axes[ai].sy,
+                                    letter_sz, letter_lw, 15, 15, 15, 0.88f);
+    } else {
+      /* Filled circle at negative tip — no text, just circle */
+      draw_filled_circle(rgba, w, h, axes[ai].sx, axes[ai].sy, axes[ai].ball_r,
+                         r8, g8, b8, 0.85f);
+    }
   }
 }

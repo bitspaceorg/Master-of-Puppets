@@ -48,13 +48,21 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     /* Shadow mapping (cascade) */
     int   shadows_enabled;       /* bool: 1 = shadows active, 0 = off */
     int   cascade_count;         /* number of active cascades (1-4) */
-    float _pad_shadow[2];        /* align to vec4 */
+    float _pad_s0;               /* align to vec4 (scalars, not arrays — */
+    float _pad_s1;               /* std140 pads array elements to 16B!) */
     mat4  cascade_vp[4];         /* light-space VP matrix per cascade */
     vec4  cascade_splits;        /* view-space Z split distances */
+    float exposure;              /* HDR exposure (scene objects only) */
+    float _pad_e0;
+    float _pad_e1;
+    float _pad_e2;
 } frag;
 
 layout(set = 0, binding = 1) uniform sampler2D u_texture;
 layout(set = 0, binding = 2) uniform sampler2DArrayShadow u_shadow_map;
+layout(set = 0, binding = 3) uniform sampler2D u_irradiance_map;
+layout(set = 0, binding = 4) uniform sampler2D u_prefiltered_map;
+layout(set = 0, binding = 5) uniform sampler2D u_brdf_lut;
 
 layout(location = 0) out vec4 frag_color;
 layout(location = 1) out uint frag_object_id;
@@ -128,6 +136,15 @@ float compute_shadow(vec3 world_pos) {
     shadow /= 9.0;
 
     return shadow;
+}
+
+/* Sample equirectangular map at a direction.
+ * Standard equirect: top = north pole, bottom = south pole.
+ * phi maps to u, theta maps to v (flipped so top = +Y). */
+vec2 dir_to_equirect(vec3 dir) {
+    float phi = atan(dir.z, dir.x);
+    float theta = asin(clamp(dir.y, -1.0, 1.0));
+    return vec2(phi / (2.0 * PI) + 0.5, 0.5 - theta / PI);
 }
 
 void main() {
@@ -265,18 +282,35 @@ void main() {
         /* Final composition */
         vec3 lit = base.rgb * diffuse_accum * diffuse_scale + specular_accum;
 
-        /* Ambient */
-        lit += base.rgb * frag.ambient * diffuse_scale;
+        /* IBL diffuse: sample irradiance map at surface normal.
+         * Falls back to flat ambient if irradiance map is 1x1 fallback. */
+        vec2 irr_uv = dir_to_equirect(n);
+        vec3 irr_sample = texture(u_irradiance_map, irr_uv).rgb;
+        /* If irradiance > 0 (real env map loaded), use it instead of flat ambient */
+        float irr_lum = dot(irr_sample, vec3(0.299, 0.587, 0.114));
+        if (irr_lum > 0.001) {
+            lit += base.rgb * irr_sample * diffuse_scale;
+        } else {
+            lit += base.rgb * frag.ambient * diffuse_scale;
+        }
 
-        /* Emissive is handled at the material level if needed */
+        /* IBL specular: split-sum approximation */
+        vec3 reflect_dir = reflect(-view_dir, n);
+        vec2 pf_uv = dir_to_equirect(reflect_dir);
+        vec3 pf_sample = texture(u_prefiltered_map, pf_uv).rgb;
+        vec2 brdf_val = texture(u_brdf_lut, vec2(ndotv, rough)).rg;
+        float pf_lum = dot(pf_sample, vec3(0.299, 0.587, 0.114));
+        if (pf_lum > 0.001) {
+            lit += pf_sample * (f0 * brdf_val.x + brdf_val.y);
+        }
 
-        frag_color = vec4(clamp(lit, 0.0, 1.0), base.a * frag.opacity);
+        frag_color = vec4(max(lit, vec3(0.0)) * frag.exposure, base.a * frag.opacity);
     } else {
         /* Legacy single-light fallback (no PBR) */
         vec3 l = normalize(frag.light_dir.xyz);
         float ndotl = max(dot(n, l), 0.0);
         float lighting = clamp(frag.ambient + (1.0 - frag.ambient) * ndotl, 0.0, 1.0);
-        frag_color = vec4(base.rgb * lighting, base.a * frag.opacity);
+        frag_color = vec4(base.rgb * lighting * frag.exposure, base.a * frag.opacity);
     }
 
     frag_object_id = frag.object_id;

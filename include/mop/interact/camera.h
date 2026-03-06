@@ -29,6 +29,8 @@ typedef struct MopOrbitCamera {
   float near_plane;
   float far_plane;
   float max_pitch; /* pitch clamp (default 1.5 rad ≈ 86°) */
+
+  float target_distance; /* smooth zoom target (interpolated by tick) */
 } MopOrbitCamera;
 
 /* Return sensible defaults: distance 4.5, yaw 0.6, pitch 0.4, fov 60,
@@ -56,5 +58,24 @@ void mop_orbit_camera_zoom(MopOrbitCamera *cam, float delta);
 /* Move the target on the world XZ plane along the camera's facing direction.
  * forward/right are signed amounts (e.g. dt * speed). */
 void mop_orbit_camera_move(MopOrbitCamera *cam, float forward, float right);
+
+/* Tick inertia: call once per frame with dt in seconds.  Applies velocity
+ * to yaw/pitch/distance/target and decays it exponentially.  Returns true
+ * if the camera is still moving (needs another frame). */
+bool mop_orbit_camera_tick(MopOrbitCamera *cam, float dt);
+
+/* Axis view identifiers for snap-to-view */
+typedef enum MopViewAxis {
+  MOP_VIEW_FRONT,  /* -Z → +Z (looking along -Z) */
+  MOP_VIEW_BACK,   /* +Z → -Z */
+  MOP_VIEW_RIGHT,  /* +X → -X */
+  MOP_VIEW_LEFT,   /* -X → +X */
+  MOP_VIEW_TOP,    /* +Y → -Y */
+  MOP_VIEW_BOTTOM, /* -Y → +Y */
+} MopViewAxis;
+
+/* Snap the orbit camera to an axis-aligned view. Preserves target and
+ * distance. */
+void mop_orbit_camera_snap_to_view(MopOrbitCamera *cam, MopViewAxis view);
 
 #endif /* MOP_INTERACT_CAMERA_H */

@@ -154,6 +154,9 @@ typedef struct MopRhiBackend {
   /* Texture management */
   MopRhiTexture *(*texture_create)(MopRhiDevice *device, int width, int height,
                                    const uint8_t *rgba_data);
+  MopRhiTexture *(*texture_create_hdr)(MopRhiDevice *device, int width,
+                                       int height,
+                                       const float *rgba_float_data);
   void (*texture_destroy)(MopRhiDevice *device, MopRhiTexture *texture);
 
   /* Instanced drawing (Phase 6B) */
@@ -173,6 +176,27 @@ typedef struct MopRhiBackend {
   /* Return the GPU frame time in milliseconds for the last completed frame.
    * CPU backend returns 0.0f. */
   float (*frame_gpu_time_ms)(MopRhiDevice *dev);
+
+  /* Set HDR exposure for tonemapping.
+   * GPU backends store this for the tonemap pass; CPU backend is a no-op
+   * (exposure handled by mop_sw_hdr_resolve in the viewport core). */
+  void (*set_exposure)(MopRhiDevice *dev, float exposure);
+
+  /* Set IBL textures for environment-based lighting.
+   * GPU backends store image views for descriptor binding.
+   * CPU backend is a no-op (IBL handled via mop_sw_ibl_set). */
+  void (*set_ibl_textures)(MopRhiDevice *dev, MopRhiTexture *irradiance,
+                           MopRhiTexture *prefiltered, MopRhiTexture *brdf_lut);
+
+  /* Draw environment skybox as background (fullscreen).
+   * inv_vp: 16 floats (column-major 4x4 inverse view-projection matrix).
+   * cam_pos: 3 floats (camera world position).
+   * rotation, intensity: env map parameters.
+   * GPU backends draw a fullscreen triangle with equirectangular sampling.
+   * CPU backend is a no-op (skybox handled in viewport core). */
+  void (*draw_skybox)(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                      MopRhiTexture *env_map, const float *inv_vp,
+                      const float *cam_pos, float rotation, float intensity);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------
