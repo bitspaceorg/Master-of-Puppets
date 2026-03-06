@@ -14,6 +14,8 @@
 #include "vulkan_internal.h"
 #include "vulkan_shaders.h"
 
+#include "core/viewport_internal.h"
+
 #include <math.h>
 #include <stdio.h>
 
@@ -426,13 +428,15 @@ static MopRhiDevice *vk_device_create(void) {
       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
        MOP_VK_MAX_DRAWS_PER_FRAME + 2}, /* +2 for skybox + tonemap */
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       MOP_VK_MAX_DRAWS_PER_FRAME * 5 +
-           2}, /* texture + shadow + IBL×3 + skybox + tonemap */
+       MOP_VK_MAX_DRAWS_PER_FRAME * 5 + 4}, /* texture + shadow + IBL×3 + skybox
+                                               + tonemap + grid + overlay */
+      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, /* SDF overlay SSBO */
   };
   VkDescriptorPoolCreateInfo dp_ci = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = MOP_VK_MAX_DRAWS_PER_FRAME + 2,
-      .poolSizeCount = 2,
+      .maxSets =
+          MOP_VK_MAX_DRAWS_PER_FRAME + 4, /* +4: skybox+tonemap+grid+overlay */
+      .poolSizeCount = 3,
       .pPoolSizes = pool_sizes,
   };
   r = vkCreateDescriptorPool(dev->device, &dp_ci, NULL, &dev->desc_pool);
@@ -866,6 +870,115 @@ tonemap_done:
   }
 #endif
 
+  /* ---- SDF overlay + grid pipeline ---- */
+  {
+    VkResult ov_r = mop_vk_create_overlay_render_pass(
+        dev->device, &dev->overlay_render_pass);
+    if (ov_r != VK_SUCCESS) {
+      MOP_WARN("[VK] overlay render pass failed: %d", ov_r);
+    } else {
+      /* Overlay descriptor set layout: binding 0 = depth sampler,
+       * binding 1 = SSBO (prim data) */
+      VkDescriptorSetLayoutBinding ov_bindings[2] = {
+          {
+              .binding = 0,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+          {
+              .binding = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+      };
+      VkDescriptorSetLayoutCreateInfo ov_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 2,
+          .pBindings = ov_bindings,
+      };
+      ov_r = vkCreateDescriptorSetLayout(dev->device, &ov_layout_ci, NULL,
+                                         &dev->overlay_desc_layout);
+      if (ov_r == VK_SUCCESS) {
+        /* Push constants: prim_count(uint) + fb_width(float) + fb_height(float)
+         * + reverse_z(uint) = 16 bytes */
+        VkPushConstantRange ov_push = {
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = 16,
+        };
+        VkPipelineLayoutCreateInfo ov_pl_ci = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &dev->overlay_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &ov_push,
+        };
+        ov_r = vkCreatePipelineLayout(dev->device, &ov_pl_ci, NULL,
+                                      &dev->overlay_pipeline_layout);
+      }
+
+      /* Grid descriptor set layout: binding 0 = depth sampler */
+      VkDescriptorSetLayoutBinding grid_binding = {
+          .binding = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      };
+      VkDescriptorSetLayoutCreateInfo grid_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 1,
+          .pBindings = &grid_binding,
+      };
+      ov_r = vkCreateDescriptorSetLayout(dev->device, &grid_layout_ci, NULL,
+                                         &dev->grid_desc_layout);
+      if (ov_r == VK_SUCCESS) {
+        /* Grid push constants: Hi[9] + vp rows (6) + grid_half + reverse_z +
+         * axis_half_width + pad + 4 vec4 colors = 144 bytes.
+         * MoltenVK/Apple supports 4096, most GPUs support ≥256. */
+        VkPushConstantRange grid_push = {
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = 144,
+        };
+        VkPipelineLayoutCreateInfo grid_pl_ci = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &dev->grid_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &grid_push,
+        };
+        ov_r = vkCreatePipelineLayout(dev->device, &grid_pl_ci, NULL,
+                                      &dev->grid_pipeline_layout);
+      }
+
+#if defined(MOP_VK_HAS_OVERLAY_SHADERS)
+      if (dev->fullscreen_vert) {
+        dev->overlay_frag = create_shader_module(
+            dev->device, mop_overlay_frag_spv, mop_overlay_frag_spv_size);
+        dev->grid_frag = create_shader_module(dev->device, mop_grid_frag_spv,
+                                              mop_grid_frag_spv_size);
+
+        if (dev->overlay_frag && dev->overlay_pipeline_layout) {
+          dev->overlay_pipeline = mop_vk_create_overlay_pipeline(dev);
+          if (dev->overlay_pipeline) {
+            dev->overlay_enabled = true;
+            MOP_INFO("[VK] SDF overlay pipeline enabled");
+          }
+        }
+        if (dev->grid_frag && dev->grid_pipeline_layout) {
+          dev->grid_pipeline = mop_vk_create_grid_pipeline(dev);
+          if (dev->grid_pipeline) {
+            dev->grid_enabled = true;
+            MOP_INFO("[VK] analytical grid pipeline enabled");
+          }
+        }
+      }
+#endif
+    }
+  }
+
   MOP_INFO("[VK] device created successfully");
   return dev;
 
@@ -1009,6 +1122,28 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyDescriptorSetLayout(d, dev->skybox_desc_layout, NULL);
     if (dev->skybox_frag)
       vkDestroyShaderModule(d, dev->skybox_frag, NULL);
+
+    /* Overlay cleanup */
+    if (dev->overlay_pipeline)
+      vkDestroyPipeline(d, dev->overlay_pipeline, NULL);
+    if (dev->overlay_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->overlay_pipeline_layout, NULL);
+    if (dev->overlay_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->overlay_desc_layout, NULL);
+    if (dev->overlay_render_pass)
+      vkDestroyRenderPass(d, dev->overlay_render_pass, NULL);
+    if (dev->overlay_frag)
+      vkDestroyShaderModule(d, dev->overlay_frag, NULL);
+
+    /* Grid cleanup */
+    if (dev->grid_pipeline)
+      vkDestroyPipeline(d, dev->grid_pipeline, NULL);
+    if (dev->grid_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->grid_pipeline_layout, NULL);
+    if (dev->grid_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->grid_desc_layout, NULL);
+    if (dev->grid_frag)
+      vkDestroyShaderModule(d, dev->grid_frag, NULL);
 
     /* Pipelines */
     for (int i = 0; i < MOP_VK_MAX_PIPELINES; i++) {
@@ -1262,7 +1397,8 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
       VK_FORMAT_D32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-          VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+          VK_IMAGE_USAGE_SAMPLED_BIT,
       &fb->depth_image, &fb->depth_memory);
   if (r != VK_SUCCESS) {
     MOP_ERROR("[VK] fb depth image: %d", r);
@@ -1386,13 +1522,32 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       MOP_WARN("[VK] tonemap framebuffer failed: %d", r);
   }
 
+  /* ---- Overlay framebuffer (renders on LDR color image) ---- */
+  if (dev->overlay_render_pass && fb->ldr_color_view) {
+    VkImageView ov_views[1] = {fb->ldr_color_view};
+    VkFramebufferCreateInfo ov_fb_ci = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass = dev->overlay_render_pass,
+        .attachmentCount = 1,
+        .pAttachments = ov_views,
+        .width = (uint32_t)width,
+        .height = (uint32_t)height,
+        .layers = 1,
+    };
+    r = vkCreateFramebuffer(dev->device, &ov_fb_ci, NULL,
+                            &fb->overlay_framebuffer);
+    if (r != VK_SUCCESS)
+      MOP_WARN("[VK] overlay framebuffer failed: %d", r);
+  }
+
   /* ---- Readback staging buffers (host-visible, persistently mapped) ---- */
   size_t color_size = npixels * 4;
   size_t pick_size = npixels * sizeof(uint32_t);
   size_t depth_size = npixels * sizeof(float);
 
   r = mop_vk_create_buffer(dev->device, &dev->mem_props, color_size,
-                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                            &fb->readback_color_buf, &fb->readback_color_mem);
@@ -1483,6 +1638,8 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
     vkDestroyFramebuffer(d, fb->framebuffer, NULL);
 
   /* Tonemap framebuffer + LDR color */
+  if (fb->overlay_framebuffer)
+    vkDestroyFramebuffer(d, fb->overlay_framebuffer, NULL);
   if (fb->tonemap_framebuffer)
     vkDestroyFramebuffer(d, fb->tonemap_framebuffer, NULL);
   if (fb->ldr_color_view)
@@ -2943,6 +3100,361 @@ static void vk_draw_skybox(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
 }
 
+/* =========================================================================
+ * SDF overlay draw — uploads prim SSBO, runs fullscreen overlay shader
+ * ========================================================================= */
+
+static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                             const void *prims, uint32_t prim_count,
+                             const void *grid_params, int fb_width,
+                             int fb_height) {
+  if (!fb->overlay_framebuffer)
+    return;
+  bool has_prims = dev->overlay_enabled && prim_count > 0;
+  bool has_grid = dev->grid_enabled && grid_params != NULL;
+  if (!has_prims && !has_grid)
+    return;
+
+  /* Create temporary SSBO for prim data (only if we have prims) */
+  VkBuffer ssbo_buf = VK_NULL_HANDLE;
+  VkDeviceMemory ssbo_mem = VK_NULL_HANDLE;
+  size_t ssbo_size = 0;
+  if (has_prims) {
+    ssbo_size = (size_t)prim_count * 3 * sizeof(float) * 4;
+    if (ssbo_size > MOP_VK_STAGING_SIZE)
+      has_prims = false;
+    else {
+      VkResult r = mop_vk_create_buffer(
+          dev->device, &dev->mem_props, ssbo_size,
+          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+          &ssbo_buf, &ssbo_mem);
+      if (r != VK_SUCCESS)
+        has_prims = false;
+    }
+  }
+
+  if (!has_prims && !has_grid)
+    return;
+
+  /* Map and fill SSBO if we have prims */
+  if (has_prims) {
+    void *ssbo_mapped = NULL;
+    VkResult r =
+        vkMapMemory(dev->device, ssbo_mem, 0, ssbo_size, 0, &ssbo_mapped);
+    if (r != VK_SUCCESS) {
+      vkDestroyBuffer(dev->device, ssbo_buf, NULL);
+      vkFreeMemory(dev->device, ssbo_mem, NULL);
+      has_prims = false;
+    } else {
+      const uint8_t *src = (const uint8_t *)prims;
+      float *dst = (float *)ssbo_mapped;
+      for (uint32_t i = 0; i < prim_count; i++) {
+        const float *pf = (const float *)(src + i * 48);
+        dst[i * 12 + 0] = pf[0];
+        dst[i * 12 + 1] = pf[1];
+        dst[i * 12 + 2] = pf[2];
+        dst[i * 12 + 3] = pf[3];
+        dst[i * 12 + 4] = pf[4];
+        dst[i * 12 + 5] = pf[5];
+        dst[i * 12 + 6] = pf[6];
+        dst[i * 12 + 7] = pf[7];
+        dst[i * 12 + 8] = pf[8];
+        dst[i * 12 + 9] = pf[9];
+        int32_t type_val;
+        memcpy(&type_val, &pf[10], sizeof(int32_t));
+        dst[i * 12 + 10] = (float)type_val;
+        dst[i * 12 + 11] = pf[11];
+      }
+      vkUnmapMemory(dev->device, ssbo_mem);
+    }
+  }
+
+  if (!has_prims && !has_grid)
+    return;
+
+  VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+
+  /* Upload readback buffer → LDR image so CPU-drawn overlays (outline)
+   * are baked into the LDR before we render grid + gizmos on top. */
+  if (fb->readback_color && fb->readback_color_mapped) {
+    size_t npx = (size_t)fb_width * (size_t)fb_height;
+    memcpy(fb->readback_color_mapped, fb->readback_color, npx * 4);
+  }
+  {
+    VkImageMemoryBarrier to_dst = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .image = fb->ldr_color_image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .levelCount = 1,
+                             .layerCount = 1},
+    };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                         &to_dst);
+    VkBufferImageCopy upload_region = {
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .layerCount = 1},
+        .imageExtent = {(uint32_t)fb_width, (uint32_t)fb_height, 1},
+    };
+    vkCmdCopyBufferToImage(cb, fb->readback_color_buf, fb->ldr_color_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &upload_region);
+    VkImageMemoryBarrier to_src = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .image = fb->ldr_color_image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .levelCount = 1,
+                             .layerCount = 1},
+    };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                         NULL, 0, NULL, 1, &to_src);
+  }
+
+  /* Transition resolved depth: TRANSFER_SRC → SHADER_READ_ONLY for sampling */
+  {
+    VkImageMemoryBarrier depth_to_read = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .image = fb->depth_image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                             .levelCount = 1,
+                             .layerCount = 1},
+    };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
+                         NULL, 1, &depth_to_read);
+  }
+
+  /* Begin overlay render pass */
+  VkRenderPassBeginInfo rp_bi = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+      .renderPass = dev->overlay_render_pass,
+      .framebuffer = fb->overlay_framebuffer,
+      .renderArea = {.extent = {(uint32_t)fb_width, (uint32_t)fb_height}},
+      .clearValueCount = 0,
+  };
+  vkCmdBeginRenderPass(cb, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+  VkViewport vp = {
+      .y = (float)fb_height,
+      .width = (float)fb_width,
+      .height = -(float)fb_height,
+      .maxDepth = 1.0f,
+  };
+  VkRect2D sc = {.extent = {(uint32_t)fb_width, (uint32_t)fb_height}};
+  vkCmdSetViewport(cb, 0, 1, &vp);
+  vkCmdSetScissor(cb, 0, 1, &sc);
+
+  /* --- GPU Grid draw (rendered first, underneath gizmos) --- */
+  if (has_grid) {
+    VkDescriptorSetAllocateInfo grid_ds_ai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = dev->desc_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &dev->grid_desc_layout,
+    };
+    VkDescriptorSet grid_ds;
+    VkResult gr = vkAllocateDescriptorSets(dev->device, &grid_ds_ai, &grid_ds);
+    if (gr == VK_SUCCESS) {
+      VkDescriptorImageInfo grid_depth = {
+          .sampler = dev->default_sampler,
+          .imageView = fb->depth_view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet grid_write = {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = grid_ds,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &grid_depth,
+      };
+      vkUpdateDescriptorSets(dev->device, 1, &grid_write, 0, NULL);
+
+      vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        dev->grid_pipeline);
+      vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              dev->grid_pipeline_layout, 0, 1, &grid_ds, 0,
+                              NULL);
+
+      /* Pack grid push constants to match shader std430 layout.
+       * vec4 members align to 16 bytes. After 19 scalars (76 bytes),
+       * the first vec4 starts at offset 80 → 1 float pad needed. */
+      const MopGridParams *gp = (const MopGridParams *)grid_params;
+      struct {
+        float Hi[9];               /* 0..35 */
+        float vp_z0, vp_z2, vp_z3; /* 36..47 */
+        float vp_w0, vp_w2, vp_w3; /* 48..59 */
+        float grid_half;           /* 60 */
+        uint32_t reverse_z;        /* 64 */
+        float axis_half_width;     /* 68 */
+        float _pad0;               /* 72 */
+        float _pad1;               /* 76 — aligns vec4 to offset 80 */
+        float minor_color[4];      /* 80..95 */
+        float major_color[4];      /* 96..111 */
+        float axis_x_color[4];     /* 112..127 */
+        float axis_z_color[4];     /* 128..143 */
+      } grid_push;
+      _Static_assert(sizeof(grid_push) == 144, "grid push constant size");
+      for (int i = 0; i < 9; i++)
+        grid_push.Hi[i] = gp->Hi[i];
+      grid_push.vp_z0 = gp->vp_z0;
+      grid_push.vp_z2 = gp->vp_z2;
+      grid_push.vp_z3 = gp->vp_z3;
+      grid_push.vp_w0 = gp->vp_w0;
+      grid_push.vp_w2 = gp->vp_w2;
+      grid_push.vp_w3 = gp->vp_w3;
+      grid_push.grid_half = gp->grid_half;
+      grid_push.reverse_z = gp->reverse_z ? 1u : 0u;
+      grid_push.axis_half_width = gp->axis_half_width;
+      grid_push._pad0 = 0.0f;
+      grid_push._pad1 = 0.0f;
+      grid_push.minor_color[0] = gp->minor_color.r;
+      grid_push.minor_color[1] = gp->minor_color.g;
+      grid_push.minor_color[2] = gp->minor_color.b;
+      grid_push.minor_color[3] = gp->minor_color.a;
+      grid_push.major_color[0] = gp->major_color.r;
+      grid_push.major_color[1] = gp->major_color.g;
+      grid_push.major_color[2] = gp->major_color.b;
+      grid_push.major_color[3] = gp->major_color.a;
+      grid_push.axis_x_color[0] = gp->axis_x_color.r;
+      grid_push.axis_x_color[1] = gp->axis_x_color.g;
+      grid_push.axis_x_color[2] = gp->axis_x_color.b;
+      grid_push.axis_x_color[3] = gp->axis_x_color.a;
+      grid_push.axis_z_color[0] = gp->axis_z_color.r;
+      grid_push.axis_z_color[1] = gp->axis_z_color.g;
+      grid_push.axis_z_color[2] = gp->axis_z_color.b;
+      grid_push.axis_z_color[3] = gp->axis_z_color.a;
+
+      vkCmdPushConstants(cb, dev->grid_pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(grid_push),
+                         &grid_push);
+      vkCmdDraw(cb, 3, 1, 0, 0);
+    }
+  }
+
+  /* --- SDF overlay primitives (gizmos, lights, etc.) --- */
+  if (has_prims) {
+    VkDescriptorSetAllocateInfo ds_ai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = dev->desc_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &dev->overlay_desc_layout,
+    };
+    VkDescriptorSet ds;
+    VkResult dr = vkAllocateDescriptorSets(dev->device, &ds_ai, &ds);
+    if (dr == VK_SUCCESS) {
+      VkDescriptorImageInfo depth_info = {
+          .sampler = dev->default_sampler,
+          .imageView = fb->depth_view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkDescriptorBufferInfo ssbo_info = {
+          .buffer = ssbo_buf,
+          .offset = 0,
+          .range = ssbo_size,
+      };
+      VkWriteDescriptorSet writes[2] = {
+          {
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = ds,
+              .dstBinding = 0,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .pImageInfo = &depth_info,
+          },
+          {
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = ds,
+              .dstBinding = 1,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &ssbo_info,
+          },
+      };
+      vkUpdateDescriptorSets(dev->device, 2, writes, 0, NULL);
+
+      vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        dev->overlay_pipeline);
+      vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              dev->overlay_pipeline_layout, 0, 1, &ds, 0, NULL);
+
+      struct {
+        uint32_t prim_count;
+        float fb_width;
+        float fb_height;
+        uint32_t reverse_z;
+      } push = {
+          .prim_count = prim_count,
+          .fb_width = (float)fb_width,
+          .fb_height = (float)fb_height,
+          .reverse_z = dev->reverse_z ? 1u : 0u,
+      };
+      vkCmdPushConstants(cb, dev->overlay_pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+      vkCmdDraw(cb, 3, 1, 0, 0);
+    }
+  }
+
+  vkCmdEndRenderPass(cb);
+
+  /* Transition depth back to TRANSFER_SRC (original layout after render pass)
+   */
+  {
+    VkImageMemoryBarrier depth_to_xfer = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .image = fb->depth_image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                             .levelCount = 1,
+                             .layerCount = 1},
+    };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                         &depth_to_xfer);
+  }
+
+  /* Copy LDR back to readback */
+  {
+    VkBufferImageCopy region = {
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .layerCount = 1},
+        .imageExtent = {(uint32_t)fb_width, (uint32_t)fb_height, 1},
+    };
+    vkCmdCopyImageToBuffer(cb, fb->ldr_color_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           fb->readback_color_buf, 1, &region);
+  }
+
+  mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
+
+  size_t npixels = (size_t)fb_width * (size_t)fb_height;
+  if (fb->readback_color && fb->readback_color_mapped)
+    memcpy(fb->readback_color, fb->readback_color_mapped, npixels * 4);
+
+  if (ssbo_buf) {
+    vkDestroyBuffer(dev->device, ssbo_buf, NULL);
+    vkFreeMemory(dev->device, ssbo_mem, NULL);
+  }
+}
+
 static const MopRhiBackend VK_BACKEND = {
     .name = "vulkan",
     .device_create = vk_device_create,
@@ -2970,6 +3482,7 @@ static const MopRhiBackend VK_BACKEND = {
     .set_exposure = vk_set_exposure,
     .set_ibl_textures = vk_set_ibl_textures,
     .draw_skybox = vk_draw_skybox,
+    .draw_overlays = vk_draw_overlays,
 };
 
 const MopRhiBackend *mop_rhi_backend_vulkan(void) { return &VK_BACKEND; }

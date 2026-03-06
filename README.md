@@ -2,7 +2,15 @@
 
 Backend-agnostic viewport rendering engine in C11.
 
-Master of Puppets renders 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API with opaque handles.  Designed as reusable infrastructure for DCC tools and 3D applications.  The Vulkan backend features 4x MSAA, reverse-Z depth, cascade shadow mapping, and FXAA.
+Master of Puppets renders 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API with opaque handles.  Designed as reusable infrastructure for DCC tools and 3D applications.  The Vulkan backend features 4x MSAA, reverse-Z depth, cascade shadow mapping, FXAA, and HDRI environment lighting.
+
+<p align="center">
+  <img src="docs/images/default-viewport.png" width="100%" alt="Default viewport with IBL lighting, GPU overlays, and analytical grid" />
+</p>
+<p align="center">
+  <img src="docs/images/hdri-skybox.png" width="49%" alt="HDRI skybox environment background" />
+  <img src="docs/images/hdri-sunset.png" width="49%" alt="Sunset HDRI with low exposure" />
+</p>
 
 ## Usage
 
@@ -124,7 +132,8 @@ The application sees only opaque handles and value types.  The RHI is a function
 | **Undo/Redo** | Transform history stack |
 | **Particles** | Emitters with smoke, fire, sparks presets |
 | **Water** | Procedural sine-wave animated surface |
-| **Post-Process** | Gamma, tonemapping, vignette, fog, FXAA |
+| **Environment** | HDRI loading, image-based lighting (IBL), optional skybox background |
+| **Post-Process** | HDR tonemap (ACES), exposure control, vignette, fog, FXAA |
 | **Spatial** | AABB, frustum culling, raycasting |
 | **Loaders** | OBJ and binary .mop format |
 

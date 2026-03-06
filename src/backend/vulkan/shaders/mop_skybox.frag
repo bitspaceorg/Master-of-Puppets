@@ -29,8 +29,10 @@ layout(location = 1) out uint frag_object_id;
 const float PI = 3.14159265359;
 
 void main() {
-    /* Reconstruct world-space ray direction from NDC */
-    vec2 ndc = v_uv * 2.0 - 1.0;
+    /* Reconstruct world-space ray direction from NDC.
+     * v_uv.y is flipped by the vertex shader (Vulkan convention), so we
+     * negate the Y component to match the OpenGL-style inv_view_proj. */
+    vec2 ndc = vec2(v_uv.x * 2.0 - 1.0, 1.0 - v_uv.y * 2.0);
 
     /* Unproject far plane point */
     vec4 world_far = ubo.inv_view_proj * vec4(ndc, 1.0, 1.0);
@@ -38,9 +40,9 @@ void main() {
     vec3 dir = normalize(world_pos - ubo.cam_pos.xyz);
 
     /* Equirectangular mapping */
-    float phi = atan(dir.z, dir.x) + ubo.rotation;
+    float phi = atan(dir.z, dir.x) - ubo.rotation;
     float theta = asin(clamp(dir.y, -1.0, 1.0));
-    vec2 env_uv = vec2(phi / (2.0 * PI) + 0.5, theta / PI + 0.5);
+    vec2 env_uv = vec2(phi / (2.0 * PI) + 0.5, 0.5 - theta / PI);
 
     vec3 color = texture(u_env_map, env_uv).rgb * ubo.intensity;
 

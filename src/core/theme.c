@@ -31,13 +31,13 @@ MopTheme mop_theme_default(void) {
       .bg_bottom = bg,
 
       /* Grid: visible gray lines on brighter bg, saturated center axes */
-      .grid_minor = {0.18f, 0.18f, 0.18f, 1.0f},
-      .grid_major = {0.28f, 0.28f, 0.28f, 1.0f},
+      .grid_minor = {0.30f, 0.30f, 0.30f, 1.0f},
+      .grid_major = {0.45f, 0.45f, 0.45f, 1.0f},
       .grid_axis_x = {0.93f, 0.27f, 0.27f, 1.0f},
-      .grid_axis_z = {0.27f, 0.72f, 0.27f, 1.0f},
+      .grid_axis_z = {0.30f, 0.45f, 0.93f, 1.0f},
       .grid_line_width_minor = 1.0f,
       .grid_line_width_major = 1.0f,
-      .grid_line_width_axis = 1.5f,
+      .grid_line_width_axis = 4.0f,
 
       /* Gizmo: bright saturated RGB per axis */
       .gizmo_x = {0.93f, 0.27f, 0.27f, 1.0f},
@@ -45,7 +45,7 @@ MopTheme mop_theme_default(void) {
       .gizmo_z = {0.30f, 0.45f, 0.93f, 1.0f},
       .gizmo_center = {0.95f, 0.95f, 0.95f, 1.0f},
       .gizmo_hover = {1.0f, 1.0f, 0.4f, 1.0f},
-      .gizmo_line_width = 2.5f,
+      .gizmo_line_width = 6.0f,
       .gizmo_opacity = 1.0f,
       .gizmo_target_opacity = 0.45f,
 
@@ -86,7 +86,7 @@ MopTheme mop_theme_default(void) {
 
       /* Camera frustum: bright white */
       .camera_frustum_color = {0.90f, 0.90f, 0.90f, 1.0f},
-      .camera_frustum_line_width = 1.0f,
+      .camera_frustum_line_width = 3.0f,
 
       /* Depth bias */
       .depth_bias = 0.0001f,

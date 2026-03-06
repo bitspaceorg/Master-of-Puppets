@@ -197,6 +197,16 @@ typedef struct MopRhiBackend {
   void (*draw_skybox)(MopRhiDevice *dev, MopRhiFramebuffer *fb,
                       MopRhiTexture *env_map, const float *inv_vp,
                       const float *cam_pos, float rotation, float intensity);
+
+  /* Draw SDF overlay primitives on top of the LDR color image.
+   * prims: array of MopOverlayPrim (from viewport_internal.h).
+   * grid_params: if non-NULL, GPU grid is rendered before SDF overlays.
+   * GPU backends use a fullscreen SDF shader; CPU iterates and pixel-writes.
+   * May be NULL for backends that don't support overlays (caller falls back).
+   */
+  void (*draw_overlays)(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                        const void *prims, uint32_t prim_count,
+                        const void *grid_params, int fb_width, int fb_height);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------

@@ -440,6 +440,18 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
     free(vp);
     return NULL;
   }
+  vp->overlay_prims = calloc(MOP_MAX_OVERLAY_PRIMS, sizeof(MopOverlayPrim));
+  if (!vp->overlay_prims) {
+    free(vp->ssaa_color_buf);
+    free(vp->instanced_meshes);
+    free(vp->meshes);
+    rhi->framebuffer_destroy(device, fb);
+    rhi->device_destroy(device);
+    free(vp);
+    return NULL;
+  }
+  vp->overlay_prim_count = 0;
+
   vp->render_mode = MOP_RENDER_SOLID;
   vp->light_dir = (MopVec3){0.3f, 1.0f, 0.5f};
   vp->ambient = 0.25f;
@@ -608,6 +620,7 @@ void mop_viewport_destroy(MopViewport *viewport) {
     viewport->rhi->device_destroy(viewport->device);
   }
 
+  free(viewport->overlay_prims);
   free(viewport->ssaa_color_buf);
   mop_sw_framebuffer_free(&viewport->shadow_fb);
   free(viewport->instanced_meshes);
@@ -1315,7 +1328,7 @@ static void pass_background_hdri_cpu(MopViewport *vp) {
       dz /= len;
 
       /* Equirectangular UV */
-      float phi_val = atan2f(dz, dx) + rotation;
+      float phi_val = atan2f(dz, dx) - rotation;
       float clamped_dy = dy < -1.0f ? -1.0f : (dy > 1.0f ? 1.0f : dy);
       float theta_val = asinf(clamped_dy);
       float eu = phi_val / (2.0f * pi) + 0.5f;
@@ -1335,12 +1348,25 @@ static void pass_background_hdri_cpu(MopViewport *vp) {
 }
 
 static void pass_background(MopViewport *vp) {
-  /* HDRI/procedural sky as skybox — only on CPU backend (GPU keeps gray bg) */
+  /* HDRI/procedural sky as skybox */
   if ((vp->env_type == MOP_ENV_HDRI ||
        vp->env_type == MOP_ENV_PROCEDURAL_SKY) &&
-      vp->env_hdr_data && vp->backend_type == MOP_BACKEND_CPU) {
-    pass_background_hdri_cpu(vp);
-    return;
+      vp->env_hdr_data && vp->show_env_background) {
+    if (vp->backend_type == MOP_BACKEND_CPU) {
+      pass_background_hdri_cpu(vp);
+      return;
+    }
+    /* GPU skybox: draw env map as background */
+    if (vp->rhi->draw_skybox && vp->env_texture) {
+      MopMat4 vp_mat =
+          mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+      MopMat4 inv_vp = mop_mat4_inverse(vp_mat);
+      float cam_pos[3] = {vp->cam_eye.x, vp->cam_eye.y, vp->cam_eye.z};
+      vp->rhi->draw_skybox(vp->device, vp->framebuffer, vp->env_texture,
+                           inv_vp.d, cam_pos, vp->env_rotation,
+                           vp->env_intensity * vp->exposure);
+      return;
+    }
   }
 
   if (!vp->bg_vb || !vp->bg_ib)
@@ -1888,16 +1914,24 @@ void mop_viewport_render(MopViewport *viewport) {
     mop_sw_hdr_resolve(sw_fb, viewport->exposure);
   }
 
-  /* Post-process overlays — run after frame_end so that readback buffers
-   * (color, object_id, depth) are populated (GPU copies happen in frame_end).
-   * These modify the readback color buffer in-place. */
+  /* Outline writes directly to readback buffer — must run BEFORE
+   * draw_overlays so the GPU pass renders gizmos on top. */
   if (viewport->overlay_enabled[MOP_OVERLAY_OUTLINE]) {
     mop_overlay_builtin_outline(viewport, NULL);
   }
 
-  /* 2D screen-space chrome — anti-aliased lines for all UI elements */
+  /* Grid: GPU shader path or CPU fallback */
+  bool gpu_grid = (viewport->backend_type != MOP_BACKEND_CPU);
+  if (viewport->show_chrome && !gpu_grid) {
+    mop_overlay_builtin_grid(viewport, NULL);
+  }
+
+  /* Reset overlay command buffer for this frame */
+  viewport->overlay_prim_count = 0;
+
+  /* Push-based overlays (gizmo, lights, cameras, axis indicator) go into the
+   * command buffer and are dispatched via draw_overlays. */
   if (viewport->show_chrome) {
-    mop_overlay_builtin_grid(viewport, NULL); /* grid on below-Y=0 objects */
     mop_overlay_builtin_light_indicators(viewport, NULL);
 
     /* Sync camera object positions from icon mesh (gizmo drag updates mesh) */
@@ -1909,6 +1943,69 @@ void mop_viewport_render(MopViewport *viewport) {
     mop_overlay_builtin_camera_objects(viewport, NULL);
     mop_overlay_builtin_gizmo_2d(viewport, NULL);
     mop_overlay_builtin_axis_indicator_2d(viewport, NULL);
+  }
+
+  /* Compute GPU grid params if needed */
+  MopGridParams grid_params;
+  MopGridParams *gp = NULL;
+  if (viewport->show_chrome && gpu_grid) {
+    MopMat4 VPm =
+        mop_mat4_multiply(viewport->projection_matrix, viewport->view_matrix);
+
+    /* Homography: NDC → Y=0 world XZ (skip Y column of VP) */
+    float H[9];
+    H[0] = VPm.d[0];
+    H[1] = VPm.d[8];
+    H[2] = VPm.d[12];
+    H[3] = VPm.d[1];
+    H[4] = VPm.d[9];
+    H[5] = VPm.d[13];
+    H[6] = VPm.d[3];
+    H[7] = VPm.d[11];
+    H[8] = VPm.d[15];
+
+    float det = H[0] * (H[4] * H[8] - H[5] * H[7]) -
+                H[1] * (H[3] * H[8] - H[5] * H[6]) +
+                H[2] * (H[3] * H[7] - H[4] * H[6]);
+    if (fabsf(det) > 1e-12f) {
+      float idet = 1.0f / det;
+      grid_params.Hi[0] = (H[4] * H[8] - H[5] * H[7]) * idet;
+      grid_params.Hi[1] = (H[2] * H[7] - H[1] * H[8]) * idet;
+      grid_params.Hi[2] = (H[1] * H[5] - H[2] * H[4]) * idet;
+      grid_params.Hi[3] = (H[5] * H[6] - H[3] * H[8]) * idet;
+      grid_params.Hi[4] = (H[0] * H[8] - H[2] * H[6]) * idet;
+      grid_params.Hi[5] = (H[2] * H[3] - H[0] * H[5]) * idet;
+      grid_params.Hi[6] = (H[3] * H[7] - H[4] * H[6]) * idet;
+      grid_params.Hi[7] = (H[1] * H[6] - H[0] * H[7]) * idet;
+      grid_params.Hi[8] = (H[0] * H[4] - H[1] * H[3]) * idet;
+
+      grid_params.vp_z0 = VPm.d[2];
+      grid_params.vp_z2 = VPm.d[10];
+      grid_params.vp_z3 = VPm.d[14];
+      grid_params.vp_w0 = VPm.d[3];
+      grid_params.vp_w2 = VPm.d[11];
+      grid_params.vp_w3 = VPm.d[15];
+      grid_params.grid_half = 8.0f;
+      grid_params.reverse_z = viewport->reverse_z;
+      grid_params.minor_color = viewport->theme.grid_minor;
+      grid_params.major_color = viewport->theme.grid_major;
+      grid_params.axis_x_color = viewport->theme.grid_axis_x;
+      grid_params.axis_z_color = viewport->theme.grid_axis_z;
+      grid_params.axis_half_width = viewport->theme.grid_line_width_axis * 0.5f;
+      gp = &grid_params;
+    }
+  }
+
+  /* Dispatch accumulated overlay primitives to the GPU/CPU backend.
+   * Uploads readback→LDR first (so outline/grid are in the base image),
+   * renders GPU grid + SDF gizmos on top, then copies LDR→readback. */
+  if ((viewport->overlay_prim_count > 0 || gp) &&
+      viewport->rhi->draw_overlays) {
+    int w = viewport->width * viewport->ssaa_factor;
+    int h = viewport->height * viewport->ssaa_factor;
+    viewport->rhi->draw_overlays(viewport->device, viewport->framebuffer,
+                                 viewport->overlay_prims,
+                                 viewport->overlay_prim_count, gp, w, h);
   }
 
   /* Clear shadow + IBL state */

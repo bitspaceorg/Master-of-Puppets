@@ -28,7 +28,11 @@ Key features:
 - **4x MSAA** — hardware multisampling with in-pass resolve (auto-detected, falls back to 1x)
 - **Reverse-Z depth** — near=1, far=0 with infinite far plane for superior depth precision
 - **Cascade shadow mapping** — 4-cascade directional shadow maps (2048x2048)
+- **HDR + ACES tonemap** — 16-bit float HDR rendering with filmic tonemapping and exposure control
+- **HDRI environment** — equirectangular HDR skybox background with IBL (irradiance + prefiltered specular)
 - **FXAA** — fast approximate anti-aliasing post-process pass
+- **SDF overlays** — GPU-rendered gizmo, navigator, light/camera indicators via signed-distance-field shader
+- **Analytical grid** — GPU fullscreen grid with depth testing and distance fade
 
 ## Instance and Device
 
@@ -149,3 +153,24 @@ Four-cascade directional shadow maps (2048x2048 per cascade) with a dedicated sh
 ## FXAA Post-Processing
 
 A full-screen FXAA (Fast Approximate Anti-Aliasing) pass runs after the main render pass, further smoothing edges. Controlled via the `MOP_POST_FXAA` post-effect flag. FXAA is enabled by default in the Vulkan backend.
+
+## HDR Tonemap
+
+The scene renders to a 16-bit float (`R16G16B16A16_SFLOAT`) HDR color attachment. A fullscreen tonemap pass converts HDR to LDR using the ACES Filmic curve with exposure control. Exposure is applied per-object in the solid fragment shader UBO, so the tonemap pass uses `exposure=1.0` to avoid double-application. The skybox multiplies `env_intensity * exposure` directly in its intensity uniform.
+
+## HDRI Environment
+
+Equirectangular HDR environment maps can be loaded for both image-based lighting (IBL) and optional skybox background rendering.
+
+- **IBL**: Irradiance and prefiltered specular cubemaps are generated from the HDR map for physically-based ambient lighting
+- **Skybox**: A fullscreen fragment shader reconstructs world-space ray directions from the inverse view-projection matrix and samples the equirectangular map
+- **Exposure**: The skybox responds to exposure changes (intensity scales with `env_intensity * exposure`)
+- **Background toggle**: `mop_viewport_set_environment_background(vp, true)` shows the HDRI as background; default is the gray gradient
+
+## SDF Overlays
+
+Gizmo handles, axis navigator, light indicators, and camera frustum wireframes are rendered via a GPU signed-distance-field overlay shader. Overlay functions push primitives (lines, filled circles, diamonds) into a command buffer. A fullscreen fragment shader reads the primitive array as an SSBO and computes SDF per pixel with `smoothstep` anti-aliasing — resolution-independent, always crisp. Single draw call for all overlays.
+
+## Analytical Grid
+
+The infinite ground grid is rendered by a dedicated fullscreen fragment shader. It reconstructs world position from the depth buffer, computes distance to grid lines analytically, and fades with camera distance. The grid respects scene depth — it renders behind objects using the resolved depth attachment as a sampled texture.

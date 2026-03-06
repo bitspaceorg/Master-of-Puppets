@@ -476,6 +476,7 @@ int main(int argc, char *argv[]) {
       };
       if (mop_viewport_set_environment(vp, &edesc)) {
         printf("[mop] HDRI loaded: %s\n", hdri);
+        /* Skybox background off by default; toggle with 'B' key */
       } else {
         fprintf(stderr, "[mop] Failed to load HDRI: %s\n", hdri);
       }

@@ -181,6 +181,38 @@ struct MopWaterSurface {
 };
 
 /* -------------------------------------------------------------------------
+ * Overlay command buffer — SDF primitive types for GPU overlay pass
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopOverlayPrimType {
+  MOP_PRIM_LINE = 0,
+  MOP_PRIM_FILLED_CIRCLE = 1,
+  MOP_PRIM_DIAMOND = 2,
+} MopOverlayPrimType;
+
+typedef struct MopOverlayPrim {
+  float x0, y0, x1, y1; /* line: endpoints, circle/diamond: center+unused */
+  float r, g, b, a;     /* color + opacity */
+  float width;          /* line width or ring width */
+  float radius;         /* circle/diamond radius */
+  int32_t type;         /* MopOverlayPrimType */
+  float depth;          /* NDC depth for depth-tested overlays (-1=no test) */
+} MopOverlayPrim;
+
+#define MOP_MAX_OVERLAY_PRIMS 2048
+
+/* Grid parameters for GPU shader grid rendering */
+typedef struct MopGridParams {
+  float Hi[9];               /* Inverse homography: NDC → world XZ on Y=0 */
+  float vp_z0, vp_z2, vp_z3; /* VP matrix rows for depth at (wx,0,wz) */
+  float vp_w0, vp_w2, vp_w3;
+  float grid_half; /* Half extent in world units */
+  bool reverse_z;
+  MopColor minor_color, major_color, axis_x_color, axis_z_color;
+  float axis_half_width; /* Half-width in pixels for axis lines */
+} MopGridParams;
+
+/* -------------------------------------------------------------------------
  * Undo ring buffer (Phase 4B)
  * ------------------------------------------------------------------------- */
 
@@ -378,6 +410,7 @@ struct MopViewport {
   int env_width, env_height;
   float env_rotation;            /* Y-axis rotation in radians */
   float env_intensity;           /* brightness multiplier (default 1.0) */
+  bool show_env_background;      /* show HDRI as skybox bg (default false) */
   MopRhiTexture *env_irradiance; /* precomputed diffuse irradiance map */
   float *env_irradiance_data;    /* raw float RGBA irradiance for CPU */
   int env_irradiance_w, env_irradiance_h;
@@ -391,6 +424,10 @@ struct MopViewport {
 
   /* Reversed-Z depth buffer — improves depth precision for large scenes */
   bool reverse_z;
+
+  /* GPU overlay command buffer (SDF primitives) */
+  MopOverlayPrim *overlay_prims;
+  uint32_t overlay_prim_count;
 
   /* Subsystem registry — generic dispatch for water, particles, postprocess,
    * etc. */
@@ -423,5 +460,19 @@ MopGizmoAxis mop_gizmo_get_hover_axis(const MopGizmo *gizmo);
 MopVec3 mop_gizmo_get_axis_dir(const MopGizmo *gizmo, int axis);
 uint32_t mop_gizmo_get_handle_id(const MopGizmo *gizmo, int axis);
 void mop_gizmo_set_handles_opacity(MopGizmo *gizmo, float opacity);
+
+/* -------------------------------------------------------------------------
+ * Overlay command buffer push helpers
+ * ------------------------------------------------------------------------- */
+
+void mop_overlay_push_line(MopViewport *vp, float x0, float y0, float x1,
+                           float y1, float r, float g, float b, float width,
+                           float opacity, float depth);
+void mop_overlay_push_circle(MopViewport *vp, float cx, float cy, float radius,
+                             float r, float g, float b, float opacity,
+                             float depth);
+void mop_overlay_push_diamond(MopViewport *vp, float cx, float cy, float size,
+                              float r, float g, float b, float width,
+                              float opacity, float depth);
 
 #endif /* MOP_VIEWPORT_INTERNAL_H */

@@ -65,6 +65,9 @@ void mop_viewport_set_environment_rotation(MopViewport *vp, float rotation);
 /* Adjust environment brightness multiplier. */
 void mop_viewport_set_environment_intensity(MopViewport *vp, float intensity);
 
+/* Show/hide HDRI as skybox background (default: false = gray gradient). */
+void mop_viewport_set_environment_background(MopViewport *vp, bool show);
+
 /* Set procedural sky parameters (only when type == MOP_ENV_PROCEDURAL_SKY). */
 void mop_viewport_set_procedural_sky(MopViewport *vp,
                                      const MopProceduralSkyDesc *desc);

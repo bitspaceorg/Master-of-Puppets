@@ -798,6 +798,180 @@ static void cpu_draw_skybox(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   /* CPU backend: skybox handled in viewport core pass_background */
 }
 
+static void cpu_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                              const void *prims, uint32_t prim_count,
+                              const void *grid_params, int fb_width,
+                              int fb_height) {
+  (void)dev;
+  (void)grid_params; /* CPU grid handled by mop_overlay_builtin_grid */
+  if (!fb || !prims || prim_count == 0)
+    return;
+
+  MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)fb;
+  uint8_t *rgba = sw_fb->color;
+  if (!rgba)
+    return;
+
+  int w = fb_width;
+  int h = fb_height;
+
+  /* Iterate overlay primitives and pixel-write using CPU AA functions.
+   * MopOverlayPrim: x0,y0,x1,y1, r,g,b,a, width, radius, type, depth
+   * (12 floats = 48 bytes per prim) */
+  const uint8_t *src = (const uint8_t *)prims;
+  for (uint32_t i = 0; i < prim_count; i++) {
+    const float *pf = (const float *)(src + i * 48);
+    float x0 = pf[0], y0 = pf[1], x1 = pf[2], y1 = pf[3];
+    float cr = pf[4], cg = pf[5], cb = pf[6], opacity = pf[7];
+    float line_w = pf[8], radius = pf[9];
+    int32_t type;
+    memcpy(&type, &pf[10], sizeof(int32_t));
+    /* float depth = pf[11]; — CPU path ignores depth for now (handled in
+     * overlay_builtin.c directly for CPU) */
+
+    uint8_t r8 = (uint8_t)(cr * 255.0f);
+    uint8_t g8 = (uint8_t)(cg * 255.0f);
+    uint8_t b8 = (uint8_t)(cb * 255.0f);
+
+    if (type == 0) {
+      /* LINE: capsule AA */
+      float margin = line_w + 1.5f;
+      int bx0 = (int)fmaxf(0, fminf(x0, x1) - margin);
+      int by0 = (int)fmaxf(0, fminf(y0, y1) - margin);
+      int bx1 = (int)fminf((float)(w - 1), fmaxf(x0, x1) + margin);
+      int by1 = (int)fminf((float)(h - 1), fmaxf(y0, y1) + margin);
+      float dx = x1 - x0, dy = y1 - y0;
+      float seg_len = sqrtf(dx * dx + dy * dy);
+      if (seg_len < 0.5f)
+        continue;
+      float inv_len = 1.0f / seg_len;
+      float ux = dx * inv_len, uy = dy * inv_len;
+      float hw = line_w * 0.5f;
+      for (int py = by0; py <= by1; py++) {
+        for (int px = bx0; px <= bx1; px++) {
+          float fx = (float)px + 0.5f - x0;
+          float fy = (float)py + 0.5f - y0;
+          float along = fx * ux + fy * uy;
+          if (along < -1.0f || along > seg_len + 1.0f)
+            continue;
+          float perp = fabsf(fx * (-uy) + fy * ux);
+          float alpha;
+          if (perp <= hw - 0.5f)
+            alpha = 1.0f;
+          else if (perp >= hw + 0.5f)
+            continue;
+          else
+            alpha = 1.0f - (perp - (hw - 0.5f));
+          if (along < 0.0f)
+            alpha *= fmaxf(0.0f, 1.0f + along);
+          else if (along > seg_len)
+            alpha *= fmaxf(0.0f, 1.0f - (along - seg_len));
+          alpha *= opacity;
+          if (alpha < 0.004f)
+            continue;
+          int idx = (py * w + px) * 4;
+          rgba[idx + 0] =
+              (uint8_t)(rgba[idx + 0] * (1.0f - alpha) + r8 * alpha);
+          rgba[idx + 1] =
+              (uint8_t)(rgba[idx + 1] * (1.0f - alpha) + g8 * alpha);
+          rgba[idx + 2] =
+              (uint8_t)(rgba[idx + 2] * (1.0f - alpha) + b8 * alpha);
+        }
+      }
+    } else if (type == 1) {
+      /* FILLED_CIRCLE */
+      int bx0 = (int)(x0 - radius - 1.5f);
+      int by0 = (int)(y0 - radius - 1.5f);
+      int bx1 = (int)(x0 + radius + 1.5f);
+      int by1 = (int)(y0 + radius + 1.5f);
+      if (bx0 < 0)
+        bx0 = 0;
+      if (by0 < 0)
+        by0 = 0;
+      if (bx1 >= w)
+        bx1 = w - 1;
+      if (by1 >= h)
+        by1 = h - 1;
+      for (int py = by0; py <= by1; py++) {
+        for (int px = bx0; px <= bx1; px++) {
+          float fx = (float)px + 0.5f - x0;
+          float fy = (float)py + 0.5f - y0;
+          float d = sqrtf(fx * fx + fy * fy);
+          float a = radius + 0.5f - d;
+          if (a <= 0.0f)
+            continue;
+          if (a > 1.0f)
+            a = 1.0f;
+          a *= opacity;
+          if (a < 0.004f)
+            continue;
+          int idx = (py * w + px) * 4;
+          float ia = 1.0f - a;
+          rgba[idx + 0] = (uint8_t)((float)rgba[idx + 0] * ia + (float)r8 * a);
+          rgba[idx + 1] = (uint8_t)((float)rgba[idx + 1] * ia + (float)g8 * a);
+          rgba[idx + 2] = (uint8_t)((float)rgba[idx + 2] * ia + (float)b8 * a);
+        }
+      }
+    } else {
+      /* DIAMOND: 4 lines forming a rotated square */
+      float cx = x0, cy = y0;
+      float r_d = radius;
+      /* Top-right, right-bottom, bottom-left, left-top */
+      float pts[4][2] = {
+          {cx, cy - r_d}, {cx + r_d, cy}, {cx, cy + r_d}, {cx - r_d, cy}};
+      for (int e = 0; e < 4; e++) {
+        int ne = (e + 1) % 4;
+        float lx0 = pts[e][0], ly0 = pts[e][1];
+        float lx1 = pts[ne][0], ly1 = pts[ne][1];
+        /* Inline AA line */
+        float margin = line_w + 1.5f;
+        int bbx0 = (int)fmaxf(0, fminf(lx0, lx1) - margin);
+        int bby0 = (int)fmaxf(0, fminf(ly0, ly1) - margin);
+        int bbx1 = (int)fminf((float)(w - 1), fmaxf(lx0, lx1) + margin);
+        int bby1 = (int)fminf((float)(h - 1), fmaxf(ly0, ly1) + margin);
+        float dx = lx1 - lx0, dy = ly1 - ly0;
+        float seg_len = sqrtf(dx * dx + dy * dy);
+        if (seg_len < 0.5f)
+          continue;
+        float inv_len = 1.0f / seg_len;
+        float eux = dx * inv_len, euy = dy * inv_len;
+        float hw = line_w * 0.5f;
+        for (int py = bby0; py <= bby1; py++) {
+          for (int px = bbx0; px <= bbx1; px++) {
+            float fx = (float)px + 0.5f - lx0;
+            float fy = (float)py + 0.5f - ly0;
+            float along = fx * eux + fy * euy;
+            if (along < -1.0f || along > seg_len + 1.0f)
+              continue;
+            float perp = fabsf(fx * (-euy) + fy * eux);
+            float alpha;
+            if (perp <= hw - 0.5f)
+              alpha = 1.0f;
+            else if (perp >= hw + 0.5f)
+              continue;
+            else
+              alpha = 1.0f - (perp - (hw - 0.5f));
+            if (along < 0.0f)
+              alpha *= fmaxf(0.0f, 1.0f + along);
+            else if (along > seg_len)
+              alpha *= fmaxf(0.0f, 1.0f - (along - seg_len));
+            alpha *= opacity;
+            if (alpha < 0.004f)
+              continue;
+            int idx = (py * w + px) * 4;
+            rgba[idx + 0] =
+                (uint8_t)(rgba[idx + 0] * (1.0f - alpha) + r8 * alpha);
+            rgba[idx + 1] =
+                (uint8_t)(rgba[idx + 1] * (1.0f - alpha) + g8 * alpha);
+            rgba[idx + 2] =
+                (uint8_t)(rgba[idx + 2] * (1.0f - alpha) + b8 * alpha);
+          }
+        }
+      }
+    }
+  }
+}
+
 /* -------------------------------------------------------------------------
  * Backend function table
  * ------------------------------------------------------------------------- */
@@ -829,6 +1003,7 @@ static const MopRhiBackend CPU_BACKEND = {
     .set_exposure = cpu_set_exposure,
     .set_ibl_textures = cpu_set_ibl_textures,
     .draw_skybox = cpu_draw_skybox,
+    .draw_overlays = cpu_draw_overlays,
 };
 
 const MopRhiBackend *mop_rhi_backend_cpu(void) { return &CPU_BACKEND; }

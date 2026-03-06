@@ -736,6 +736,11 @@ void mop_viewport_set_environment_intensity(MopViewport *vp, float intensity) {
     vp->env_intensity = intensity > 0.0f ? intensity : 0.0f;
 }
 
+void mop_viewport_set_environment_background(MopViewport *vp, bool show) {
+  if (vp)
+    vp->show_env_background = show;
+}
+
 /* -------------------------------------------------------------------------
  * Public API: procedural sky parameters
  * ------------------------------------------------------------------------- */

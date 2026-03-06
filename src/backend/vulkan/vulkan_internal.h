@@ -233,6 +233,21 @@ struct MopRhiDevice {
   VkImageView irradiance_view;  /* diffuse irradiance */
   VkImageView prefiltered_view; /* prefiltered specular */
   VkImageView brdf_lut_view;    /* BRDF LUT */
+
+  /* SDF overlay pass (lines, circles, diamonds via fullscreen SDF shader) */
+  VkRenderPass overlay_render_pass;
+  VkPipeline overlay_pipeline;
+  VkPipelineLayout overlay_pipeline_layout;
+  VkDescriptorSetLayout overlay_desc_layout;
+  VkShaderModule overlay_frag;
+  bool overlay_enabled;
+
+  /* Analytical grid overlay (fullscreen shader on Y=0 plane) */
+  VkPipeline grid_pipeline;
+  VkPipelineLayout grid_pipeline_layout;
+  VkDescriptorSetLayout grid_desc_layout;
+  VkShaderModule grid_frag;
+  bool grid_enabled;
 };
 
 /* -------------------------------------------------------------------------
@@ -278,6 +293,9 @@ struct MopRhiFramebuffer {
   VkDeviceMemory ldr_color_memory;
   VkImageView ldr_color_view;
   VkFramebuffer tonemap_framebuffer;
+
+  /* Overlay framebuffer — renders on top of LDR color image */
+  VkFramebuffer overlay_framebuffer;
 
   /* Readback staging buffers (host-visible, persistently mapped) */
   VkBuffer readback_color_buf;
@@ -417,6 +435,17 @@ VkPipeline mop_vk_create_tonemap_pipeline(struct MopRhiDevice *dev);
 /* Create the skybox pipeline (fullscreen triangle + equirectangular env map).
  * Writes to the main render pass color + picking attachments. */
 VkPipeline mop_vk_create_skybox_pipeline(struct MopRhiDevice *dev);
+
+/* Create the overlay render pass (single color attachment, alpha blend).
+ * Loads existing LDR color and blends SDF overlays on top.
+ * Final layout is TRANSFER_SRC_OPTIMAL for readback. */
+VkResult mop_vk_create_overlay_render_pass(VkDevice device, VkRenderPass *out);
+
+/* Create the SDF overlay pipeline (fullscreen triangle + SDF prims). */
+VkPipeline mop_vk_create_overlay_pipeline(struct MopRhiDevice *dev);
+
+/* Create the analytical grid pipeline (fullscreen triangle + grid shader). */
+VkPipeline mop_vk_create_grid_pipeline(struct MopRhiDevice *dev);
 
 /* -------------------------------------------------------------------------
  * Utility: one-shot command buffer for upload/transition
