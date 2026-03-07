@@ -14,6 +14,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#if !defined(_POSIX_C_SOURCE) && !defined(MOP_PLATFORM_MACOS)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include "rasterizer_mt.h"
 
 #include <math.h>
