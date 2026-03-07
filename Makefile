@@ -17,14 +17,19 @@ AR       ?= ar
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-unused-parameter -Wno-missing-field-initializers \
             -fno-common \
-            -Iinclude -Isrc -Ithird_party/stb
+            -Iinclude -Isrc -Ithird_party/stb -Ithird_party/tinyexr
+CXX      ?= c++
+CXXFLAGS := -std=c++11 -Wall -Wextra -Wno-unused-parameter \
+            -Iinclude -Isrc -Ithird_party/tinyexr
 
 # Optimization — -Og preserves debuggability while avoiding -O0's
 # catastrophic performance on math-heavy code (GGX specular, etc.)
 ifdef RELEASE
   CFLAGS += -O2 -DNDEBUG
+  CXXFLAGS += -O2 -DNDEBUG
 else
   CFLAGS += -Og -g
+  CXXFLAGS += -Og -g
 endif
 
 # Sanitizer support: make SANITIZE=asan  or  make SANITIZE=ubsan
@@ -88,11 +93,15 @@ CORE_SRCS := \
   src/query/snapshot.c \
   src/query/spatial.c \
   src/util/stb_impl.c \
+  src/util/miniz_impl.c \
   src/export/image_export.c \
   src/export/obj_export.c \
   src/export/scene_export.c \
   src/loader/mop_scene.c \
   src/backend/cpu/cpu_backend.c
+
+# C++ sources (tinyexr requires C++)
+CXX_SRCS := src/util/tinyexr_impl.cc
 
 # Lua config support — auto-detected via pkg-config, disable with MOP_DISABLE_LUA=1
 ifndef MOP_DISABLE_LUA
@@ -141,6 +150,7 @@ OBJ_DIR   := $(BUILD_DIR)/obj
 LIB_DIR   := $(BUILD_DIR)/lib
 
 CORE_OBJS := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(CORE_SRCS))
+CXX_OBJS  := $(patsubst src/%.cc,$(OBJ_DIR)/%.o,$(CXX_SRCS))
 LIB_OUT   := $(LIB_DIR)/libmop.a
 
 # -----------------------------------------------------------------------------
@@ -155,11 +165,14 @@ all: lib
 # -----------------------------------------------------------------------------
 lib: $(LIB_OUT)
 
-$(LIB_OUT): $(CORE_OBJS) | $(LIB_DIR)
+$(LIB_OUT): $(CORE_OBJS) $(CXX_OBJS) | $(LIB_DIR)
 	$(AR) rcs $@ $^
 
 $(OBJ_DIR)/%.o: src/%.c | obj_dirs
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%.o: src/%.cc | obj_dirs
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # -----------------------------------------------------------------------------
 # Directory creation
@@ -213,6 +226,11 @@ TEST_BINS   := $(patsubst $(TEST_DIR)/%.c,$(TEST_BIN)/%,$(TEST_SRCS))
 
 # Platform-specific test link flags
 TEST_LDFLAGS := -lm -lpthread
+ifeq ($(UNAME_S),Darwin)
+  TEST_LDFLAGS += -lc++
+else
+  TEST_LDFLAGS += -lstdc++
+endif
 
 $(TEST_BIN):
 	@mkdir -p $@

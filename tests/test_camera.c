@@ -15,7 +15,7 @@ static void test_defaults(void) {
   TEST_ASSERT_FLOAT_EQ(cam.fov_degrees, 60.0f);
   TEST_ASSERT_FLOAT_EQ(cam.near_plane, 0.1f);
   TEST_ASSERT_FLOAT_EQ(cam.far_plane, 100.0f);
-  TEST_ASSERT_FLOAT_EQ(cam.max_pitch, 1.5f);
+  TEST_ASSERT_FLOAT_EQ(cam.max_pitch, 3.14159265f);
   TEST_END();
 }
 

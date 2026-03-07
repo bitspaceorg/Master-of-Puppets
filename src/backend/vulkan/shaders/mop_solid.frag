@@ -3,11 +3,15 @@
 /*
  * Master of Puppets — Vulkan Backend
  * mop_solid.frag — Fragment shader with GGX Cook-Torrance PBR + multi-light
- *                  + cascade shadow mapping
+ *                  + cascade shadow mapping + PBR texture maps
  *
  * Dynamic UBO (set=0, binding=0): per-draw fragment uniforms
  * Combined image sampler (set=0, binding=1): texture or 1x1 white fallback
  * Shadow sampler (set=0, binding=2): cascade shadow map array (comparison)
+ * Bindings 3-5: IBL (irradiance, prefiltered, BRDF LUT)
+ * Binding 6: normal map
+ * Binding 7: metallic-roughness map (glTF: G=roughness, B=metallic)
+ * Binding 8: ambient occlusion map (R channel)
  *
  * Outputs to two attachments:
  *   location 0: vec4  color    (R8G8B8A8_SRGB)
@@ -42,7 +46,12 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     int   num_lights;
     float metallic;
     float roughness;
+    int   has_normal_map;
+    int   has_mr_map;
+    int   has_ao_map;
+    int   _pad_maps;
     vec4  cam_pos;       /* xyz = camera eye position, w = unused */
+    vec4  emissive;      /* rgb = emissive color, w = unused */
     Light lights[8];
 
     /* Shadow mapping (cascade) */
@@ -63,6 +72,9 @@ layout(set = 0, binding = 2) uniform sampler2DArrayShadow u_shadow_map;
 layout(set = 0, binding = 3) uniform sampler2D u_irradiance_map;
 layout(set = 0, binding = 4) uniform sampler2D u_prefiltered_map;
 layout(set = 0, binding = 5) uniform sampler2D u_brdf_lut;
+layout(set = 0, binding = 6) uniform sampler2D u_normal_map;
+layout(set = 0, binding = 7) uniform sampler2D u_mr_map;
+layout(set = 0, binding = 8) uniform sampler2D u_ao_map;
 
 layout(location = 0) out vec4 frag_color;
 layout(location = 1) out uint frag_object_id;
@@ -147,9 +159,37 @@ vec2 dir_to_equirect(vec3 dir) {
     return vec2(phi / (2.0 * PI) + 0.5, 0.5 - theta / PI);
 }
 
+/* Cotangent-frame TBN reconstruction (Mikkelsen 2010).
+ * Computes tangent space from screen-space derivatives of world position
+ * and UVs — no vertex tangent attribute needed. */
+vec3 perturb_normal(vec3 n, vec3 world_pos, vec2 uv) {
+    vec3 ts = texture(u_normal_map, uv).rgb * 2.0 - 1.0;
+
+    vec3 dp1 = dFdx(world_pos);
+    vec3 dp2 = dFdy(world_pos);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+
+    vec3 dp2perp = cross(dp2, n);
+    vec3 dp1perp = cross(n, dp1);
+
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    mat3 TBN = mat3(T * invmax, B * invmax, n);
+
+    return normalize(TBN * ts);
+}
+
 void main() {
     vec3 n = normalize(v_normal);
     vec3 world_pos = v_world_pos;
+
+    /* Normal map perturbation (cotangent-frame TBN) */
+    if (frag.has_normal_map != 0) {
+        n = perturb_normal(n, world_pos, v_texcoord);
+    }
 
     /* Sample base color */
     vec4 base = v_color;
@@ -159,6 +199,19 @@ void main() {
 
     float mtl = frag.metallic;
     float rough = frag.roughness;
+
+    /* Metallic-roughness map override (glTF convention: G=roughness, B=metallic) */
+    if (frag.has_mr_map != 0) {
+        vec4 mr = texture(u_mr_map, v_texcoord);
+        rough = mr.g;
+        mtl = mr.b;
+    }
+
+    /* Ambient occlusion map */
+    float ao = 1.0;
+    if (frag.has_ao_map != 0) {
+        ao = texture(u_ao_map, v_texcoord).r;
+    }
 
     /* GGX alpha mapping: alpha = roughness^2 */
     float alpha = rough * rough;
@@ -304,13 +357,18 @@ void main() {
             lit += pf_sample * (f0 * brdf_val.x + brdf_val.y);
         }
 
+        /* Apply AO and emissive */
+        lit *= ao;
+        lit += frag.emissive.rgb;
+
         frag_color = vec4(max(lit, vec3(0.0)) * frag.exposure, base.a * frag.opacity);
     } else {
         /* Legacy single-light fallback (no PBR) */
         vec3 l = normalize(frag.light_dir.xyz);
         float ndotl = max(dot(n, l), 0.0);
         float lighting = clamp(frag.ambient + (1.0 - frag.ambient) * ndotl, 0.0, 1.0);
-        frag_color = vec4(base.rgb * lighting * frag.exposure, base.a * frag.opacity);
+        vec3 lit = base.rgb * lighting + frag.emissive.rgb;
+        frag_color = vec4(lit * frag.exposure, base.a * frag.opacity);
     }
 
     frag_object_id = frag.object_id;

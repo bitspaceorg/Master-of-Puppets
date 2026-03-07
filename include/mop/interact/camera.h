@@ -28,7 +28,7 @@ typedef struct MopOrbitCamera {
   float fov_degrees; /* vertical field of view */
   float near_plane;
   float far_plane;
-  float max_pitch; /* pitch clamp (default 1.5 rad ≈ 86°) */
+  float max_pitch; /* pitch clamp (default π — full vertical orbit) */
 
   float target_distance; /* smooth zoom target (interpolated by tick) */
 } MopOrbitCamera;

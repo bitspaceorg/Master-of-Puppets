@@ -27,6 +27,10 @@ MopAABB mop_mesh_get_aabb_local(const MopMesh *mesh, const MopViewport *vp) {
   if (!mesh || !vp || !mesh->vertex_buffer)
     return box;
 
+  /* Return cached AABB if valid */
+  if (mesh->aabb_valid)
+    return mesh->aabb_local;
+
   const void *raw = vp->rhi->buffer_read(mesh->vertex_buffer);
   if (!raw)
     return box;
@@ -83,6 +87,10 @@ MopAABB mop_mesh_get_aabb_local(const MopMesh *mesh, const MopViewport *vp) {
         box.max.z = p.z;
     }
   }
+
+  /* Cache the computed AABB (cast away const for internal mutation) */
+  ((struct MopMesh *)mesh)->aabb_local = box;
+  ((struct MopMesh *)mesh)->aabb_valid = true;
 
   return box;
 }

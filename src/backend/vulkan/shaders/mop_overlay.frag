@@ -72,7 +72,7 @@ void main() {
 
         vec2 p0 = d0.xy;
         vec2 p1 = d0.zw;
-        vec3 prim_color = d1.rgb;
+        vec3 prim_color = pow(d1.rgb, vec3(2.2)); /* sRGB → linear */
         float prim_opacity = d1.a;
         float prim_width = d2.x;
         float prim_radius = d2.y;
@@ -116,9 +116,7 @@ void main() {
         result.a = result.a + alpha * (1.0 - result.a);
     }
 
-    /* Input colors are sRGB [0,1]. Since the framebuffer is R8G8B8A8_SRGB
-     * (hardware applies linear→sRGB on write), convert sRGB→linear first
-     * so the round-trip preserves the original sRGB values. */
-    result.rgb = pow(result.rgb, vec3(2.2));
+    /* Result is premultiplied linear — blending uses ONE, ONE_MINUS_SRC_ALPHA.
+     * The SRGB framebuffer auto-converts linear→sRGB on write. */
     frag_color = result;
 }

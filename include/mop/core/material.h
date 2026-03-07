@@ -21,6 +21,8 @@ typedef struct MopMaterial {
   MopVec3 emissive;
   MopTexture *albedo_map;
   MopTexture *normal_map;
+  MopTexture *metallic_roughness_map; /* glTF: G=roughness, B=metallic */
+  MopTexture *ao_map;                 /* R channel = ambient occlusion */
 } MopMaterial;
 
 void mop_mesh_set_material(MopMesh *mesh, const MopMaterial *material);

@@ -29,10 +29,11 @@
 typedef struct MopSwFramebuffer {
   int width;
   int height;
-  uint8_t *color;      /* RGBA8, size = width * height * 4 */
-  float *color_hdr;    /* RGBA float — HDR accumulation     */
-  float *depth;        /* float,  size = width * height     */
-  uint32_t *object_id; /* uint32, size = width * height     */
+  uint8_t *color;        /* RGBA8, size = width * height * 4 */
+  float *color_hdr;      /* RGBA float — HDR accumulation     */
+  float *depth;          /* float,  size = width * height     */
+  uint32_t *object_id;   /* uint32, size = width * height     */
+  uint8_t *fxaa_scratch; /* RGBA8 scratch for FXAA (persistent) */
 } MopSwFramebuffer;
 
 /* Allocate framebuffer storage.  Returns false on allocation failure. */

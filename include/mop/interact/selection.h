@@ -34,11 +34,17 @@ typedef struct MopSelection {
 void mop_mesh_set_edit_mode(MopMesh *mesh, MopEditMode mode);
 MopEditMode mop_mesh_get_edit_mode(const MopMesh *mesh);
 
-/* Selection API */
+/* Sub-element selection API */
 const MopSelection *mop_viewport_get_selection(const MopViewport *vp);
 void mop_viewport_select_element(MopViewport *vp, uint32_t element_index);
 void mop_viewport_deselect_element(MopViewport *vp, uint32_t element_index);
 void mop_viewport_clear_selection(MopViewport *vp);
 void mop_viewport_toggle_element(MopViewport *vp, uint32_t element_index);
+
+/* Multi-object selection API */
+void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive);
+void mop_viewport_deselect_object(MopViewport *vp, uint32_t id);
+bool mop_viewport_is_object_selected(const MopViewport *vp, uint32_t id);
+uint32_t mop_viewport_get_selected_count(const MopViewport *vp);
 
 #endif /* MOP_INTERACT_SELECTION_H */

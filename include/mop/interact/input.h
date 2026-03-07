@@ -73,12 +73,18 @@ typedef enum MopInputType {
  * Input event — platform-agnostic representation of user input
  * ------------------------------------------------------------------------- */
 
+/* Modifier key flags */
+#define MOP_MOD_SHIFT 0x01u
+#define MOP_MOD_CTRL 0x02u
+#define MOP_MOD_ALT 0x04u
+
 typedef struct MopInputEvent {
   MopInputType type;
-  float x, y;     /* absolute position (POINTER_DOWN/UP/MOVE) */
-  float dx, dy;   /* relative delta (POINTER_MOVE, CAMERA_MOVE) */
-  float scroll;   /* scroll amount (SCROLL, positive = zoom in) */
-  uint32_t value; /* generic payload for SET_* events            */
+  float x, y;         /* absolute position (POINTER_DOWN/UP/MOVE) */
+  float dx, dy;       /* relative delta (POINTER_MOVE, CAMERA_MOVE) */
+  float scroll;       /* scroll amount (SCROLL, positive = zoom in) */
+  uint32_t value;     /* generic payload for SET_* events            */
+  uint32_t modifiers; /* MOP_MOD_SHIFT, MOP_MOD_CTRL, MOP_MOD_ALT */
 } MopInputEvent;
 
 /* -------------------------------------------------------------------------

@@ -382,20 +382,28 @@ void mop_overlay_builtin_bounds(MopViewport *vp, void *user_data) {
 /* -------------------------------------------------------------------------
  * Selection highlight overlay
  *
- * If a mesh is selected (viewport->selected_id matches mesh->object_id),
- * redraw it with additive blend at a highlight color.
+ * If a mesh is in the selection set, redraw it with additive blend at a
+ * highlight color.  Supports multi-object selection.
  * ------------------------------------------------------------------------- */
+
+static bool is_id_selected(const MopViewport *vp, uint32_t id) {
+  for (uint32_t i = 0; i < vp->selected_count; i++) {
+    if (vp->selected_ids[i] == id)
+      return true;
+  }
+  return false;
+}
 
 void mop_overlay_builtin_selection(MopViewport *vp, void *user_data) {
   (void)user_data;
-  if (!vp || vp->selected_id == 0)
+  if (!vp || vp->selected_count == 0)
     return;
 
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
     struct MopMesh *m = &vp->meshes[i];
     if (!m->active)
       continue;
-    if (m->object_id != vp->selected_id)
+    if (!is_id_selected(vp, m->object_id))
       continue;
 
     MopMat4 mvp = mop_mat4_multiply(
@@ -867,7 +875,6 @@ void mop_overlay_builtin_outline(MopViewport *vp, void *user_data) {
   uint8_t ag = (uint8_t)(accent.g * 255.0f);
   uint8_t ab = (uint8_t)(accent.b * 255.0f);
 
-  uint32_t sel_id = vp->selected_id;
   float alpha_sel = vp->theme.outline_opacity_selected;
   float alpha_unsel = vp->theme.outline_opacity_unselected;
   int radius_sel = 2; /* thick outline for selected objects */
@@ -907,7 +914,7 @@ void mop_overlay_builtin_outline(MopViewport *vp, void *user_data) {
       if (!is_edge)
         continue;
 
-      bool selected = (id == sel_id && sel_id != 0);
+      bool selected = is_id_selected(vp, id);
       float alpha = selected ? alpha_sel : alpha_unsel;
 
       if (selected) {
@@ -950,7 +957,7 @@ void mop_overlay_builtin_outline(MopViewport *vp, void *user_data) {
 
 void mop_overlay_builtin_selection_outline(MopViewport *vp, void *user_data) {
   (void)user_data;
-  if (!vp || vp->selected_id == 0)
+  if (!vp || vp->selected_count == 0)
     return;
 
   int w, h;
@@ -966,7 +973,6 @@ void mop_overlay_builtin_selection_outline(MopViewport *vp, void *user_data) {
   if (!id_buf)
     return;
 
-  uint32_t sel_id = vp->selected_id;
   MopColor outline_color = vp->theme.selection_outline;
   float outline_width = vp->theme.selection_outline_width;
   int radius = (int)(outline_width + 0.5f);
@@ -978,17 +984,17 @@ void mop_overlay_builtin_selection_outline(MopViewport *vp, void *user_data) {
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       uint32_t id = id_buf[y * w + x];
-      if (id == sel_id)
-        continue; /* skip interior pixels */
+      if (is_id_selected(vp, id))
+        continue; /* skip interior pixels of any selected object */
 
-      /* Check if any neighbor within radius is the selected object */
+      /* Check if any neighbor within radius is a selected object */
       bool adjacent = false;
       for (int dy = -radius; dy <= radius && !adjacent; dy++) {
         for (int dx = -radius; dx <= radius && !adjacent; dx++) {
           int nx = x + dx, ny = y + dy;
           if (nx < 0 || nx >= w || ny < 0 || ny >= h)
             continue;
-          if (id_buf[ny * w + nx] == sel_id)
+          if (is_id_selected(vp, id_buf[ny * w + nx]))
             adjacent = true;
         }
       }
@@ -1374,7 +1380,7 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
 
   /* Thick clean lines for light indicators */
   float line_w = 3.0f;
-  float opacity = 0.85f;
+  float opacity = 1.0f;
 
   for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
     if (!vp->lights[i].active)
@@ -1628,12 +1634,7 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
       break;
     }
 
-    float depth_fade = (axis_depth[a] + 1.0f) * 0.15f + 0.7f;
-    if (depth_fade > 1.0f)
-      depth_fade = 1.0f;
-    if (depth_fade < 0.5f)
-      depth_fade = 0.5f;
-    float ax_opacity = opacity * depth_fade;
+    float ax_opacity = opacity;
 
     if ((MopGizmoAxis)a == hover) {
       MopColor hc = vp->theme.gizmo_hover;
@@ -1786,7 +1787,7 @@ void mop_overlay_builtin_camera_objects(MopViewport *vp, void *user_data) {
 
   MopMat4 vp_mat = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
   float line_w = vp->theme.camera_frustum_line_width;
-  float opacity = 0.85f;
+  float opacity = 1.0f;
 
   for (uint32_t ci = 0; ci < MOP_MAX_CAMERAS; ci++) {
     const struct MopCameraObject *cam = &vp->cameras[ci];
@@ -2049,13 +2050,13 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
     float trim = (slen > 0.01f) ? inset / slen : 0.0f;
     float sx_end = axes[ai].sx - sdx * trim;
     float sy_end = axes[ai].sy - sdy * trim;
-    mop_overlay_push_line(vp, cx, cy, sx_end, sy_end, fr, fg, fb, lw, 0.9f,
+    mop_overlay_push_line(vp, cx, cy, sx_end, sy_end, fr, fg, fb, lw, 1.0f,
                           -1.0f);
 
     if (axes[ai].positive) {
       /* Filled circle at tip */
       mop_overlay_push_circle(vp, axes[ai].sx, axes[ai].sy, axes[ai].ball_r, fr,
-                              fg, fb, 0.95f, -1.0f);
+                              fg, fb, 1.0f, -1.0f);
 
       /* Stroke-based letter label (dark text on colored disc) */
       float letter_sz = 3.4f * ssaa;
@@ -2066,41 +2067,41 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
         mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
                               axes[ai].sy - letter_sz, axes[ai].sx + letter_sz,
                               axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              0.88f * 0.9f, -1.0f);
+                              1.0f, -1.0f);
         mop_overlay_push_line(vp, axes[ai].sx + letter_sz,
                               axes[ai].sy - letter_sz, axes[ai].sx - letter_sz,
                               axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              0.88f * 0.9f, -1.0f);
+                              1.0f, -1.0f);
       } else if (axes[ai].axis == 1) {
         /* Y letter */
         mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
                               axes[ai].sy - letter_sz, axes[ai].sx, axes[ai].sy,
-                              dk, dk, dk, letter_lw, 0.88f * 0.9f, -1.0f);
+                              dk, dk, dk, letter_lw, 1.0f, -1.0f);
         mop_overlay_push_line(vp, axes[ai].sx + letter_sz,
                               axes[ai].sy - letter_sz, axes[ai].sx, axes[ai].sy,
-                              dk, dk, dk, letter_lw, 0.88f * 0.9f, -1.0f);
+                              dk, dk, dk, letter_lw, 1.0f, -1.0f);
         mop_overlay_push_line(vp, axes[ai].sx, axes[ai].sy, axes[ai].sx,
                               axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              0.88f * 0.9f, -1.0f);
+                              1.0f, -1.0f);
       } else {
         /* Z letter */
         mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
                               axes[ai].sy - letter_sz, axes[ai].sx + letter_sz,
                               axes[ai].sy - letter_sz, dk, dk, dk, letter_lw,
-                              0.88f * 0.9f, -1.0f);
+                              1.0f, -1.0f);
         mop_overlay_push_line(vp, axes[ai].sx + letter_sz,
                               axes[ai].sy - letter_sz, axes[ai].sx - letter_sz,
                               axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              0.88f * 0.9f, -1.0f);
+                              1.0f, -1.0f);
         mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
                               axes[ai].sy + letter_sz, axes[ai].sx + letter_sz,
                               axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              0.88f * 0.9f, -1.0f);
+                              1.0f, -1.0f);
       }
     } else {
       /* Filled circle at negative tip */
       mop_overlay_push_circle(vp, axes[ai].sx, axes[ai].sy, axes[ai].ball_r, fr,
-                              fg, fb, 0.85f, -1.0f);
+                              fg, fb, 1.0f, -1.0f);
     }
   }
 }

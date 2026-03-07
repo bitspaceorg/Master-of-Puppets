@@ -19,7 +19,9 @@ typedef enum MopPostEffect {
   MOP_POST_TONEMAP = 1 << 1,
   MOP_POST_VIGNETTE = 1 << 2,
   MOP_POST_FOG = 1 << 3,
-  MOP_POST_FXAA = 1 << 4
+  MOP_POST_FXAA = 1 << 4,
+  MOP_POST_BLOOM = 1 << 5,
+  MOP_POST_SSAO = 1 << 6
 } MopPostEffect;
 
 typedef struct MopFogParams {
@@ -35,5 +37,11 @@ void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog);
  * Default is 1.0.  Higher values brighten, lower values darken. */
 void mop_viewport_set_exposure(MopViewport *viewport, float exposure);
 float mop_viewport_get_exposure(const MopViewport *viewport);
+
+/* Bloom parameters — threshold is the HDR brightness above which pixels
+ * contribute to bloom; intensity controls how much bloom is composited.
+ * Default: threshold=1.0, intensity=0.5. */
+void mop_viewport_set_bloom(MopViewport *viewport, float threshold,
+                            float intensity);
 
 #endif /* MOP_RENDER_POSTPROCESS_H */

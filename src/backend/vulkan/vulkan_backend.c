@@ -428,15 +428,19 @@ static MopRhiDevice *vk_device_create(void) {
       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
        MOP_VK_MAX_DRAWS_PER_FRAME + 2}, /* +2 for skybox + tonemap */
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       MOP_VK_MAX_DRAWS_PER_FRAME * 5 + 4}, /* texture + shadow + IBL×3 + skybox
-                                               + tonemap + grid + overlay */
+       MOP_VK_MAX_DRAWS_PER_FRAME * 8 + 16},  /* texture + shadow + IBL×3 +
+                                                  normal + MR + AO + skybox
+                                                  + tonemap(3) + grid + overlay
+                                                  + bloom(10) + ssao(2) */
       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, /* SDF overlay SSBO */
+      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, /* SSAO kernel UBO */
   };
   VkDescriptorPoolCreateInfo dp_ci = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets =
-          MOP_VK_MAX_DRAWS_PER_FRAME + 4, /* +4: skybox+tonemap+grid+overlay */
-      .poolSizeCount = 3,
+          MOP_VK_MAX_DRAWS_PER_FRAME + 16, /* +16: skybox+tonemap+grid+overlay
+                                               +bloom(10)+ssao(2) */
+      .poolSizeCount = 4,
       .pPoolSizes = pool_sizes,
   };
   r = vkCreateDescriptorPool(dev->device, &dp_ci, NULL, &dev->desc_pool);
@@ -798,17 +802,31 @@ postprocess_done:
     if (tr != VK_SUCCESS) {
       MOP_WARN("[VK] tonemap render pass failed: %d", tr);
     } else {
-      /* Descriptor set layout: single combined image sampler */
-      VkDescriptorSetLayoutBinding tm_binding = {
-          .binding = 0,
-          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .descriptorCount = 1,
-          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      /* Descriptor set layout: HDR + bloom + SSAO samplers */
+      VkDescriptorSetLayoutBinding tm_bindings[3] = {
+          {
+              .binding = 0,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+          {
+              .binding = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+          {
+              .binding = 2,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
       };
       VkDescriptorSetLayoutCreateInfo tm_layout_ci = {
           .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-          .bindingCount = 1,
-          .pBindings = &tm_binding,
+          .bindingCount = 3,
+          .pBindings = tm_bindings,
       };
       tr = vkCreateDescriptorSetLayout(dev->device, &tm_layout_ci, NULL,
                                        &dev->tonemap_desc_layout);
@@ -817,11 +835,12 @@ postprocess_done:
         goto tonemap_done;
       }
 
-      /* Pipeline layout: desc set + push constant (float exposure) */
+      /* Pipeline layout: desc set + push constants (exposure + bloom_intensity)
+       */
       VkPushConstantRange tm_push = {
           .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
           .offset = 0,
-          .size = 4, /* float */
+          .size = 8, /* float exposure + float bloom_intensity */
       };
       VkPipelineLayoutCreateInfo tm_pl_ci = {
           .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -855,6 +874,287 @@ postprocess_done:
     }
   }
 tonemap_done:
+
+  /* ---- Bloom resources ---- */
+  {
+    VkResult br =
+        mop_vk_create_bloom_render_pass(dev->device, &dev->bloom_render_pass);
+    if (br != VK_SUCCESS) {
+      MOP_WARN("[VK] bloom render pass failed: %d", br);
+    } else {
+      /* Descriptor set layout: single input sampler */
+      VkDescriptorSetLayoutBinding bloom_binding = {
+          .binding = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      };
+      VkDescriptorSetLayoutCreateInfo bloom_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 1,
+          .pBindings = &bloom_binding,
+      };
+      br = vkCreateDescriptorSetLayout(dev->device, &bloom_layout_ci, NULL,
+                                       &dev->bloom_desc_layout);
+      if (br != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom desc layout failed: %d", br);
+        goto bloom_done;
+      }
+
+      /* Pipeline layout: desc set + 16 bytes push constants (max of
+       * extract {threshold, soft_knee} = 8 and blur {texel_size, dir} = 16) */
+      VkPushConstantRange bloom_push = {
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .offset = 0,
+          .size = 16,
+      };
+      VkPipelineLayoutCreateInfo bloom_pl_ci = {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = 1,
+          .pSetLayouts = &dev->bloom_desc_layout,
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges = &bloom_push,
+      };
+      br = vkCreatePipelineLayout(dev->device, &bloom_pl_ci, NULL,
+                                  &dev->bloom_pipeline_layout);
+      if (br != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom pipeline layout failed: %d", br);
+        goto bloom_done;
+      }
+
+#if defined(MOP_VK_HAS_BLOOM_SHADERS)
+      dev->bloom_extract_frag =
+          create_shader_module(dev->device, mop_bloom_extract_frag_spv,
+                               mop_bloom_extract_frag_spv_size);
+      dev->bloom_blur_frag = create_shader_module(
+          dev->device, mop_bloom_blur_frag_spv, mop_bloom_blur_frag_spv_size);
+
+      if (dev->fullscreen_vert && dev->bloom_extract_frag &&
+          dev->bloom_blur_frag) {
+        dev->bloom_extract_pipeline = mop_vk_create_bloom_extract_pipeline(dev);
+        dev->bloom_blur_pipeline = mop_vk_create_bloom_blur_pipeline(dev);
+
+        if (dev->bloom_extract_pipeline && dev->bloom_blur_pipeline) {
+          dev->bloom_threshold = 1.0f;
+          dev->bloom_intensity = 0.5f;
+          MOP_INFO("[VK] bloom pipelines created");
+        }
+      }
+#else
+      MOP_INFO("[VK] bloom resources allocated (pipeline pending shader "
+               "compilation)");
+#endif
+    }
+  }
+bloom_done:
+
+  /* ---- SSAO resources ---- */
+  {
+    VkResult sr =
+        mop_vk_create_ssao_render_pass(dev->device, &dev->ssao_render_pass);
+    if (sr != VK_SUCCESS) {
+      MOP_WARN("[VK] SSAO render pass failed: %d", sr);
+    } else {
+      /* Descriptor set layout: depth sampler + noise texture + kernel UBO */
+      VkDescriptorSetLayoutBinding ssao_bindings[3] = {
+          {
+              .binding = 0,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+          {
+              .binding = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+          {
+              .binding = 2,
+              .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+              .descriptorCount = 1,
+              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          },
+      };
+      VkDescriptorSetLayoutCreateInfo ssao_layout_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 3,
+          .pBindings = ssao_bindings,
+      };
+      sr = vkCreateDescriptorSetLayout(dev->device, &ssao_layout_ci, NULL,
+                                       &dev->ssao_desc_layout);
+      if (sr != VK_SUCCESS) {
+        MOP_WARN("[VK] SSAO desc layout failed: %d", sr);
+        goto ssao_done;
+      }
+
+      /* Pipeline layout: desc set + push constants
+       * SSAO push: mat4 projection(64) + radius(4) + bias(4) + kernel_size(4)
+       *            + reverse_z(4) + noise_scale(8) + pad(8) = 96 bytes
+       * SSAO blur push: texel_size(8) = 8 bytes
+       * Max = 96 bytes */
+      VkPushConstantRange ssao_push = {
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .offset = 0,
+          .size = 96,
+      };
+      VkPipelineLayoutCreateInfo ssao_pl_ci = {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = 1,
+          .pSetLayouts = &dev->ssao_desc_layout,
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges = &ssao_push,
+      };
+      sr = vkCreatePipelineLayout(dev->device, &ssao_pl_ci, NULL,
+                                  &dev->ssao_pipeline_layout);
+      if (sr != VK_SUCCESS) {
+        MOP_WARN("[VK] SSAO pipeline layout failed: %d", sr);
+        goto ssao_done;
+      }
+
+      /* Create 4x4 noise texture (RG16_SFLOAT — random rotation vectors) */
+      {
+        sr = mop_vk_create_image(
+            dev->device, &dev->mem_props, 4, 4, VK_FORMAT_R16G16_SFLOAT,
+            VK_SAMPLE_COUNT_1_BIT,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            &dev->ssao_noise_image, &dev->ssao_noise_memory);
+        if (sr != VK_SUCCESS) {
+          MOP_WARN("[VK] SSAO noise image failed: %d", sr);
+          goto ssao_done;
+        }
+        sr = mop_vk_create_image_view(
+            dev->device, dev->ssao_noise_image, VK_FORMAT_R16G16_SFLOAT,
+            VK_IMAGE_ASPECT_COLOR_BIT, &dev->ssao_noise_view);
+        if (sr != VK_SUCCESS) {
+          MOP_WARN("[VK] SSAO noise view failed: %d", sr);
+          goto ssao_done;
+        }
+
+        /* Generate random noise data and upload via staging buffer */
+        uint16_t noise_data[4 * 4 * 2]; /* 4x4 texels, RG half-float */
+        srand(42); /* deterministic seed for reproducible AO */
+        for (int i = 0; i < 16; i++) {
+          float rx = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
+          float ry = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
+          /* Convert to half-float (simple approximation) */
+          /* IEEE 754 half: sign(1) exp(5) mant(10) */
+          union {
+            float f;
+            uint32_t u;
+          } fx = {.f = rx};
+          union {
+            float f;
+            uint32_t u;
+          } fy = {.f = ry};
+          uint32_t sx = (fx.u >> 16) & 0x8000;
+          int32_t ex = ((fx.u >> 23) & 0xFF) - 127 + 15;
+          if (ex <= 0)
+            ex = 0;
+          if (ex > 30)
+            ex = 30;
+          uint32_t mx = (fx.u >> 13) & 0x3FF;
+          noise_data[i * 2 + 0] = (uint16_t)(sx | ((uint32_t)ex << 10) | mx);
+
+          uint32_t sy = (fy.u >> 16) & 0x8000;
+          int32_t ey = ((fy.u >> 23) & 0xFF) - 127 + 15;
+          if (ey <= 0)
+            ey = 0;
+          if (ey > 30)
+            ey = 30;
+          uint32_t my = (fy.u >> 13) & 0x3FF;
+          noise_data[i * 2 + 1] = (uint16_t)(sy | ((uint32_t)ey << 10) | my);
+        }
+
+        /* Upload noise via staging buffer */
+        size_t noise_size = sizeof(noise_data);
+        memcpy(dev->staging_mapped, noise_data, noise_size);
+        VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+        mop_vk_transition_image(
+            cb, dev->ssao_noise_image, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy region = {
+            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                 .layerCount = 1},
+            .imageExtent = {4, 4, 1},
+        };
+        vkCmdCopyBufferToImage(cb, dev->staging_buf, dev->ssao_noise_image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                               &region);
+        mop_vk_transition_image(
+            cb, dev->ssao_noise_image, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
+      }
+
+      /* Create kernel UBO (64 hemisphere sample positions) */
+      {
+        float kernel_data[64 * 4]; /* vec4 per sample */
+        srand(42);
+        for (int i = 0; i < 64; i++) {
+          float x = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
+          float y = ((float)rand() / (float)RAND_MAX) * 2.0f - 1.0f;
+          float z = (float)rand() / (float)RAND_MAX; /* hemisphere: z > 0 */
+          float len = sqrtf(x * x + y * y + z * z);
+          if (len > 0.0f) {
+            x /= len;
+            y /= len;
+            z /= len;
+          }
+
+          /* Scale: distribute more samples closer to origin */
+          float scale = (float)i / 64.0f;
+          scale = 0.1f + scale * scale * 0.9f; /* lerp(0.1, 1.0, scale^2) */
+          kernel_data[i * 4 + 0] = x * scale;
+          kernel_data[i * 4 + 1] = y * scale;
+          kernel_data[i * 4 + 2] = z * scale;
+          kernel_data[i * 4 + 3] = 0.0f; /* padding */
+        }
+
+        sr = mop_vk_create_buffer(dev->device, &dev->mem_props,
+                                  sizeof(kernel_data),
+                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                  &dev->ssao_kernel_ubo, &dev->ssao_kernel_mem);
+        if (sr != VK_SUCCESS) {
+          MOP_WARN("[VK] SSAO kernel UBO failed: %d", sr);
+          goto ssao_done;
+        }
+        void *mapped;
+        vkMapMemory(dev->device, dev->ssao_kernel_mem, 0, sizeof(kernel_data),
+                    0, &mapped);
+        memcpy(mapped, kernel_data, sizeof(kernel_data));
+        vkUnmapMemory(dev->device, dev->ssao_kernel_mem);
+      }
+
+#if defined(MOP_VK_HAS_SSAO_SHADERS)
+      dev->ssao_frag = create_shader_module(dev->device, mop_ssao_frag_spv,
+                                            mop_ssao_frag_spv_size);
+      dev->ssao_blur_frag = create_shader_module(
+          dev->device, mop_ssao_blur_frag_spv, mop_ssao_blur_frag_spv_size);
+
+      if (dev->fullscreen_vert && dev->ssao_frag && dev->ssao_blur_frag) {
+        dev->ssao_pipeline = mop_vk_create_ssao_pipeline(dev);
+        dev->ssao_blur_pipeline = mop_vk_create_ssao_blur_pipeline(dev);
+
+        if (dev->ssao_pipeline && dev->ssao_blur_pipeline) {
+          MOP_INFO("[VK] SSAO pipelines created");
+        }
+      }
+#else
+      MOP_INFO("[VK] SSAO resources allocated (pipeline pending shader "
+               "compilation)");
+#endif
+    }
+  }
+ssao_done:
 
   /* ---- Skybox pipeline (equirectangular env map) ---- */
 #if defined(MOP_VK_HAS_SKYBOX_SHADERS)
@@ -1112,6 +1412,48 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyRenderPass(d, dev->tonemap_render_pass, NULL);
     if (dev->tonemap_frag)
       vkDestroyShaderModule(d, dev->tonemap_frag, NULL);
+
+    /* Bloom cleanup */
+    if (dev->bloom_extract_pipeline)
+      vkDestroyPipeline(d, dev->bloom_extract_pipeline, NULL);
+    if (dev->bloom_blur_pipeline)
+      vkDestroyPipeline(d, dev->bloom_blur_pipeline, NULL);
+    if (dev->bloom_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->bloom_pipeline_layout, NULL);
+    if (dev->bloom_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->bloom_desc_layout, NULL);
+    if (dev->bloom_render_pass)
+      vkDestroyRenderPass(d, dev->bloom_render_pass, NULL);
+    if (dev->bloom_extract_frag)
+      vkDestroyShaderModule(d, dev->bloom_extract_frag, NULL);
+    if (dev->bloom_blur_frag)
+      vkDestroyShaderModule(d, dev->bloom_blur_frag, NULL);
+
+    /* SSAO cleanup */
+    if (dev->ssao_pipeline)
+      vkDestroyPipeline(d, dev->ssao_pipeline, NULL);
+    if (dev->ssao_blur_pipeline)
+      vkDestroyPipeline(d, dev->ssao_blur_pipeline, NULL);
+    if (dev->ssao_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->ssao_pipeline_layout, NULL);
+    if (dev->ssao_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->ssao_desc_layout, NULL);
+    if (dev->ssao_render_pass)
+      vkDestroyRenderPass(d, dev->ssao_render_pass, NULL);
+    if (dev->ssao_frag)
+      vkDestroyShaderModule(d, dev->ssao_frag, NULL);
+    if (dev->ssao_blur_frag)
+      vkDestroyShaderModule(d, dev->ssao_blur_frag, NULL);
+    if (dev->ssao_noise_view)
+      vkDestroyImageView(d, dev->ssao_noise_view, NULL);
+    if (dev->ssao_noise_image)
+      vkDestroyImage(d, dev->ssao_noise_image, NULL);
+    if (dev->ssao_noise_memory)
+      vkFreeMemory(d, dev->ssao_noise_memory, NULL);
+    if (dev->ssao_kernel_ubo)
+      vkDestroyBuffer(d, dev->ssao_kernel_ubo, NULL);
+    if (dev->ssao_kernel_mem)
+      vkFreeMemory(d, dev->ssao_kernel_mem, NULL);
 
     /* Skybox cleanup */
     if (dev->skybox_pipeline)
@@ -1522,6 +1864,106 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       MOP_WARN("[VK] tonemap framebuffer failed: %d", r);
   }
 
+  /* ---- Bloom mip chain (half-res, R16G16B16A16_SFLOAT) ---- */
+  if (dev->bloom_render_pass) {
+    uint32_t bw = (uint32_t)width / 2;
+    uint32_t bh = (uint32_t)height / 2;
+    for (int i = 0; i < MOP_VK_BLOOM_LEVELS; i++) {
+      if (bw < 1)
+        bw = 1;
+      if (bh < 1)
+        bh = 1;
+      r = mop_vk_create_image(
+          dev->device, &dev->mem_props, bw, bh, VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_SAMPLE_COUNT_1_BIT,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+          &fb->bloom_images[i], &fb->bloom_memory[i]);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom image level %d failed: %d", i, r);
+        break;
+      }
+      r = mop_vk_create_image_view(
+          dev->device, fb->bloom_images[i], VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_IMAGE_ASPECT_COLOR_BIT, &fb->bloom_views[i]);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom view level %d failed: %d", i, r);
+        break;
+      }
+      VkImageView bv = fb->bloom_views[i];
+      VkFramebufferCreateInfo bfb_ci = {
+          .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+          .renderPass = dev->bloom_render_pass,
+          .attachmentCount = 1,
+          .pAttachments = &bv,
+          .width = bw,
+          .height = bh,
+          .layers = 1,
+      };
+      r = vkCreateFramebuffer(dev->device, &bfb_ci, NULL, &fb->bloom_fbs[i]);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom framebuffer level %d failed: %d", i, r);
+        break;
+      }
+      bw /= 2;
+      bh /= 2;
+    }
+  }
+
+  /* ---- SSAO attachments (R8_UNORM, full resolution) ---- */
+  if (dev->ssao_render_pass) {
+    /* Raw SSAO output */
+    r = mop_vk_create_image(
+        dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+        VK_FORMAT_R8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        &fb->ssao_image, &fb->ssao_memory);
+    if (r == VK_SUCCESS) {
+      r = mop_vk_create_image_view(dev->device, fb->ssao_image,
+                                   VK_FORMAT_R8_UNORM,
+                                   VK_IMAGE_ASPECT_COLOR_BIT, &fb->ssao_view);
+    }
+    if (r == VK_SUCCESS) {
+      VkFramebufferCreateInfo sfb_ci = {
+          .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+          .renderPass = dev->ssao_render_pass,
+          .attachmentCount = 1,
+          .pAttachments = &fb->ssao_view,
+          .width = (uint32_t)width,
+          .height = (uint32_t)height,
+          .layers = 1,
+      };
+      r = vkCreateFramebuffer(dev->device, &sfb_ci, NULL, &fb->ssao_fb);
+    }
+    if (r != VK_SUCCESS)
+      MOP_WARN("[VK] SSAO raw image/fb failed: %d", r);
+
+    /* Blurred SSAO output */
+    r = mop_vk_create_image(
+        dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+        VK_FORMAT_R8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        &fb->ssao_blur_image, &fb->ssao_blur_memory);
+    if (r == VK_SUCCESS) {
+      r = mop_vk_create_image_view(
+          dev->device, fb->ssao_blur_image, VK_FORMAT_R8_UNORM,
+          VK_IMAGE_ASPECT_COLOR_BIT, &fb->ssao_blur_view);
+    }
+    if (r == VK_SUCCESS) {
+      VkFramebufferCreateInfo sbfb_ci = {
+          .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+          .renderPass = dev->ssao_render_pass,
+          .attachmentCount = 1,
+          .pAttachments = &fb->ssao_blur_view,
+          .width = (uint32_t)width,
+          .height = (uint32_t)height,
+          .layers = 1,
+      };
+      r = vkCreateFramebuffer(dev->device, &sbfb_ci, NULL, &fb->ssao_blur_fb);
+    }
+    if (r != VK_SUCCESS)
+      MOP_WARN("[VK] SSAO blur image/fb failed: %d", r);
+  }
+
   /* ---- Overlay framebuffer (renders on LDR color image) ---- */
   if (dev->overlay_render_pass && fb->ldr_color_view) {
     VkImageView ov_views[1] = {fb->ldr_color_view};
@@ -1738,6 +2180,44 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
   if (fb->instance_mem)
     vkFreeMemory(d, fb->instance_mem, NULL);
 
+  /* Overlay SSBO */
+  if (fb->overlay_ssbo_mapped)
+    vkUnmapMemory(d, fb->overlay_ssbo_mem);
+  if (fb->overlay_ssbo)
+    vkDestroyBuffer(d, fb->overlay_ssbo, NULL);
+  if (fb->overlay_ssbo_mem)
+    vkFreeMemory(d, fb->overlay_ssbo_mem, NULL);
+
+  /* Bloom mip chain */
+  for (int i = 0; i < MOP_VK_BLOOM_LEVELS; i++) {
+    if (fb->bloom_fbs[i])
+      vkDestroyFramebuffer(d, fb->bloom_fbs[i], NULL);
+    if (fb->bloom_views[i])
+      vkDestroyImageView(d, fb->bloom_views[i], NULL);
+    if (fb->bloom_images[i])
+      vkDestroyImage(d, fb->bloom_images[i], NULL);
+    if (fb->bloom_memory[i])
+      vkFreeMemory(d, fb->bloom_memory[i], NULL);
+  }
+
+  /* SSAO attachments */
+  if (fb->ssao_blur_fb)
+    vkDestroyFramebuffer(d, fb->ssao_blur_fb, NULL);
+  if (fb->ssao_blur_view)
+    vkDestroyImageView(d, fb->ssao_blur_view, NULL);
+  if (fb->ssao_blur_image)
+    vkDestroyImage(d, fb->ssao_blur_image, NULL);
+  if (fb->ssao_blur_memory)
+    vkFreeMemory(d, fb->ssao_blur_memory, NULL);
+  if (fb->ssao_fb)
+    vkDestroyFramebuffer(d, fb->ssao_fb, NULL);
+  if (fb->ssao_view)
+    vkDestroyImageView(d, fb->ssao_view, NULL);
+  if (fb->ssao_image)
+    vkDestroyImage(d, fb->ssao_image, NULL);
+  if (fb->ssao_memory)
+    vkFreeMemory(d, fb->ssao_memory, NULL);
+
   memset(fb, 0, sizeof(*fb));
 }
 
@@ -1818,10 +2298,13 @@ static void vk_frame_begin(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   float depth_clear = dev->reverse_z ? 0.0f : 1.0f;
   uint32_t clear_count;
   VkClearValue clears[6];
+  /* Clear color alpha=0 marks background pixels so the tonemap pass can
+   * skip exposure+ACES for them (background brightness should not change
+   * with the exposure slider — only skybox/scene pixels get tonemapped). */
   if (dev->msaa_samples > VK_SAMPLE_COUNT_1_BIT) {
     /* 6 attachments: 3 MSAA (cleared) + 3 resolve (DONT_CARE but must exist) */
-    clears[0] = (VkClearValue){.color = {{clear_color.r, clear_color.g,
-                                          clear_color.b, clear_color.a}}};
+    clears[0] = (VkClearValue){
+        .color = {{clear_color.r, clear_color.g, clear_color.b, 0.0f}}};
     clears[1] = (VkClearValue){.color = {{0}}}; /* MSAA picking */
     clears[2] =
         (VkClearValue){.depthStencil = {depth_clear, 0}}; /* MSAA depth */
@@ -1830,8 +2313,8 @@ static void vk_frame_begin(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     clears[5] = (VkClearValue){.depthStencil = {0, 0}};   /* resolve depth */
     clear_count = 6;
   } else {
-    clears[0] = (VkClearValue){.color = {{clear_color.r, clear_color.g,
-                                          clear_color.b, clear_color.a}}};
+    clears[0] = (VkClearValue){
+        .color = {{clear_color.r, clear_color.g, clear_color.b, 0.0f}}};
     clears[1] = (VkClearValue){.color = {{0}}}; /* picking = 0 */
     clears[2] = (VkClearValue){.depthStencil = {depth_clear, 0}};
     clear_count = 3;
@@ -1952,10 +2435,18 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   ubo->has_texture = call->texture ? 1 : 0;
   ubo->metallic = call->metallic;
   ubo->roughness = call->roughness;
+  ubo->has_normal_map = call->normal_map ? 1 : 0;
+  ubo->has_mr_map = call->metallic_roughness_map ? 1 : 0;
+  ubo->has_ao_map = call->ao_map ? 1 : 0;
+  ubo->_pad_maps = 0;
   ubo->cam_pos[0] = call->cam_eye.x;
   ubo->cam_pos[1] = call->cam_eye.y;
   ubo->cam_pos[2] = call->cam_eye.z;
   ubo->cam_pos[3] = 0.0f;
+  ubo->emissive[0] = call->emissive.x;
+  ubo->emissive[1] = call->emissive.y;
+  ubo->emissive[2] = call->emissive.z;
+  ubo->emissive[3] = 0.0f;
 
   /* Multi-light: populate light array from draw call */
   ubo->num_lights = (int32_t)(call->light_count < MOP_VK_MAX_FRAG_LIGHTS
@@ -2003,8 +2494,8 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     memset(ubo->cascade_splits, 0, sizeof(ubo->cascade_splits));
   }
 
-  /* Background (object_id 0) keeps exposure=1 so it doesn't shift with +/- */
-  ubo->exposure = (call->object_id == 0) ? 1.0f : dev->hdr_exposure;
+  /* Exposure is applied once in the tonemap pass — solid shader always 1.0 */
+  ubo->exposure = 1.0f;
 
   uint32_t dynamic_offset = (uint32_t)fb->ubo_offset;
   fb->ubo_offset += aligned_size;
@@ -2071,7 +2562,26 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
 
-  VkWriteDescriptorSet writes[6] = {
+  /* PBR texture map bindings — use white fallback for missing maps */
+  VkDescriptorImageInfo normal_map_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->normal_map ? call->normal_map->view : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo mr_map_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->metallic_roughness_map
+                       ? call->metallic_roughness_map->view
+                       : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo ao_map_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->ao_map ? call->ao_map->view : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  VkWriteDescriptorSet writes[9] = {
       {
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = ds,
@@ -2120,8 +2630,32 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo = &brdf_img_info,
       },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 6,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &normal_map_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 7,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &mr_map_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 8,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &ao_map_info,
+      },
   };
-  vkUpdateDescriptorSets(dev->device, 6, writes, 0, NULL);
+  vkUpdateDescriptorSets(dev->device, 9, writes, 0, NULL);
 
   /* Bind descriptor set with dynamic offset */
   vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2225,6 +2759,9 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   /* Bind instanced pipeline */
   vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
+  /* Cache projection for SSAO (updated every draw — last one wins) */
+  memcpy(dev->cached_projection, call->projection.d, 64);
+
   /* Push constants: VP matrix (view * projection) */
   MopMat4 vp = mop_mat4_multiply(call->projection, call->view);
   float push_data[32];
@@ -2254,10 +2791,18 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   ubo->has_texture = call->texture ? 1 : 0;
   ubo->metallic = call->metallic;
   ubo->roughness = call->roughness;
+  ubo->has_normal_map = call->normal_map ? 1 : 0;
+  ubo->has_mr_map = call->metallic_roughness_map ? 1 : 0;
+  ubo->has_ao_map = call->ao_map ? 1 : 0;
+  ubo->_pad_maps = 0;
   ubo->cam_pos[0] = call->cam_eye.x;
   ubo->cam_pos[1] = call->cam_eye.y;
   ubo->cam_pos[2] = call->cam_eye.z;
   ubo->cam_pos[3] = 0.0f;
+  ubo->emissive[0] = call->emissive.x;
+  ubo->emissive[1] = call->emissive.y;
+  ubo->emissive[2] = call->emissive.z;
+  ubo->emissive[3] = 0.0f;
 
   ubo->num_lights = (int32_t)(call->light_count < MOP_VK_MAX_FRAG_LIGHTS
                                   ? call->light_count
@@ -2361,7 +2906,26 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
 
-  VkWriteDescriptorSet writes[6] = {
+  /* PBR texture maps — white fallback for instanced path */
+  VkDescriptorImageInfo normal_map_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->normal_map ? call->normal_map->view : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo mr_map_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->metallic_roughness_map
+                       ? call->metallic_roughness_map->view
+                       : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  VkDescriptorImageInfo ao_map_info = {
+      .sampler = dev->default_sampler,
+      .imageView = call->ao_map ? call->ao_map->view : dev->white_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+
+  VkWriteDescriptorSet writes[9] = {
       {
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = ds,
@@ -2410,8 +2974,32 @@ static void vk_draw_instanced(MopRhiDevice *dev, MopRhiFramebuffer *fb,
           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
           .pImageInfo = &brdf_img_info,
       },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 6,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &normal_map_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 7,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &mr_map_info,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = ds,
+          .dstBinding = 8,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &ao_map_info,
+      },
   };
-  vkUpdateDescriptorSets(dev->device, 6, writes, 0, NULL);
+  vkUpdateDescriptorSets(dev->device, 9, writes, 0, NULL);
 
   vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           dev->pipeline_layout, 0, 1, &ds, 1, &dynamic_offset);
@@ -2445,9 +3033,213 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
    * VkSubpassDescriptionDepthStencilResolve.  Render pass transitions
    * the 1x resolve targets to TRANSFER_SRC_OPTIMAL automatically. */
 
-  /* ---- HDR Tonemap pass: color_image (HDR) → ldr_color_image (LDR) ---- */
-  if (dev->tonemap_enabled && fb->tonemap_framebuffer) {
-    /* Transition HDR color from TRANSFER_SRC → SHADER_READ_ONLY */
+  /* ---- SSAO pass: depth → raw AO → blurred AO ---- */
+  if (dev->ssao_enabled && dev->ssao_pipeline && dev->ssao_blur_pipeline &&
+      fb->ssao_fb && fb->ssao_blur_fb) {
+    /* Transition depth from TRANSFER_SRC → SHADER_READ_ONLY for sampling */
+    mop_vk_transition_image(
+        dev->cmd_buf, fb->depth_image, VK_IMAGE_ASPECT_DEPTH_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    /* Transition SSAO images to COLOR_ATTACHMENT */
+    mop_vk_transition_image(
+        dev->cmd_buf, fb->ssao_image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    mop_vk_transition_image(
+        dev->cmd_buf, fb->ssao_blur_image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+    /* Step 1: Raw SSAO — sample depth buffer with hemisphere kernel */
+    {
+      VkDescriptorSetAllocateInfo ds_ai = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = dev->desc_pool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &dev->ssao_desc_layout,
+      };
+      VkDescriptorSet sds;
+      if (vkAllocateDescriptorSets(dev->device, &ds_ai, &sds) == VK_SUCCESS) {
+        VkDescriptorImageInfo depth_info = {
+            .sampler = dev->default_sampler,
+            .imageView = fb->depth_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkDescriptorImageInfo noise_info = {
+            .sampler = dev->default_sampler,
+            .imageView = dev->ssao_noise_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkDescriptorBufferInfo kernel_info = {
+            .buffer = dev->ssao_kernel_ubo,
+            .offset = 0,
+            .range = 64 * 4 * sizeof(float),
+        };
+        VkWriteDescriptorSet ssao_writes[3] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = sds,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &depth_info,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = sds,
+                .dstBinding = 1,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &noise_info,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = sds,
+                .dstBinding = 2,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &kernel_info,
+            },
+        };
+        vkUpdateDescriptorSets(dev->device, 3, ssao_writes, 0, NULL);
+
+        VkClearValue clear = {.color = {{1.0f, 0, 0, 0}}};
+        VkRenderPassBeginInfo rp_bi = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = dev->ssao_render_pass,
+            .framebuffer = fb->ssao_fb,
+            .renderArea = {.extent = {(uint32_t)fb->width,
+                                      (uint32_t)fb->height}},
+            .clearValueCount = 1,
+            .pClearValues = &clear,
+        };
+        vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport vp = {
+            .width = (float)fb->width,
+            .height = (float)fb->height,
+            .maxDepth = 1.0f,
+        };
+        VkRect2D sc = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}};
+        vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
+        vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
+
+        vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          dev->ssao_pipeline);
+        vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                dev->ssao_pipeline_layout, 0, 1, &sds, 0, NULL);
+
+        /* Push constants: projection + parameters */
+        struct {
+          float projection[16];
+          float radius;
+          float bias;
+          int32_t kernel_size;
+          int32_t reverse_z;
+          float noise_scale[2];
+          float _pad[2];
+        } ssao_pc;
+        memcpy(ssao_pc.projection, dev->cached_projection, 64);
+        ssao_pc.radius = 0.5f;
+        ssao_pc.bias = 0.025f;
+        ssao_pc.kernel_size = 32; /* use 32 of 64 samples for perf */
+        ssao_pc.reverse_z = dev->reverse_z ? 1 : 0;
+        ssao_pc.noise_scale[0] = (float)fb->width / 4.0f;
+        ssao_pc.noise_scale[1] = (float)fb->height / 4.0f;
+        ssao_pc._pad[0] = 0.0f;
+        ssao_pc._pad[1] = 0.0f;
+
+        vkCmdPushConstants(dev->cmd_buf, dev->ssao_pipeline_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ssao_pc),
+                           &ssao_pc);
+
+        vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
+        vkCmdEndRenderPass(dev->cmd_buf);
+      }
+    }
+
+    /* Step 2: Blur the raw SSAO output */
+    {
+      /* ssao_image is now SHADER_READ_ONLY (from render pass final layout) */
+      VkDescriptorSetAllocateInfo ds_ai = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = dev->desc_pool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &dev->ssao_desc_layout,
+      };
+      VkDescriptorSet bds;
+      if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) == VK_SUCCESS) {
+        VkDescriptorImageInfo ssao_info = {
+            .sampler = dev->default_sampler,
+            .imageView = fb->ssao_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkWriteDescriptorSet blur_write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = bds,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &ssao_info,
+        };
+        vkUpdateDescriptorSets(dev->device, 1, &blur_write, 0, NULL);
+
+        VkClearValue clear = {.color = {{1.0f, 0, 0, 0}}};
+        VkRenderPassBeginInfo rp_bi = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = dev->ssao_render_pass,
+            .framebuffer = fb->ssao_blur_fb,
+            .renderArea = {.extent = {(uint32_t)fb->width,
+                                      (uint32_t)fb->height}},
+            .clearValueCount = 1,
+            .pClearValues = &clear,
+        };
+        vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport vp = {
+            .width = (float)fb->width,
+            .height = (float)fb->height,
+            .maxDepth = 1.0f,
+        };
+        VkRect2D sc = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}};
+        vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
+        vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
+
+        vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          dev->ssao_blur_pipeline);
+        vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                dev->ssao_pipeline_layout, 0, 1, &bds, 0, NULL);
+
+        float blur_pc[2] = {1.0f / (float)fb->width, 1.0f / (float)fb->height};
+        vkCmdPushConstants(dev->cmd_buf, dev->ssao_pipeline_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8, blur_pc);
+
+        vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
+        vkCmdEndRenderPass(dev->cmd_buf);
+      }
+    }
+
+    /* ssao_blur_image is now SHADER_READ_ONLY — ready for tonemap sampling.
+     * Transition depth back to TRANSFER_SRC for readback later. */
+    mop_vk_transition_image(
+        dev->cmd_buf, fb->depth_image, VK_IMAGE_ASPECT_DEPTH_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT);
+  }
+
+  /* ---- Bloom pass: extract bright → downsample → upsample chain ---- */
+  if (dev->bloom_enabled && dev->bloom_extract_pipeline &&
+      dev->bloom_blur_pipeline && fb->bloom_fbs[0]) {
+    /* Transition HDR color to SHADER_READ_ONLY for extract sampling */
     mop_vk_transition_image(
         dev->cmd_buf, fb->color_image, VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2455,6 +3247,255 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    /* Transition all bloom images to COLOR_ATTACHMENT_OPTIMAL for first use */
+    for (int i = 0; i < MOP_VK_BLOOM_LEVELS; i++) {
+      if (!fb->bloom_images[i])
+        break;
+      mop_vk_transition_image(
+          dev->cmd_buf, fb->bloom_images[i], VK_IMAGE_ASPECT_COLOR_BIT,
+          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    }
+
+    /* Compute bloom mip sizes */
+    uint32_t bloom_widths[MOP_VK_BLOOM_LEVELS];
+    uint32_t bloom_heights[MOP_VK_BLOOM_LEVELS];
+    {
+      uint32_t bw = (uint32_t)fb->width / 2;
+      uint32_t bh = (uint32_t)fb->height / 2;
+      for (int i = 0; i < MOP_VK_BLOOM_LEVELS; i++) {
+        bloom_widths[i] = bw > 0 ? bw : 1;
+        bloom_heights[i] = bh > 0 ? bh : 1;
+        bw /= 2;
+        bh /= 2;
+      }
+    }
+
+    /* Step 1: Extract bright pixels from HDR → bloom[0] */
+    {
+      VkDescriptorSetAllocateInfo ds_ai = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = dev->desc_pool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &dev->bloom_desc_layout,
+      };
+      VkDescriptorSet bds;
+      if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) == VK_SUCCESS) {
+        VkDescriptorImageInfo img_info = {
+            .sampler = dev->default_sampler,
+            .imageView = fb->color_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        VkWriteDescriptorSet write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = bds,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &img_info,
+        };
+        vkUpdateDescriptorSets(dev->device, 1, &write, 0, NULL);
+
+        VkClearValue clear = {.color = {{0, 0, 0, 0}}};
+        VkRenderPassBeginInfo rp_bi = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = dev->bloom_render_pass,
+            .framebuffer = fb->bloom_fbs[0],
+            .renderArea = {.extent = {bloom_widths[0], bloom_heights[0]}},
+            .clearValueCount = 1,
+            .pClearValues = &clear,
+        };
+        vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport vp = {
+            .width = (float)bloom_widths[0],
+            .height = (float)bloom_heights[0],
+            .maxDepth = 1.0f,
+        };
+        VkRect2D sc = {.extent = {bloom_widths[0], bloom_heights[0]}};
+        vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
+        vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
+
+        vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          dev->bloom_extract_pipeline);
+        vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                dev->bloom_pipeline_layout, 0, 1, &bds, 0,
+                                NULL);
+
+        /* Push extract constants: threshold + soft_knee (padded to 16) */
+        float extract_pc[4] = {dev->bloom_threshold,
+                               dev->bloom_threshold * 0.5f, 0.0f, 0.0f};
+        vkCmdPushConstants(dev->cmd_buf, dev->bloom_pipeline_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, extract_pc);
+
+        vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
+        vkCmdEndRenderPass(dev->cmd_buf);
+      }
+    }
+
+    /* Step 2: Downsample chain — blur bloom[i-1] → bloom[i] */
+    for (int i = 1; i < MOP_VK_BLOOM_LEVELS; i++) {
+      if (!fb->bloom_fbs[i])
+        break;
+
+      /* bloom[i-1] is now SHADER_READ_ONLY (from render pass final layout).
+       * bloom[i] needs COLOR_ATTACHMENT — already transitioned above. */
+      VkDescriptorSetAllocateInfo ds_ai = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = dev->desc_pool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &dev->bloom_desc_layout,
+      };
+      VkDescriptorSet bds;
+      if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) != VK_SUCCESS)
+        break;
+
+      VkDescriptorImageInfo img_info = {
+          .sampler = dev->default_sampler,
+          .imageView = fb->bloom_views[i - 1],
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet write = {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = bds,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &img_info,
+      };
+      vkUpdateDescriptorSets(dev->device, 1, &write, 0, NULL);
+
+      VkClearValue clear = {.color = {{0, 0, 0, 0}}};
+      VkRenderPassBeginInfo rp_bi = {
+          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+          .renderPass = dev->bloom_render_pass,
+          .framebuffer = fb->bloom_fbs[i],
+          .renderArea = {.extent = {bloom_widths[i], bloom_heights[i]}},
+          .clearValueCount = 1,
+          .pClearValues = &clear,
+      };
+      vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+      VkViewport vp = {
+          .width = (float)bloom_widths[i],
+          .height = (float)bloom_heights[i],
+          .maxDepth = 1.0f,
+      };
+      VkRect2D sc = {.extent = {bloom_widths[i], bloom_heights[i]}};
+      vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
+      vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
+
+      vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        dev->bloom_blur_pipeline);
+      vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              dev->bloom_pipeline_layout, 0, 1, &bds, 0, NULL);
+
+      /* Push blur constants: texel_size (of source), direction = horizontal */
+      float blur_pc[4] = {1.0f / (float)bloom_widths[i - 1],
+                          1.0f / (float)bloom_heights[i - 1], 1.0f, 0.0f};
+      vkCmdPushConstants(dev->cmd_buf, dev->bloom_pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, blur_pc);
+
+      vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
+      vkCmdEndRenderPass(dev->cmd_buf);
+    }
+
+    /* Step 3: Upsample chain — blur bloom[i+1] → bloom[i] */
+    for (int i = MOP_VK_BLOOM_LEVELS - 2; i >= 0; i--) {
+      if (!fb->bloom_fbs[i])
+        break;
+
+      /* bloom[i+1] is SHADER_READ_ONLY (render pass final layout).
+       * bloom[i] needs transition back to COLOR_ATTACHMENT for reuse. */
+      mop_vk_transition_image(
+          dev->cmd_buf, fb->bloom_images[i], VK_IMAGE_ASPECT_COLOR_BIT,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+      VkDescriptorSetAllocateInfo ds_ai = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = dev->desc_pool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &dev->bloom_desc_layout,
+      };
+      VkDescriptorSet bds;
+      if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) != VK_SUCCESS)
+        break;
+
+      VkDescriptorImageInfo img_info = {
+          .sampler = dev->default_sampler,
+          .imageView = fb->bloom_views[i + 1],
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet write = {
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = bds,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &img_info,
+      };
+      vkUpdateDescriptorSets(dev->device, 1, &write, 0, NULL);
+
+      VkClearValue clear = {.color = {{0, 0, 0, 0}}};
+      VkRenderPassBeginInfo rp_bi = {
+          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+          .renderPass = dev->bloom_render_pass,
+          .framebuffer = fb->bloom_fbs[i],
+          .renderArea = {.extent = {bloom_widths[i], bloom_heights[i]}},
+          .clearValueCount = 1,
+          .pClearValues = &clear,
+      };
+      vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
+
+      VkViewport vp = {
+          .width = (float)bloom_widths[i],
+          .height = (float)bloom_heights[i],
+          .maxDepth = 1.0f,
+      };
+      VkRect2D sc = {.extent = {bloom_widths[i], bloom_heights[i]}};
+      vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
+      vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
+
+      vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        dev->bloom_blur_pipeline);
+      vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              dev->bloom_pipeline_layout, 0, 1, &bds, 0, NULL);
+
+      /* Push blur constants: texel_size (of source), direction = vertical */
+      float blur_pc[4] = {1.0f / (float)bloom_widths[i + 1],
+                          1.0f / (float)bloom_heights[i + 1], 0.0f, 1.0f};
+      vkCmdPushConstants(dev->cmd_buf, dev->bloom_pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, blur_pc);
+
+      vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
+      vkCmdEndRenderPass(dev->cmd_buf);
+    }
+
+    /* bloom[0] is now SHADER_READ_ONLY — ready for tonemap sampling.
+     * HDR color is already SHADER_READ_ONLY from the transition above. */
+  }
+
+  /* ---- HDR Tonemap pass: color_image (HDR) → ldr_color_image (LDR) ---- */
+  if (dev->tonemap_enabled && fb->tonemap_framebuffer) {
+    /* Transition HDR color to SHADER_READ_ONLY if bloom didn't already */
+    bool bloom_ran =
+        dev->bloom_enabled && dev->bloom_extract_pipeline && fb->bloom_fbs[0];
+    if (!bloom_ran) {
+      mop_vk_transition_image(
+          dev->cmd_buf, fb->color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    }
 
     /* Allocate descriptor set for HDR sampler */
     VkDescriptorSetAllocateInfo ds_ai = {
@@ -2466,21 +3507,58 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
     VkDescriptorSet tm_ds;
     VkResult dr = vkAllocateDescriptorSets(dev->device, &ds_ai, &tm_ds);
     if (dr == VK_SUCCESS) {
-      /* Update descriptor with HDR color image */
-      VkDescriptorImageInfo img_info = {
-          .sampler = dev->default_sampler,
-          .imageView = fb->color_view,
-          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      /* Update descriptors: HDR color + bloom + SSAO */
+      VkDescriptorImageInfo tm_img_infos[3] = {
+          {
+              .sampler = dev->default_sampler,
+              .imageView = fb->color_view,
+              .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          },
+          {
+              /* Bloom: use first bloom mip if available, else black fallback */
+              .sampler = dev->default_sampler,
+              .imageView = (dev->bloom_enabled && fb->bloom_views[0])
+                               ? fb->bloom_views[0]
+                               : dev->black_view,
+              .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          },
+          {
+              /* SSAO: use blurred AO if available, else white fallback (no AO)
+               */
+              .sampler = dev->default_sampler,
+              .imageView = (dev->ssao_enabled && fb->ssao_blur_view)
+                               ? fb->ssao_blur_view
+                               : dev->white_view,
+              .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          },
       };
-      VkWriteDescriptorSet write = {
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = tm_ds,
-          .dstBinding = 0,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .pImageInfo = &img_info,
+      VkWriteDescriptorSet tm_writes[3] = {
+          {
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = tm_ds,
+              .dstBinding = 0,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .pImageInfo = &tm_img_infos[0],
+          },
+          {
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = tm_ds,
+              .dstBinding = 1,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .pImageInfo = &tm_img_infos[1],
+          },
+          {
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = tm_ds,
+              .dstBinding = 2,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+              .pImageInfo = &tm_img_infos[2],
+          },
       };
-      vkUpdateDescriptorSets(dev->device, 1, &write, 0, NULL);
+      vkUpdateDescriptorSets(dev->device, 3, tm_writes, 0, NULL);
 
       /* Begin tonemap render pass */
       VkClearValue clear = {.color = {{0, 0, 0, 1}}};
@@ -2512,11 +3590,16 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               dev->tonemap_pipeline_layout, 0, 1, &tm_ds, 0,
                               NULL);
-      float exposure =
-          1.0f; /* scene objects already have exposure in frag UBO */
+      struct {
+        float exposure;
+        float bloom_intensity;
+      } tm_pc = {
+          .exposure = dev->hdr_exposure,
+          .bloom_intensity = dev->bloom_enabled ? dev->bloom_intensity : 0.0f,
+      };
       vkCmdPushConstants(dev->cmd_buf, dev->tonemap_pipeline_layout,
-                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float),
-                         &exposure);
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(tm_pc),
+                         &tm_pc);
       vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0); /* fullscreen triangle */
 
       vkCmdEndRenderPass(dev->cmd_buf);
@@ -2862,6 +3945,18 @@ static void vk_set_exposure(MopRhiDevice *dev, float exposure) {
   dev->hdr_exposure = exposure > 0.0f ? exposure : 0.001f;
 }
 
+static void vk_set_bloom(MopRhiDevice *dev, bool enabled, float threshold,
+                         float intensity) {
+  dev->bloom_enabled =
+      enabled && dev->bloom_extract_pipeline && dev->bloom_blur_pipeline;
+  dev->bloom_threshold = threshold > 0.0f ? threshold : 0.01f;
+  dev->bloom_intensity = intensity > 0.0f ? intensity : 0.0f;
+}
+
+static void vk_set_ssao(MopRhiDevice *dev, bool enabled) {
+  dev->ssao_enabled = enabled && dev->ssao_pipeline && dev->ssao_blur_pipeline;
+}
+
 static void vk_set_ibl_textures(MopRhiDevice *dev, MopRhiTexture *irradiance,
                                 MopRhiTexture *prefiltered,
                                 MopRhiTexture *brdf_lut) {
@@ -3115,64 +4210,79 @@ static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   if (!has_prims && !has_grid)
     return;
 
-  /* Create temporary SSBO for prim data (only if we have prims) */
-  VkBuffer ssbo_buf = VK_NULL_HANDLE;
-  VkDeviceMemory ssbo_mem = VK_NULL_HANDLE;
-  size_t ssbo_size = 0;
+  /* Use or grow persistent SSBO for prim data (only if we have prims) */
+  VkDeviceSize ssbo_size = 0;
   if (has_prims) {
-    ssbo_size = (size_t)prim_count * 3 * sizeof(float) * 4;
+    ssbo_size = (VkDeviceSize)prim_count * 3 * sizeof(float) * 4;
     if (ssbo_size > MOP_VK_STAGING_SIZE)
       has_prims = false;
-    else {
+    else if (ssbo_size > fb->overlay_ssbo_size) {
+      /* Grow with power-of-2 sizing */
+      VkDeviceSize new_size =
+          fb->overlay_ssbo_size ? fb->overlay_ssbo_size : 1024;
+      while (new_size < ssbo_size)
+        new_size *= 2;
+      /* Destroy old */
+      if (fb->overlay_ssbo) {
+        if (fb->overlay_ssbo_mapped)
+          vkUnmapMemory(dev->device, fb->overlay_ssbo_mem);
+        vkDestroyBuffer(dev->device, fb->overlay_ssbo, NULL);
+        vkFreeMemory(dev->device, fb->overlay_ssbo_mem, NULL);
+        fb->overlay_ssbo = VK_NULL_HANDLE;
+        fb->overlay_ssbo_mem = VK_NULL_HANDLE;
+        fb->overlay_ssbo_mapped = NULL;
+        fb->overlay_ssbo_size = 0;
+      }
       VkResult r = mop_vk_create_buffer(
-          dev->device, &dev->mem_props, ssbo_size,
+          dev->device, &dev->mem_props, new_size,
           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-          &ssbo_buf, &ssbo_mem);
+          &fb->overlay_ssbo, &fb->overlay_ssbo_mem);
       if (r != VK_SUCCESS)
         has_prims = false;
-    }
-  }
-
-  if (!has_prims && !has_grid)
-    return;
-
-  /* Map and fill SSBO if we have prims */
-  if (has_prims) {
-    void *ssbo_mapped = NULL;
-    VkResult r =
-        vkMapMemory(dev->device, ssbo_mem, 0, ssbo_size, 0, &ssbo_mapped);
-    if (r != VK_SUCCESS) {
-      vkDestroyBuffer(dev->device, ssbo_buf, NULL);
-      vkFreeMemory(dev->device, ssbo_mem, NULL);
-      has_prims = false;
-    } else {
-      const uint8_t *src = (const uint8_t *)prims;
-      float *dst = (float *)ssbo_mapped;
-      for (uint32_t i = 0; i < prim_count; i++) {
-        const float *pf = (const float *)(src + i * 48);
-        dst[i * 12 + 0] = pf[0];
-        dst[i * 12 + 1] = pf[1];
-        dst[i * 12 + 2] = pf[2];
-        dst[i * 12 + 3] = pf[3];
-        dst[i * 12 + 4] = pf[4];
-        dst[i * 12 + 5] = pf[5];
-        dst[i * 12 + 6] = pf[6];
-        dst[i * 12 + 7] = pf[7];
-        dst[i * 12 + 8] = pf[8];
-        dst[i * 12 + 9] = pf[9];
-        int32_t type_val;
-        memcpy(&type_val, &pf[10], sizeof(int32_t));
-        dst[i * 12 + 10] = (float)type_val;
-        dst[i * 12 + 11] = pf[11];
+      else {
+        r = vkMapMemory(dev->device, fb->overlay_ssbo_mem, 0, new_size, 0,
+                        &fb->overlay_ssbo_mapped);
+        if (r != VK_SUCCESS) {
+          vkDestroyBuffer(dev->device, fb->overlay_ssbo, NULL);
+          vkFreeMemory(dev->device, fb->overlay_ssbo_mem, NULL);
+          fb->overlay_ssbo = VK_NULL_HANDLE;
+          fb->overlay_ssbo_mem = VK_NULL_HANDLE;
+          fb->overlay_ssbo_mapped = NULL;
+          has_prims = false;
+        } else {
+          fb->overlay_ssbo_size = new_size;
+        }
       }
-      vkUnmapMemory(dev->device, ssbo_mem);
     }
   }
 
   if (!has_prims && !has_grid)
     return;
+
+  /* Fill SSBO if we have prims */
+  if (has_prims && fb->overlay_ssbo_mapped) {
+    const uint8_t *src = (const uint8_t *)prims;
+    float *dst = (float *)fb->overlay_ssbo_mapped;
+    for (uint32_t i = 0; i < prim_count; i++) {
+      const float *pf = (const float *)(src + i * 48);
+      dst[i * 12 + 0] = pf[0];
+      dst[i * 12 + 1] = pf[1];
+      dst[i * 12 + 2] = pf[2];
+      dst[i * 12 + 3] = pf[3];
+      dst[i * 12 + 4] = pf[4];
+      dst[i * 12 + 5] = pf[5];
+      dst[i * 12 + 6] = pf[6];
+      dst[i * 12 + 7] = pf[7];
+      dst[i * 12 + 8] = pf[8];
+      dst[i * 12 + 9] = pf[9];
+      int32_t type_val;
+      memcpy(&type_val, &pf[10], sizeof(int32_t));
+      dst[i * 12 + 10] = (float)type_val;
+      dst[i * 12 + 11] = pf[11];
+    }
+  }
 
   VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
 
@@ -3364,7 +4474,7 @@ static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
           .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
       };
       VkDescriptorBufferInfo ssbo_info = {
-          .buffer = ssbo_buf,
+          .buffer = fb->overlay_ssbo,
           .offset = 0,
           .range = ssbo_size,
       };
@@ -3448,11 +4558,6 @@ static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   size_t npixels = (size_t)fb_width * (size_t)fb_height;
   if (fb->readback_color && fb->readback_color_mapped)
     memcpy(fb->readback_color, fb->readback_color_mapped, npixels * 4);
-
-  if (ssbo_buf) {
-    vkDestroyBuffer(dev->device, ssbo_buf, NULL);
-    vkFreeMemory(dev->device, ssbo_mem, NULL);
-  }
 }
 
 static const MopRhiBackend VK_BACKEND = {
@@ -3480,6 +4585,8 @@ static const MopRhiBackend VK_BACKEND = {
     .buffer_read = vk_buffer_read,
     .frame_gpu_time_ms = vk_frame_gpu_time_ms,
     .set_exposure = vk_set_exposure,
+    .set_bloom = vk_set_bloom,
+    .set_ssao = vk_set_ssao,
     .set_ibl_textures = vk_set_ibl_textures,
     .draw_skybox = vk_draw_skybox,
     .draw_overlays = vk_draw_overlays,

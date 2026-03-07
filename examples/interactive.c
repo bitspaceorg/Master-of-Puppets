@@ -476,7 +476,10 @@ int main(int argc, char *argv[]) {
       };
       if (mop_viewport_set_environment(vp, &edesc)) {
         printf("[mop] HDRI loaded: %s\n", hdri);
-        /* Skybox background off by default; toggle with 'B' key */
+        /* Show HDRI as skybox background */
+        mop_viewport_set_environment_background(vp, true);
+        /* Sync with auto-exposure set by environment loader */
+        sc.exposure = mop_viewport_get_exposure(vp);
       } else {
         fprintf(stderr, "[mop] Failed to load HDRI: %s\n", hdri);
       }
@@ -641,10 +644,12 @@ int main(int argc, char *argv[]) {
 
       case SDL_EVENT_MOUSE_BUTTON_DOWN:
         if (ev.button.button == SDL_BUTTON_LEFT) {
+          SDL_SetWindowRelativeMouseMode(window, true);
           mop_viewport_input(vp, &(MopInputEvent){MOP_INPUT_POINTER_DOWN,
                                                   ev.button.x, ev.button.y, 0,
                                                   0, 0});
         } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+          SDL_SetWindowRelativeMouseMode(window, true);
           mop_viewport_input(vp, &(MopInputEvent){MOP_INPUT_SECONDARY_DOWN,
                                                   ev.button.x, ev.button.y, 0,
                                                   0, 0});
@@ -653,10 +658,12 @@ int main(int argc, char *argv[]) {
 
       case SDL_EVENT_MOUSE_BUTTON_UP:
         if (ev.button.button == SDL_BUTTON_LEFT) {
+          SDL_SetWindowRelativeMouseMode(window, false);
           mop_viewport_input(vp,
                              &(MopInputEvent){MOP_INPUT_POINTER_UP, ev.button.x,
                                               ev.button.y, 0, 0, 0});
         } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+          SDL_SetWindowRelativeMouseMode(window, false);
           mop_viewport_input(vp,
                              &(MopInputEvent){.type = MOP_INPUT_SECONDARY_UP});
         }

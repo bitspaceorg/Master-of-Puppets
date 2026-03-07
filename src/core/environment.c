@@ -17,6 +17,9 @@
 /* stb_image for .hdr loading (stbi_loadf) */
 #include "stb_image.h"
 
+/* tinyexr for .exr loading (LoadEXR) */
+#include "tinyexr.h"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -620,6 +623,43 @@ static void generate_procedural_sky(MopViewport *vp) {
 }
 
 /* -------------------------------------------------------------------------
+ * EXR loading helper (via tinyexr)
+ * ------------------------------------------------------------------------- */
+
+static bool has_extension(const char *path, const char *ext) {
+  size_t plen = strlen(path);
+  size_t elen = strlen(ext);
+  if (plen < elen)
+    return false;
+  const char *suffix = path + plen - elen;
+  for (size_t i = 0; i < elen; i++) {
+    char a = suffix[i];
+    char b = ext[i];
+    if (a >= 'A' && a <= 'Z')
+      a += 32;
+    if (b >= 'A' && b <= 'Z')
+      b += 32;
+    if (a != b)
+      return false;
+  }
+  return true;
+}
+
+static float *load_exr(const char *path, int *w, int *h) {
+  float *rgba = NULL;
+  const char *err = NULL;
+  int ret = LoadEXR(&rgba, w, h, path, &err);
+  if (ret != TINYEXR_SUCCESS) {
+    if (err) {
+      MOP_ERROR("failed to load EXR: %s", err);
+      FreeEXRErrorMessage(err);
+    }
+    return NULL;
+  }
+  return rgba; /* already RGBA float32 */
+}
+
+/* -------------------------------------------------------------------------
  * Public API: mop_viewport_set_environment
  * ------------------------------------------------------------------------- */
 
@@ -663,43 +703,58 @@ bool mop_viewport_set_environment(MopViewport *vp,
     return false;
   }
 
-  int w, h, channels;
-  float *rgb_data = stbi_loadf(desc->hdr_path, &w, &h, &channels, 0);
-  if (!rgb_data) {
-    MOP_ERROR("failed to load HDR image: %s", desc->hdr_path);
-    vp->env_type = MOP_ENV_GRADIENT;
-    return false;
-  }
+  int w, h;
+  float *rgba = NULL;
+  bool is_exr = has_extension(desc->hdr_path, ".exr");
 
-  /* Convert RGB→RGBA float */
-  size_t px = (size_t)w * h;
-  float *rgba = malloc(px * 4 * sizeof(float));
-  if (!rgba) {
-    stbi_image_free(rgb_data);
-    vp->env_type = MOP_ENV_GRADIENT;
-    return false;
-  }
-
-  if (channels == 3) {
-    for (size_t i = 0; i < px; i++) {
-      rgba[i * 4 + 0] = rgb_data[i * 3 + 0];
-      rgba[i * 4 + 1] = rgb_data[i * 3 + 1];
-      rgba[i * 4 + 2] = rgb_data[i * 3 + 2];
-      rgba[i * 4 + 3] = 1.0f;
+  if (is_exr) {
+    /* EXR via tinyexr — returns RGBA float32 directly */
+    rgba = load_exr(desc->hdr_path, &w, &h);
+    if (!rgba) {
+      MOP_ERROR("failed to load EXR image: %s", desc->hdr_path);
+      vp->env_type = MOP_ENV_GRADIENT;
+      return false;
     }
-  } else if (channels == 4) {
-    memcpy(rgba, rgb_data, px * 4 * sizeof(float));
   } else {
-    /* Grayscale or other — replicate to RGBA */
-    for (size_t i = 0; i < px; i++) {
-      float val = rgb_data[i * channels];
-      rgba[i * 4 + 0] = val;
-      rgba[i * 4 + 1] = val;
-      rgba[i * 4 + 2] = val;
-      rgba[i * 4 + 3] = 1.0f;
+    /* HDR (or other stbi-supported) via stb_image */
+    int channels;
+    float *rgb_data = stbi_loadf(desc->hdr_path, &w, &h, &channels, 0);
+    if (!rgb_data) {
+      MOP_ERROR("failed to load HDR image: %s", desc->hdr_path);
+      vp->env_type = MOP_ENV_GRADIENT;
+      return false;
     }
+
+    /* Convert to RGBA float */
+    size_t px = (size_t)w * h;
+    rgba = malloc(px * 4 * sizeof(float));
+    if (!rgba) {
+      stbi_image_free(rgb_data);
+      vp->env_type = MOP_ENV_GRADIENT;
+      return false;
+    }
+
+    if (channels == 3) {
+      for (size_t i = 0; i < px; i++) {
+        rgba[i * 4 + 0] = rgb_data[i * 3 + 0];
+        rgba[i * 4 + 1] = rgb_data[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb_data[i * 3 + 2];
+        rgba[i * 4 + 3] = 1.0f;
+      }
+    } else if (channels == 4) {
+      memcpy(rgba, rgb_data, px * 4 * sizeof(float));
+    } else {
+      /* Grayscale or other — replicate to RGBA */
+      for (size_t i = 0; i < px; i++) {
+        float val = rgb_data[i * channels];
+        rgba[i * 4 + 0] = val;
+        rgba[i * 4 + 1] = val;
+        rgba[i * 4 + 2] = val;
+        rgba[i * 4 + 3] = 1.0f;
+      }
+    }
+    stbi_image_free(rgb_data);
   }
-  stbi_image_free(rgb_data);
 
   vp->env_hdr_data = rgba;
   vp->env_width = w;
@@ -713,12 +768,44 @@ bool mop_viewport_set_environment(MopViewport *vp,
     }
   }
 
+  /* Auto-exposure: compute log-average luminance and set exposure so that
+   * the average scene luminance maps to ~0.18 (middle gray) after ACES. */
+  {
+    size_t px = (size_t)w * h;
+    double log_sum = 0.0;
+    size_t count = 0;
+    for (size_t i = 0; i < px; i++) {
+      float r = rgba[i * 4 + 0];
+      float g = rgba[i * 4 + 1];
+      float b = rgba[i * 4 + 2];
+      float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+      if (lum > 1e-6f) {
+        log_sum += log(lum);
+        count++;
+      }
+    }
+    if (count > 0) {
+      float avg_lum = (float)exp(log_sum / (double)count);
+      float auto_exp = 0.18f / avg_lum;
+      /* Clamp to reasonable range */
+      if (auto_exp < 0.01f)
+        auto_exp = 0.01f;
+      if (auto_exp > 16.0f)
+        auto_exp = 16.0f;
+      vp->exposure = auto_exp;
+      if (vp->rhi->set_exposure)
+        vp->rhi->set_exposure(vp->device, auto_exp);
+      MOP_INFO("auto-exposure: avg_lum=%.3f, exposure=%.3f", avg_lum, auto_exp);
+    }
+  }
+
   /* Precompute IBL maps */
   precompute_irradiance(vp);
   precompute_prefiltered(vp);
   precompute_brdf_lut(vp);
 
-  MOP_INFO("loaded HDR environment: %dx%d (%s)", w, h, desc->hdr_path);
+  MOP_INFO("loaded %s environment: %dx%d (%s)", is_exr ? "EXR" : "HDR", w, h,
+           desc->hdr_path);
   return true;
 }
 

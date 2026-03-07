@@ -12,6 +12,16 @@
 #include <mop/types.h>
 
 /* -------------------------------------------------------------------------
+ * Render result — returned by mop_viewport_render
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopRenderResult {
+  MOP_RENDER_OK = 0,
+  MOP_RENDER_ERROR = 1,
+  MOP_RENDER_DEVICE_LOST = 2,
+} MopRenderResult;
+
+/* -------------------------------------------------------------------------
  * Opaque handle — application never sees internals
  * ------------------------------------------------------------------------- */
 
@@ -76,6 +86,13 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
                              MopVec3 up, float fov_degrees, float near_plane,
                              float far_plane);
 
+/* Set camera without reconstructing orbit parameters.  Used by the orbit
+ * camera to avoid asinf() clamping pitch to ±90°. */
+void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
+                                   MopVec3 target, MopVec3 up,
+                                   float fov_degrees, float near_plane,
+                                   float far_plane);
+
 /* -------------------------------------------------------------------------
  * Rendering
  *
@@ -87,7 +104,10 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
  * After rendering, the color buffer is available via mop_viewport_read_color.
  * ------------------------------------------------------------------------- */
 
-void mop_viewport_render(MopViewport *viewport);
+MopRenderResult mop_viewport_render(MopViewport *viewport);
+
+/* Return the last error message from mop_viewport_render, or NULL. */
+const char *mop_viewport_get_last_error(const MopViewport *viewport);
 
 /* -------------------------------------------------------------------------
  * Framebuffer readback

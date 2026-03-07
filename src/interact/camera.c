@@ -19,7 +19,7 @@ MopOrbitCamera mop_orbit_camera_default(void) {
       .fov_degrees = 60.0f,
       .near_plane = 0.1f,
       .far_plane = 100.0f,
-      .max_pitch = 1.5f,
+      .max_pitch = 3.14159265f,
       .target_distance = 4.5f,
   };
 }
@@ -34,19 +34,28 @@ MopVec3 mop_orbit_camera_eye(const MopOrbitCamera *cam) {
 }
 
 void mop_orbit_camera_apply(const MopOrbitCamera *cam, MopViewport *vp) {
-  mop_viewport_set_camera(vp, mop_orbit_camera_eye(cam), cam->target,
-                          (MopVec3){0, 1, 0}, cam->fov_degrees, cam->near_plane,
-                          cam->far_plane);
+  /* Derive up vector from orbit angles (pitch tangent on the sphere).
+   * This is always perpendicular to the view direction, avoiding gimbal
+   * lock at ±90° pitch where a fixed (0,1,0) up would fail. */
+  float sp = sinf(cam->pitch);
+  float cp = cosf(cam->pitch);
+  float sy = sinf(cam->yaw);
+  float cy = cosf(cam->yaw);
+  MopVec3 up = {-sp * sy, cp, -sp * cy};
+  mop_viewport_set_camera_orbit(vp, mop_orbit_camera_eye(cam), cam->target, up,
+                                cam->fov_degrees, cam->near_plane,
+                                cam->far_plane);
 }
 
 void mop_orbit_camera_orbit(MopOrbitCamera *cam, float dx, float dy,
                             float sensitivity) {
   cam->yaw -= dx * sensitivity;
   cam->pitch += dy * sensitivity;
-  if (cam->pitch > cam->max_pitch)
-    cam->pitch = cam->max_pitch;
-  if (cam->pitch < -cam->max_pitch)
-    cam->pitch = -cam->max_pitch;
+  /* Wrap pitch to [-π, π] — free 360° orbit like Blender */
+  while (cam->pitch > (float)M_PI)
+    cam->pitch -= 2.0f * (float)M_PI;
+  while (cam->pitch < -(float)M_PI)
+    cam->pitch += 2.0f * (float)M_PI;
 }
 
 void mop_orbit_camera_pan(MopOrbitCamera *cam, float dx, float dy) {
@@ -59,11 +68,12 @@ void mop_orbit_camera_pan(MopOrbitCamera *cam, float dx, float dy) {
 }
 
 void mop_orbit_camera_zoom(MopOrbitCamera *cam, float delta) {
-  cam->target_distance = cam->distance - delta * 0.3f;
-  if (cam->target_distance < 0.5f)
-    cam->target_distance = 0.5f;
-  if (cam->target_distance > 500.0f)
-    cam->target_distance = 500.0f;
+  cam->distance -= delta * 0.3f;
+  if (cam->distance < 0.5f)
+    cam->distance = 0.5f;
+  if (cam->distance > 500.0f)
+    cam->distance = 500.0f;
+  cam->target_distance = cam->distance;
 }
 
 void mop_orbit_camera_move(MopOrbitCamera *cam, float forward, float right) {
@@ -92,15 +102,17 @@ void mop_orbit_camera_snap_to_view(MopOrbitCamera *cam, MopViewAxis view) {
   if (!cam)
     return;
   /* Spherical coords: eye = target + d*(cos(p)*sin(y), sin(p), cos(p)*cos(y))
-   * Front view: looking along -Z, eye on +Z side → yaw=0, pitch=0
-   * Back:  yaw=π       Right: yaw=-π/2     Left: yaw=π/2
+   * Front(-Z→+Z): eye at -Z → yaw=π
+   * Back(+Z→-Z):  eye at +Z → yaw=0
+   * Right(+X→-X): eye at +X → yaw=π/2
+   * Left(-X→+X):  eye at -X → yaw=-π/2
    * Top:   pitch=π/2   Bottom: pitch=-π/2 */
   static const float views[][2] = {
       /* {yaw, pitch} */
       [MOP_VIEW_FRONT] = {3.14159265f, 0.0f},
       [MOP_VIEW_BACK] = {0.0f, 0.0f},
-      [MOP_VIEW_RIGHT] = {-1.57079633f, 0.0f},
-      [MOP_VIEW_LEFT] = {1.57079633f, 0.0f},
+      [MOP_VIEW_RIGHT] = {1.57079633f, 0.0f},
+      [MOP_VIEW_LEFT] = {-1.57079633f, 0.0f},
       [MOP_VIEW_TOP] = {0.0f, 1.57079633f},
       [MOP_VIEW_BOTTOM] = {0.0f, -1.57079633f},
   };

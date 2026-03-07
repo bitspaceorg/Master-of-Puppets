@@ -99,6 +99,69 @@ void mop_viewport_toggle_element(MopViewport *vp, uint32_t element_index) {
 }
 
 /* -------------------------------------------------------------------------
+ * Multi-object selection
+ * ------------------------------------------------------------------------- */
+
+void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive) {
+  if (!vp || id == 0)
+    return;
+
+  if (!additive) {
+    /* Clear existing selection, then add */
+    vp->selected_count = 0;
+  }
+
+  /* Check if already selected */
+  for (uint32_t i = 0; i < vp->selected_count; i++) {
+    if (vp->selected_ids[i] == id) {
+      if (additive) {
+        /* Toggle: remove it */
+        vp->selected_ids[i] = vp->selected_ids[vp->selected_count - 1];
+        vp->selected_count--;
+        vp->selected_id = vp->selected_count > 0 ? vp->selected_ids[0] : 0;
+      }
+      return;
+    }
+  }
+
+  /* Add to selection */
+  if (vp->selected_count < MOP_MAX_SELECTED) {
+    vp->selected_ids[vp->selected_count] = id;
+    vp->selected_count++;
+  }
+
+  /* Update backward-compat single-select field */
+  vp->selected_id = vp->selected_ids[0];
+}
+
+void mop_viewport_deselect_object(MopViewport *vp, uint32_t id) {
+  if (!vp)
+    return;
+  for (uint32_t i = 0; i < vp->selected_count; i++) {
+    if (vp->selected_ids[i] == id) {
+      vp->selected_ids[i] = vp->selected_ids[vp->selected_count - 1];
+      vp->selected_count--;
+      vp->selected_id = vp->selected_count > 0 ? vp->selected_ids[0] : 0;
+      return;
+    }
+  }
+}
+
+bool mop_viewport_is_object_selected(const MopViewport *vp, uint32_t id) {
+  if (!vp)
+    return false;
+  for (uint32_t i = 0; i < vp->selected_count; i++) {
+    if (vp->selected_ids[i] == id)
+      return true;
+  }
+  return false;
+}
+
+uint32_t mop_viewport_get_selected_count(const MopViewport *vp) {
+  return vp ? vp->selected_count : 0;
+}
+
+/* -------------------------------------------------------------------------
  * Picking helpers
  *
  * These functions are used by the input handler to resolve screen-space

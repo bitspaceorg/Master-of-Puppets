@@ -35,7 +35,7 @@ typedef enum MopEnvironmentType {
 
 typedef struct MopEnvironmentDesc {
   MopEnvironmentType type;
-  const char *hdr_path; /* path to .hdr file (MOP_ENV_HDRI only) */
+  const char *hdr_path; /* path to .hdr or .exr file (MOP_ENV_HDRI only) */
   float rotation;       /* Y-axis rotation in radians */
   float intensity;      /* brightness multiplier (default 1.0) */
 } MopEnvironmentDesc;

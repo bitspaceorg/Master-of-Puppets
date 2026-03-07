@@ -33,8 +33,10 @@ LIB := ../build/lib/libmop.a
 UNAME_S := $(shell uname -s)
 
 PLATFORM_LDFLAGS :=
-ifeq ($(UNAME_S),Linux)
-  PLATFORM_LDFLAGS += -lm -ldl
+ifeq ($(UNAME_S),Darwin)
+  PLATFORM_LDFLAGS += -lc++
+else
+  PLATFORM_LDFLAGS += -lm -ldl -lstdc++
 endif
 
 # -----------------------------------------------------------------------------

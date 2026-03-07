@@ -53,16 +53,21 @@ typedef struct MopVkLight {
 } MopVkLight;         /* 64 bytes per light, std140 aligned */
 
 typedef struct MopVkFragUniforms {
-  float light_dir[4];  /* vec4: xyz + padding          (offset  0) */
-  float ambient;       /* float                        (offset 16) */
-  float opacity;       /* float                        (offset 20) */
-  uint32_t object_id;  /* uint                         (offset 24) */
-  int32_t blend_mode;  /* int                          (offset 28) */
-  int32_t has_texture; /* int                          (offset 32) */
-  int32_t num_lights;  /* int                          (offset 36) */
-  float metallic;      /* float                        (offset 40) */
-  float roughness;     /* float                        (offset 44) */
-  float cam_pos[4];    /* vec4: xyz + padding          (offset 48) */
+  float light_dir[4];     /* vec4: xyz + padding          (offset  0) */
+  float ambient;          /* float                        (offset 16) */
+  float opacity;          /* float                        (offset 20) */
+  uint32_t object_id;     /* uint                         (offset 24) */
+  int32_t blend_mode;     /* int                          (offset 28) */
+  int32_t has_texture;    /* int                          (offset 32) */
+  int32_t num_lights;     /* int                          (offset 36) */
+  float metallic;         /* float                        (offset 40) */
+  float roughness;        /* float                        (offset 44) */
+  int32_t has_normal_map; /* int                          (offset 48) */
+  int32_t has_mr_map;     /* int                          (offset 52) */
+  int32_t has_ao_map;     /* int                          (offset 56) */
+  int32_t _pad_maps;      /* int                          (offset 60) */
+  float cam_pos[4];       /* vec4: xyz + padding          (offset 64) */
+  float emissive[4];      /* vec4: rgb + padding          (offset 80) */
   MopVkLight lights[MOP_VK_MAX_FRAG_LIGHTS]; /* 8 * 64 = 512 bytes   */
 
   /* Shadow mapping (cascade) */
@@ -248,6 +253,36 @@ struct MopRhiDevice {
   VkDescriptorSetLayout grid_desc_layout;
   VkShaderModule grid_frag;
   bool grid_enabled;
+
+  /* Bloom post-process */
+  VkRenderPass bloom_render_pass;
+  VkPipeline bloom_extract_pipeline;
+  VkPipeline bloom_blur_pipeline;
+  VkPipelineLayout bloom_pipeline_layout;
+  VkDescriptorSetLayout bloom_desc_layout;
+  VkShaderModule bloom_extract_frag;
+  VkShaderModule bloom_blur_frag;
+  bool bloom_enabled;
+  float bloom_threshold; /* default 1.0 */
+  float bloom_intensity; /* default 0.5 */
+
+  /* SSAO */
+  VkRenderPass ssao_render_pass;
+  VkPipeline ssao_pipeline;
+  VkPipeline ssao_blur_pipeline;
+  VkPipelineLayout ssao_pipeline_layout;
+  VkDescriptorSetLayout ssao_desc_layout;
+  VkShaderModule ssao_frag;
+  VkShaderModule ssao_blur_frag;
+  VkImage ssao_noise_image;
+  VkDeviceMemory ssao_noise_memory;
+  VkImageView ssao_noise_view;
+  VkBuffer ssao_kernel_ubo;
+  VkDeviceMemory ssao_kernel_mem;
+  bool ssao_enabled;
+
+  /* Cached projection matrix (stored during draw, used by SSAO in frame_end) */
+  float cached_projection[16];
 };
 
 /* -------------------------------------------------------------------------
@@ -327,6 +362,29 @@ struct MopRhiFramebuffer {
   void *instance_mapped;
   VkDeviceSize instance_buf_size; /* allocated size in bytes */
   VkDeviceSize instance_offset;   /* current write offset */
+
+  /* Bloom mip chain (half-res, R16G16B16A16_SFLOAT) */
+#define MOP_VK_BLOOM_LEVELS 5
+  VkImage bloom_images[MOP_VK_BLOOM_LEVELS];
+  VkDeviceMemory bloom_memory[MOP_VK_BLOOM_LEVELS];
+  VkImageView bloom_views[MOP_VK_BLOOM_LEVELS];
+  VkFramebuffer bloom_fbs[MOP_VK_BLOOM_LEVELS];
+
+  /* SSAO attachments (R8_UNORM) */
+  VkImage ssao_image;
+  VkDeviceMemory ssao_memory;
+  VkImageView ssao_view;
+  VkFramebuffer ssao_fb;
+  VkImage ssao_blur_image;
+  VkDeviceMemory ssao_blur_memory;
+  VkImageView ssao_blur_view;
+  VkFramebuffer ssao_blur_fb;
+
+  /* Persistent overlay SSBO (reused across frames, grows with power-of-2) */
+  VkBuffer overlay_ssbo;
+  VkDeviceMemory overlay_ssbo_mem;
+  void *overlay_ssbo_mapped;
+  VkDeviceSize overlay_ssbo_size; /* current allocated size in bytes */
 };
 
 /* -------------------------------------------------------------------------
@@ -446,6 +504,24 @@ VkPipeline mop_vk_create_overlay_pipeline(struct MopRhiDevice *dev);
 
 /* Create the analytical grid pipeline (fullscreen triangle + grid shader). */
 VkPipeline mop_vk_create_grid_pipeline(struct MopRhiDevice *dev);
+
+/* Create the bloom render pass (R16G16B16A16_SFLOAT, single color). */
+VkResult mop_vk_create_bloom_render_pass(VkDevice device, VkRenderPass *out);
+
+/* Create the bloom extract pipeline (fullscreen triangle + threshold). */
+VkPipeline mop_vk_create_bloom_extract_pipeline(struct MopRhiDevice *dev);
+
+/* Create the bloom blur pipeline (fullscreen triangle + 9-tap Gaussian). */
+VkPipeline mop_vk_create_bloom_blur_pipeline(struct MopRhiDevice *dev);
+
+/* Create the SSAO render pass (R8_UNORM, single color attachment). */
+VkResult mop_vk_create_ssao_render_pass(VkDevice device, VkRenderPass *out);
+
+/* Create the SSAO pipeline (fullscreen triangle + hemisphere sampling). */
+VkPipeline mop_vk_create_ssao_pipeline(struct MopRhiDevice *dev);
+
+/* Create the SSAO blur pipeline (fullscreen triangle + bilateral blur). */
+VkPipeline mop_vk_create_ssao_blur_pipeline(struct MopRhiDevice *dev);
 
 /* -------------------------------------------------------------------------
  * Utility: one-shot command buffer for upload/transition

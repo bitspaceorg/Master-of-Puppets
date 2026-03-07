@@ -14,17 +14,6 @@
  * Constants
  * ------------------------------------------------------------------------- */
 
-#define CAM_ID_BASE 0xFFFE0000u
-#define CAM_ICON_SIZE 0.02f /* tiny — picking handled via screen-space */
-#define CAM_PI 3.14159265358979323846f
-
-/* -------------------------------------------------------------------------
- * Forward declarations for internal helpers
- * ------------------------------------------------------------------------- */
-
-static void regenerate_icon(MopViewport *vp, MopCameraObject *cam,
-                            uint32_t cam_index);
-
 /* -------------------------------------------------------------------------
  * Add / remove cameras
  * ------------------------------------------------------------------------- */
@@ -40,11 +29,9 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
 
   /* Find first inactive slot */
   MopCameraObject *cam = NULL;
-  uint32_t slot = 0;
   for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
     if (!vp->cameras[i].active) {
       cam = &vp->cameras[i];
-      slot = i;
       break;
     }
   }
@@ -75,9 +62,6 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
   cam->icon_mesh = NULL;
 
   vp->camera_count++;
-
-  /* Generate picking mesh (icon only — 2D overlay handles visuals) */
-  regenerate_icon(vp, cam, slot);
 
   return cam;
 }
@@ -242,86 +226,4 @@ MopCameraObject *mop_viewport_get_camera(const MopViewport *vp,
     }
   }
   return NULL;
-}
-
-/* -------------------------------------------------------------------------
- * Internal helpers
- * ------------------------------------------------------------------------- */
-
-/* -------------------------------------------------------------------------
- * Camera icon mesh — tiny pick target at camera position
- * Frustum visuals are handled entirely by the 2D overlay.
- * ------------------------------------------------------------------------- */
-
-static void regenerate_icon(MopViewport *vp, MopCameraObject *cam,
-                            uint32_t cam_index) {
-  if (!vp || !cam)
-    return;
-
-  /* Use the camera's object_id so clicking the icon selects it */
-  uint32_t icon_id = cam->object_id;
-
-  /* Tiny box in local space (centered at origin).
-   * mesh->position places it at the camera world position.
-   * Picking is handled via screen-space — this just provides the
-   * gizmo target mesh and a few-pixel pick buffer entry. */
-  float s = CAM_ICON_SIZE;
-  MopColor color = vp->theme.camera_frustum_color;
-
-  /* 8 corners of a cube centered at origin */
-  MopVec3 box[8] = {{-s, -s, -s}, {s, -s, -s}, {s, s, -s}, {-s, s, -s},
-                    {-s, -s, s},  {s, -s, s},  {s, s, s},  {-s, s, s}};
-
-  /* 6 faces, 2 triangles each = 12 triangles = 36 indices */
-  /* Each face has its own 4 vertices with proper normals = 24 total verts */
-  static const int faces[6][4] = {
-      {0, 1, 2, 3}, /* back  (-Z) */
-      {4, 5, 6, 7}, /* front (+Z) */
-      {0, 1, 5, 4}, /* bottom (-Y) */
-      {2, 3, 7, 6}, /* top   (+Y) */
-      {0, 3, 7, 4}, /* left  (-X) */
-      {1, 2, 6, 5}  /* right (+X) */
-  };
-  static const MopVec3 normals[6] = {{0, 0, -1}, {0, 0, 1},  {0, -1, 0},
-                                     {0, 1, 0},  {-1, 0, 0}, {1, 0, 0}};
-
-  MopVertex verts[24];
-  uint32_t indices[36];
-
-  for (int f = 0; f < 6; f++) {
-    int base = f * 4;
-    for (int v = 0; v < 4; v++) {
-      verts[base + v].position = box[faces[f][v]];
-      verts[base + v].normal = normals[f];
-      verts[base + v].color = color;
-      verts[base + v].u = 0.0f;
-      verts[base + v].v = 0.0f;
-    }
-    int ib = f * 6;
-    indices[ib + 0] = (uint32_t)(base + 0);
-    indices[ib + 1] = (uint32_t)(base + 1);
-    indices[ib + 2] = (uint32_t)(base + 2);
-    indices[ib + 3] = (uint32_t)(base + 0);
-    indices[ib + 4] = (uint32_t)(base + 2);
-    indices[ib + 5] = (uint32_t)(base + 3);
-  }
-
-  MopMeshDesc desc;
-  memset(&desc, 0, sizeof(desc));
-  desc.vertices = verts;
-  desc.vertex_count = 24;
-  desc.indices = indices;
-  desc.index_count = 36;
-  desc.object_id = icon_id;
-
-  if (cam->icon_mesh) {
-    mop_mesh_update_geometry(cam->icon_mesh, vp, verts, 24, indices, 36);
-  } else {
-    cam->icon_mesh = mop_viewport_add_mesh(vp, &desc);
-  }
-
-  /* Place the mesh at the camera's world position via TRS transform.
-   * This ensures gizmo->target->position is correct for gizmo placement. */
-  if (cam->icon_mesh)
-    mop_mesh_set_position(cam->icon_mesh, cam->position);
 }

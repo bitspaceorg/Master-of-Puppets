@@ -70,6 +70,11 @@ typedef struct MopRhiDrawCall {
   /* Texture (Phase 2C) — NULL = no texture */
   MopRhiTexture *texture;
 
+  /* PBR texture maps */
+  MopRhiTexture *normal_map;
+  MopRhiTexture *metallic_roughness_map;
+  MopRhiTexture *ao_map;
+
   /* Blend mode (Phase 6A) */
   MopBlendMode blend_mode;
 
@@ -181,6 +186,15 @@ typedef struct MopRhiBackend {
    * GPU backends store this for the tonemap pass; CPU backend is a no-op
    * (exposure handled by mop_sw_hdr_resolve in the viewport core). */
   void (*set_exposure)(MopRhiDevice *dev, float exposure);
+
+  /* Set bloom parameters for the HDR bloom post-process.
+   * GPU backends store threshold/intensity and enable bloom.
+   * CPU backend is a no-op. */
+  void (*set_bloom)(MopRhiDevice *dev, bool enabled, float threshold,
+                    float intensity);
+
+  /* Enable/disable SSAO. GPU backends toggle the SSAO pass. */
+  void (*set_ssao)(MopRhiDevice *dev, bool enabled);
 
   /* Set IBL textures for environment-based lighting.
    * GPU backends store image views for descriptor binding.

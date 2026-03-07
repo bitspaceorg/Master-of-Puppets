@@ -56,7 +56,15 @@ bool mop_sw_framebuffer_alloc(MopSwFramebuffer *fb, int width, int height) {
   if (!fb->object_id)
     goto fail_id;
 
+  fb->fxaa_scratch = malloc(pixel_count * 4 * sizeof(uint8_t));
+  if (!fb->fxaa_scratch)
+    goto fail_fxaa;
+
   return true;
+
+fail_fxaa:
+  free(fb->object_id);
+  fb->object_id = NULL;
 
 fail_id:
   free(fb->depth);
@@ -78,10 +86,12 @@ void mop_sw_framebuffer_free(MopSwFramebuffer *fb) {
   free(fb->color_hdr);
   free(fb->depth);
   free(fb->object_id);
+  free(fb->fxaa_scratch);
   fb->color = NULL;
   fb->color_hdr = NULL;
   fb->depth = NULL;
   fb->object_id = NULL;
+  fb->fxaa_scratch = NULL;
   fb->width = 0;
   fb->height = 0;
 }
@@ -2599,9 +2609,9 @@ void mop_sw_fxaa(MopSwFramebuffer *fb) {
   if (w < 3 || h < 3)
     return;
 
-  /* Allocate temporary copy of color buffer */
+  /* Use persistent scratch buffer for FXAA source copy */
   size_t buf_size = (size_t)w * (size_t)h * 4;
-  uint8_t *src = malloc(buf_size);
+  uint8_t *src = fb->fxaa_scratch;
   if (!src)
     return;
   memcpy(src, fb->color, buf_size);
@@ -2729,8 +2739,6 @@ void mop_sw_fxaa(MopSwFramebuffer *fb) {
   }
 
 #undef FXAA_LUMA
-
-  free(src);
 }
 
 /* -------------------------------------------------------------------------

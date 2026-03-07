@@ -169,6 +169,20 @@ void mop_viewport_set_post_effects(MopViewport *viewport, uint32_t effects) {
   if (!viewport)
     return;
   viewport->post_effects = effects;
+
+  /* Propagate bloom enable/disable to GPU backend */
+  if (viewport->rhi && viewport->device && viewport->rhi->set_bloom) {
+    bool enabled = (effects & MOP_POST_BLOOM) != 0;
+    viewport->rhi->set_bloom(viewport->device, enabled,
+                             viewport->bloom_threshold,
+                             viewport->bloom_intensity);
+  }
+
+  /* Propagate SSAO enable/disable to GPU backend */
+  if (viewport->rhi && viewport->device && viewport->rhi->set_ssao) {
+    bool enabled = (effects & MOP_POST_SSAO) != 0;
+    viewport->rhi->set_ssao(viewport->device, enabled);
+  }
 }
 
 void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog) {
@@ -184,4 +198,18 @@ void mop_viewport_set_exposure(MopViewport *vp, float exposure) {
 
 float mop_viewport_get_exposure(const MopViewport *vp) {
   return vp ? vp->exposure : 1.0f;
+}
+
+void mop_viewport_set_bloom(MopViewport *vp, float threshold, float intensity) {
+  if (!vp)
+    return;
+  vp->bloom_threshold = threshold > 0.0f ? threshold : 0.01f;
+  vp->bloom_intensity = intensity > 0.0f ? intensity : 0.0f;
+
+  /* Propagate to GPU backend */
+  if (vp->rhi && vp->device && vp->rhi->set_bloom) {
+    bool enabled = (vp->post_effects & MOP_POST_BLOOM) != 0;
+    vp->rhi->set_bloom(vp->device, enabled, vp->bloom_threshold,
+                       vp->bloom_intensity);
+  }
 }

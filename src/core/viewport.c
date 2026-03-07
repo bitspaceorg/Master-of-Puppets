@@ -165,8 +165,13 @@ static MopMesh *create_grid(MopViewport *vp) {
  * ------------------------------------------------------------------------- */
 
 static void create_gradient_bg(MopViewport *vp) {
+  /* Alpha=0 marks background pixels so the tonemap pass skips
+   * exposure / ACES for them — background brightness must stay
+   * constant regardless of the exposure slider. */
   MopColor c_top = vp->theme.bg_top;
+  c_top.a = 0.0f;
   MopColor c_bot = vp->theme.bg_bottom;
+  c_bot.a = 0.0f;
   MopVec3 n = {0, 0, 1};
 
   MopVertex verts[4] = {
@@ -458,6 +463,8 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   vp->shading_mode = MOP_SHADING_SMOOTH;
   vp->post_effects = MOP_POST_GAMMA | MOP_POST_FXAA;
   vp->exposure = 1.0f;
+  vp->bloom_threshold = 1.0f;
+  vp->bloom_intensity = 0.5f;
   vp->env_type = MOP_ENV_GRADIENT;
   vp->env_intensity = 1.0f;
   vp->mesh_count = 0;
@@ -506,6 +513,7 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
 
   /* Interaction state */
   vp->selected_id = 0;
+  vp->selected_count = 0;
   vp->interact_state = MOP_INTERACT_IDLE;
   vp->drag_axis = MOP_GIZMO_AXIS_NONE;
   vp->event_head = 0;
@@ -622,6 +630,8 @@ void mop_viewport_destroy(MopViewport *viewport) {
 
   free(viewport->overlay_prims);
   free(viewport->ssaa_color_buf);
+  free(viewport->trans_sort_idx);
+  free(viewport->trans_sort_dist);
   mop_sw_framebuffer_free(&viewport->shadow_fb);
   free(viewport->instanced_meshes);
   free(viewport->meshes);
@@ -734,6 +744,35 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
     viewport->camera.near_plane = near_plane;
     viewport->camera.far_plane = far_plane;
   }
+}
+
+void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
+                                   MopVec3 target, MopVec3 up,
+                                   float fov_degrees, float near_plane,
+                                   float far_plane) {
+  if (!viewport)
+    return;
+
+  viewport->cam_eye = eye;
+  viewport->cam_target = target;
+  viewport->cam_up = up;
+  viewport->cam_fov_radians = fov_degrees * (3.14159265358979323846f / 180.0f);
+  viewport->cam_near = near_plane;
+  viewport->cam_far = far_plane;
+
+  viewport->view_matrix = mop_mat4_look_at(eye, target, up);
+
+  float aspect = (float)viewport->width / (float)viewport->height;
+  if (viewport->reverse_z) {
+    viewport->projection_matrix = mop_mat4_perspective_reverse_z(
+        viewport->cam_fov_radians, aspect, near_plane);
+  } else {
+    viewport->projection_matrix = mop_mat4_perspective(
+        viewport->cam_fov_radians, aspect, near_plane, far_plane);
+  }
+  /* Skip orbit parameter reconstruction — the orbit camera already holds
+   * the authoritative pitch/yaw/distance values and asinf() would clamp
+   * pitch to [-π/2, π/2], preventing full vertical orbit. */
 }
 
 MopBackendType mop_viewport_get_backend(MopViewport *viewport) {
@@ -1036,6 +1075,7 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
     mesh->vertex_capacity = new_cap;
   }
   mesh->vertex_count = vertex_count;
+  mesh->aabb_valid = false; /* vertex data changed, invalidate AABB cache */
 
   /* --- Index buffer --- */
   if (index_count <= mesh->index_capacity) {
@@ -1241,7 +1281,19 @@ static uint32_t s_triangle_count;
         .depth_test = (m_->object_id < 0xFFFD0000u),                           \
         .depth_write = true,                                                   \
         .backface_cull = (m_->object_id < 0xFFFD0000u),                        \
-        .texture = m_->texture ? m_->texture->rhi_texture : NULL,              \
+        .texture = (m_->has_material && m_->material.albedo_map)               \
+                       ? m_->material.albedo_map->rhi_texture                  \
+                       : (m_->texture ? m_->texture->rhi_texture : NULL),      \
+        .normal_map = (m_->has_material && m_->material.normal_map)            \
+                          ? m_->material.normal_map->rhi_texture               \
+                          : NULL,                                              \
+        .metallic_roughness_map =                                              \
+            (m_->has_material && m_->material.metallic_roughness_map)          \
+                ? m_->material.metallic_roughness_map->rhi_texture             \
+                : NULL,                                                        \
+        .ao_map = (m_->has_material && m_->material.ao_map)                    \
+                      ? m_->material.ao_map->rhi_texture                       \
+                      : NULL,                                                  \
         .blend_mode = m_->blend_mode,                                          \
         .metallic = m_->has_material ? m_->material.metallic : 0.0f,           \
         .roughness = m_->has_material ? m_->material.roughness : 0.5f,         \
@@ -1563,6 +1615,7 @@ static void pass_shadow(MopViewport *vp) {
 
 /* ---- Pass: opaque scene meshes ---- */
 static void pass_scene_opaque(MopViewport *vp) {
+  MopFrustum frustum = mop_viewport_get_frustum(vp);
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
     struct MopMesh *mesh = &vp->meshes[i];
     if (!mesh->active)
@@ -1573,12 +1626,17 @@ static void pass_scene_opaque(MopViewport *vp) {
       continue;
     if (mesh->object_id >= 0xFFFE0000u)
       continue;
+    /* Frustum cull: skip meshes entirely outside the view frustum */
+    MopAABB world_aabb = mop_mesh_get_aabb_world(mesh, vp);
+    if (mop_frustum_test_aabb(&frustum, world_aabb) == -1)
+      continue;
     EMIT_DRAW(vp, mesh);
   }
 }
 
 /* ---- Pass: transparent scene meshes (back-to-front) ---- */
 static void pass_scene_transparent(MopViewport *vp) {
+  MopFrustum frustum = mop_viewport_get_frustum(vp);
   uint32_t trans_count = 0;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
     struct MopMesh *mesh = &vp->meshes[i];
@@ -1586,28 +1644,43 @@ static void pass_scene_transparent(MopViewport *vp) {
       continue;
     if (mesh->object_id >= 0xFFFE0000u)
       continue;
+    /* Frustum cull transparent meshes too */
+    MopAABB world_aabb = mop_mesh_get_aabb_world(mesh, vp);
+    if (mop_frustum_test_aabb(&frustum, world_aabb) == -1)
+      continue;
     trans_count++;
   }
   if (trans_count == 0)
     return;
 
-  uint32_t *trans_idx = malloc(trans_count * sizeof(uint32_t));
-  float *trans_dist = malloc(trans_count * sizeof(float));
-  if (!trans_idx || !trans_dist) {
-    free(trans_idx);
-    free(trans_dist);
-    MOP_WARN("transparent sort allocation failed, rendering unsorted");
-    /* Fall through to render unsorted */
-    for (uint32_t i = 0; i < vp->mesh_count; i++) {
-      struct MopMesh *mesh = &vp->meshes[i];
-      if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
-        continue;
-      if (mesh->object_id >= 0xFFFE0000u)
-        continue;
-      EMIT_DRAW(vp, mesh);
+  /* Grow persistent sort arrays if needed */
+  if (trans_count > vp->trans_sort_capacity) {
+    uint32_t new_cap = trans_count + (trans_count >> 1); /* 1.5x growth */
+    uint32_t *new_idx = realloc(vp->trans_sort_idx, new_cap * sizeof(uint32_t));
+    float *new_dist = realloc(vp->trans_sort_dist, new_cap * sizeof(float));
+    if (!new_idx || !new_dist) {
+      free(new_idx);
+      free(new_dist);
+      vp->trans_sort_idx = NULL;
+      vp->trans_sort_dist = NULL;
+      vp->trans_sort_capacity = 0;
+      MOP_WARN("transparent sort allocation failed, rendering unsorted");
+      for (uint32_t i = 0; i < vp->mesh_count; i++) {
+        struct MopMesh *mesh = &vp->meshes[i];
+        if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
+          continue;
+        if (mesh->object_id >= 0xFFFE0000u)
+          continue;
+        EMIT_DRAW(vp, mesh);
+      }
+      return;
     }
-    return;
+    vp->trans_sort_idx = new_idx;
+    vp->trans_sort_dist = new_dist;
+    vp->trans_sort_capacity = new_cap;
   }
+  uint32_t *trans_idx = vp->trans_sort_idx;
+  float *trans_dist = vp->trans_sort_dist;
 
   uint32_t ti = 0;
   MopVec3 eye = vp->cam_eye;
@@ -1616,6 +1689,9 @@ static void pass_scene_transparent(MopViewport *vp) {
     if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
       continue;
     if (mesh->object_id >= 0xFFFE0000u)
+      continue;
+    MopAABB world_aabb = mop_mesh_get_aabb_world(mesh, vp);
+    if (mop_frustum_test_aabb(&frustum, world_aabb) == -1)
       continue;
     trans_idx[ti] = i;
     float dx = mesh->world_transform.d[12] - eye.x;
@@ -1642,9 +1718,6 @@ static void pass_scene_transparent(MopViewport *vp) {
   for (uint32_t j = 0; j < trans_count; j++) {
     EMIT_DRAW(vp, &vp->meshes[trans_idx[j]]);
   }
-
-  free(trans_idx);
-  free(trans_dist);
 }
 
 /* ---- Pass: gizmo overlays + light indicators ---- */
@@ -1740,9 +1813,9 @@ static void pass_instanced(MopViewport *vp) {
  * Main render entry point
  * ------------------------------------------------------------------------- */
 
-void mop_viewport_render(MopViewport *viewport) {
+MopRenderResult mop_viewport_render(MopViewport *viewport) {
   if (!viewport)
-    return;
+    return MOP_RENDER_ERROR;
 
   double t_frame_start = mop_profile_now_ms();
 
@@ -2035,6 +2108,16 @@ void mop_viewport_render(MopViewport *viewport) {
       .rasterize_ms = t_rasterize_end - t_rasterize_start,
       .triangle_count = s_triangle_count,
       .pixel_count = (uint32_t)(viewport->width * viewport->height)};
+
+  viewport->last_render_result = MOP_RENDER_OK;
+  viewport->last_render_error[0] = '\0';
+  return MOP_RENDER_OK;
+}
+
+const char *mop_viewport_get_last_error(const MopViewport *viewport) {
+  if (!viewport || viewport->last_render_error[0] == '\0')
+    return NULL;
+  return viewport->last_render_error;
 }
 
 /* -------------------------------------------------------------------------
@@ -2317,34 +2400,39 @@ MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y) {
   int ry = y * sf;
 
   /* First: screen-space picking for chrome (gizmo, light indicators).
-   * These have priority over scene objects — they're always "on top". */
+   * These have priority over scene objects — they're always "on top".
+   * Skip entirely when chrome is hidden — invisible indicators must not
+   * steal picks from scene objects. */
   float mx = (float)x, my = (float)y;
-  uint32_t chrome_id = pick_gizmo_screen(viewport, mx, my);
-  if (chrome_id == 0) {
-    chrome_id = pick_light_screen(viewport, mx, my);
-    /* Don't let the selected light's indicator steal clicks from gizmo handles.
-     * When a light is selected and the gizmo is visible, clicking near the
-     * light indicator would re-select it instead of starting a gizmo drag. */
-    if (chrome_id == viewport->selected_id &&
-        (chrome_id & 0xFFFE0000u) == 0xFFFE0000u &&
-        mop_gizmo_is_visible(viewport->gizmo)) {
-      chrome_id = 0;
+  if (viewport->show_chrome) {
+    uint32_t chrome_id = pick_gizmo_screen(viewport, mx, my);
+    if (chrome_id == 0) {
+      chrome_id = pick_light_screen(viewport, mx, my);
+      /* Don't let the selected light's indicator steal clicks from gizmo
+       * handles. When a light is selected and the gizmo is visible, clicking
+       * near the light indicator would re-select it instead of starting a
+       * gizmo drag. */
+      if (chrome_id == viewport->selected_id &&
+          (chrome_id & 0xFFFE0000u) == 0xFFFE0000u &&
+          mop_gizmo_is_visible(viewport->gizmo)) {
+        chrome_id = 0;
+      }
     }
-  }
-  if (chrome_id != 0) {
-    result.hit = true;
-    result.object_id = chrome_id;
-    result.depth = 0.0f; /* always on top */
-    return result;
-  }
+    if (chrome_id != 0) {
+      result.hit = true;
+      result.object_id = chrome_id;
+      result.depth = 0.0f; /* always on top */
+      return result;
+    }
 
-  /* Screen-space camera pick — generous click target around 2D overlay */
-  uint32_t cam_id = pick_camera_screen(viewport, mx, my);
-  if (cam_id != 0) {
-    result.hit = true;
-    result.object_id = cam_id;
-    result.depth = 0.0f;
-    return result;
+    /* Screen-space camera pick — generous click target around 2D overlay */
+    uint32_t cam_id = pick_camera_screen(viewport, mx, my);
+    if (cam_id != 0) {
+      result.hit = true;
+      result.object_id = cam_id;
+      result.depth = 0.0f;
+      return result;
+    }
   }
 
   /* Fallback: object_id buffer for scene objects */
@@ -2602,10 +2690,10 @@ int mop_viewport_pick_axis_indicator(MopViewport *vp, float mx, float my) {
   MopVec3 dirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
 
   /* Map: axis index → MopViewAxis
-   * +X → LEFT(3),   +Y → BOTTOM(5), +Z → FRONT(0)
-   * -X → RIGHT(2),  -Y → TOP(4),    -Z → BACK(1) */
-  static const int pos_view[] = {3, 5, 0}; /* MOP_VIEW_LEFT, BOTTOM, FRONT */
-  static const int neg_view[] = {2, 4, 1}; /* MOP_VIEW_RIGHT, TOP, BACK */
+   * +X → RIGHT(2),  +Y → TOP(4),    +Z → BACK(1)
+   * -X → LEFT(3),   -Y → BOTTOM(5), -Z → FRONT(0) */
+  static const int pos_view[] = {2, 4, 1}; /* MOP_VIEW_RIGHT, TOP, BACK */
+  static const int neg_view[] = {3, 5, 0}; /* MOP_VIEW_LEFT, BOTTOM, FRONT */
 
   float hit_radius = 16.0f * (float)vp->ssaa_factor;
   float best_dist = hit_radius * hit_radius;

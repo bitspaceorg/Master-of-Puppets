@@ -80,6 +80,10 @@ struct MopMesh {
 
   /* Per-mesh shading mode override (-1 = use viewport default) */
   int shading_mode_override;
+
+  /* Cached local-space AABB for frustum culling */
+  MopAABB aabb_local;
+  bool aabb_valid;
 };
 
 /* -------------------------------------------------------------------------
@@ -217,12 +221,32 @@ typedef struct MopGridParams {
  * ------------------------------------------------------------------------- */
 
 #define MOP_UNDO_CAPACITY 256
+#define MOP_MAX_SELECTED 256
+
+typedef enum MopUndoEntryType {
+  MOP_UNDO_TRS = 0,
+  MOP_UNDO_MATERIAL = 1,
+  MOP_UNDO_BATCH = 2,
+} MopUndoEntryType;
 
 typedef struct MopUndoEntry {
-  uint32_t mesh_index;
-  MopVec3 pos;
-  MopVec3 rot;
-  MopVec3 scale;
+  MopUndoEntryType type;
+  union {
+    struct {
+      uint32_t mesh_index;
+      MopVec3 pos;
+      MopVec3 rot;
+      MopVec3 scale;
+    } trs;
+    struct {
+      uint32_t mesh_index;
+      MopMaterial material;
+    } mat;
+    struct {
+      uint32_t count;
+      struct MopUndoEntry *entries; /* heap-allocated sub-entries */
+    } batch;
+  };
 } MopUndoEntry;
 
 /* -------------------------------------------------------------------------
@@ -319,8 +343,10 @@ struct MopViewport {
   uint32_t axis_ind_vcnt[3];
   uint32_t axis_ind_icnt[3];
 
-  /* Selection */
-  uint32_t selected_id;
+  /* Selection (multi-object) */
+  uint32_t selected_ids[MOP_MAX_SELECTED];
+  uint32_t selected_count;
+  uint32_t selected_id; /* backward compat: selected_ids[0] or 0 */
 
   /* Sub-element selection (Phase 3) */
   MopSelection selection;
@@ -403,6 +429,10 @@ struct MopViewport {
   /* HDR exposure multiplier (default 1.0) */
   float exposure;
 
+  /* Bloom parameters */
+  float bloom_threshold; /* default 1.0 */
+  float bloom_intensity; /* default 0.5 */
+
   /* Environment map (HDRI / procedural sky) */
   MopEnvironmentType env_type;
   MopRhiTexture *env_texture; /* GPU-side HDR texture */
@@ -432,6 +462,15 @@ struct MopViewport {
   /* Subsystem registry — generic dispatch for water, particles, postprocess,
    * etc. */
   MopSubsystemRegistry subsystems;
+
+  /* Pre-allocated transparent sort arrays (reused across frames) */
+  uint32_t *trans_sort_idx;
+  float *trans_sort_dist;
+  uint32_t trans_sort_capacity;
+
+  /* Error tracking for mop_viewport_render */
+  MopRenderResult last_render_result;
+  char last_render_error[256];
 };
 
 /* -------------------------------------------------------------------------
