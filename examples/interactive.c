@@ -477,7 +477,7 @@ int main(int argc, char *argv[]) {
       if (mop_viewport_set_environment(vp, &edesc)) {
         printf("[mop] HDRI loaded: %s\n", hdri);
         /* Show HDRI as skybox background */
-        mop_viewport_set_environment_background(vp, true);
+        mop_viewport_set_environment_background(vp, false);
         /* Sync with auto-exposure set by environment loader */
         sc.exposure = mop_viewport_get_exposure(vp);
       } else {
