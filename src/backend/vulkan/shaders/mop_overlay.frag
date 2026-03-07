@@ -105,8 +105,8 @@ void main() {
             d = abs(sdf_diamond(pixel, p0, prim_radius)) - prim_width * 0.5;
         }
 
-        /* Crisp anti-aliased alpha from SDF: smoothstep over ~1 pixel */
-        float aa = 1.0 - smoothstep(-0.5, 0.5, d);
+        /* Crisp anti-aliased alpha from SDF: tight smoothstep for sharp edges */
+        float aa = 1.0 - smoothstep(-0.2, 0.2, d);
         float alpha = aa * prim_opacity;
 
         if (alpha < 0.004) continue;

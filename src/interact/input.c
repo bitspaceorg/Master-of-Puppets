@@ -169,18 +169,16 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
 
   /* ----- Pointer down ----- */
   case MOP_INPUT_POINTER_DOWN: {
-    /* Test gizmo pick first */
+    /* Test gizmo pick — defer drag until threshold is reached.
+     * This lets the app delay relative-mouse-mode (which breaks
+     * gizmo coords) until we know it's an orbit, not a gizmo drag. */
     MopPickResult p = mop_viewport_pick(vp, (int)event->x, (int)event->y);
     MopGizmoAxis axis = mop_gizmo_test_pick(vp->gizmo, p);
 
-    if (axis != MOP_GIZMO_AXIS_NONE) {
-      vp->interact_state = MOP_INTERACT_GIZMO_DRAG;
-      vp->drag_axis = axis;
-    } else {
-      vp->interact_state = MOP_INTERACT_CLICK_PENDING;
-      vp->click_start_x = event->x;
-      vp->click_start_y = event->y;
-    }
+    vp->interact_state = MOP_INTERACT_CLICK_PENDING;
+    vp->click_start_x = event->x;
+    vp->click_start_y = event->y;
+    vp->pending_gizmo_axis = axis;
     break;
   }
 
@@ -245,8 +243,15 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
     case MOP_INTERACT_CLICK_PENDING: {
       float dx = event->x - vp->click_start_x;
       float dy = event->y - vp->click_start_y;
-      if (dx * dx + dy * dy > CLICK_THRESHOLD * CLICK_THRESHOLD)
-        vp->interact_state = MOP_INTERACT_ORBITING;
+      if (dx * dx + dy * dy > CLICK_THRESHOLD * CLICK_THRESHOLD) {
+        if (vp->pending_gizmo_axis != MOP_GIZMO_AXIS_NONE) {
+          /* User dragged after clicking on a gizmo handle → gizmo drag */
+          vp->interact_state = MOP_INTERACT_GIZMO_DRAG;
+          vp->drag_axis = vp->pending_gizmo_axis;
+        } else {
+          vp->interact_state = MOP_INTERACT_ORBITING;
+        }
+      }
       break;
     }
 
@@ -306,6 +311,20 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
                            .object_id = vp->selected_id,
                            .position = light->position,
                        });
+      } else if (is_camera_object(vp, vp->selected_id)) {
+        /* Dragging a camera object — update its position */
+        MopGizmoDelta d =
+            mop_gizmo_drag(vp->gizmo, vp->drag_axis, event->dx, event->dy);
+        MopCameraObject *cam = find_camera_by_id(vp, vp->selected_id);
+        if (cam) {
+          cam->position = mop_vec3_add(cam->position, d.translate);
+          cam->target = mop_vec3_add(cam->target, d.translate);
+          mop_gizmo_set_position(vp->gizmo, cam->position);
+        }
+        push_event(vp, (MopEvent){.type = MOP_EVENT_TRANSFORM_CHANGED,
+                                  .object_id = vp->selected_id,
+                                  .position = cam ? cam->position
+                                                  : (MopVec3){0, 0, 0}});
       } else {
         /* Regular mesh drag — apply to ALL selected meshes */
         MopGizmoDelta d =

@@ -354,6 +354,7 @@ struct MopViewport {
   /* Interaction state */
   MopInteractState interact_state;
   MopGizmoAxis drag_axis;
+  MopGizmoAxis pending_gizmo_axis; /* gizmo hit on pointer-down, deferred */
   float click_start_x, click_start_y;
 
   /* Event queue (ring buffer) */

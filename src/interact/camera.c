@@ -10,6 +10,10 @@
 #include <mop/interact/camera.h>
 #include <stdbool.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 MopOrbitCamera mop_orbit_camera_default(void) {
   return (MopOrbitCamera){
       .target = {0.0f, 0.4f, 0.0f},

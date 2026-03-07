@@ -644,12 +644,10 @@ int main(int argc, char *argv[]) {
 
       case SDL_EVENT_MOUSE_BUTTON_DOWN:
         if (ev.button.button == SDL_BUTTON_LEFT) {
-          SDL_SetWindowRelativeMouseMode(window, true);
           mop_viewport_input(vp, &(MopInputEvent){MOP_INPUT_POINTER_DOWN,
                                                   ev.button.x, ev.button.y, 0,
                                                   0, 0});
         } else if (ev.button.button == SDL_BUTTON_RIGHT) {
-          SDL_SetWindowRelativeMouseMode(window, true);
           mop_viewport_input(vp, &(MopInputEvent){MOP_INPUT_SECONDARY_DOWN,
                                                   ev.button.x, ev.button.y, 0,
                                                   0, 0});
@@ -658,12 +656,10 @@ int main(int argc, char *argv[]) {
 
       case SDL_EVENT_MOUSE_BUTTON_UP:
         if (ev.button.button == SDL_BUTTON_LEFT) {
-          SDL_SetWindowRelativeMouseMode(window, false);
           mop_viewport_input(vp,
                              &(MopInputEvent){MOP_INPUT_POINTER_UP, ev.button.x,
                                               ev.button.y, 0, 0, 0});
         } else if (ev.button.button == SDL_BUTTON_RIGHT) {
-          SDL_SetWindowRelativeMouseMode(window, false);
           mop_viewport_input(vp,
                              &(MopInputEvent){.type = MOP_INPUT_SECONDARY_UP});
         }
