@@ -30,7 +30,7 @@ int mop_conf_report_json(const char *output_dir,
                          const MopConfRunnerResult *summary) {
   ensure_dir(output_dir);
 
-  char path[512];
+  char path[1024];
   snprintf(path, sizeof(path), "%s/metrics.json", output_dir);
   FILE *f = fopen(path, "w");
   if (!f)
@@ -94,7 +94,7 @@ int mop_conf_report_summary(const char *output_dir,
                             const MopConfShadowResult *shadow) {
   ensure_dir(output_dir);
 
-  char path[512];
+  char path[1024];
   snprintf(path, sizeof(path), "%s/summary.txt", output_dir);
   FILE *f = fopen(path, "w");
   if (!f)
@@ -233,7 +233,7 @@ int mop_conf_report_diff_image(const char *output_dir, uint32_t frame_index,
   }
 
   /* Write diff PNG */
-  char path[512];
+  char path[1024];
   snprintf(path, sizeof(path), "%s/frame_%04u_diff.png", failures_dir,
            frame_index);
   stbi_write_png(path, w, h, 3, diff_rgb, w * 3);
@@ -314,7 +314,7 @@ int mop_conf_report_timings(const char *output_dir, const double *gpu_frame_ms,
   }
   free(sorted);
 
-  char path[512];
+  char path[1024];
   snprintf(path, sizeof(path), "%s/timings.json", output_dir);
   FILE *f = fopen(path, "w");
   if (!f)
@@ -364,7 +364,7 @@ int mop_conf_report_memory(const char *output_dir, const double *rss_samples_kb,
 
   ensure_dir(output_dir);
 
-  char path[512];
+  char path[1024];
   snprintf(path, sizeof(path), "%s/memory.json", output_dir);
   FILE *f = fopen(path, "w");
   if (!f)
@@ -399,7 +399,7 @@ int mop_conf_report_validation_log(const char *output_dir,
 
   ensure_dir(output_dir);
 
-  char path[512];
+  char path[1024];
   snprintf(path, sizeof(path), "%s/validation.log", output_dir);
   FILE *f = fopen(path, "w");
   if (!f)
