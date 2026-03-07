@@ -36,17 +36,6 @@ test:linux-clang:
   <<: *test_template
   image: silkeh/clang:latest
 
-# --- macOS (Clang) ---
-build:macos-clang:
-  <<: *build_template
-  tags:
-    - macos
-
-test:macos-clang:
-  <<: *test_template
-  tags:
-    - macos
-
 # --- Conformance ---
 .conformance_template: &conformance_template
   stage: conformance
