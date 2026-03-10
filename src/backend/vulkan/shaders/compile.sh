@@ -82,6 +82,7 @@ compile_shader "$SCRIPT_DIR/mop_overlay.frag" "mop_overlay_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_grid.frag" "mop_grid_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_bloom_extract.frag" "mop_bloom_extract_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_bloom_blur.frag" "mop_bloom_blur_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_bloom_upsample.frag" "mop_bloom_upsample_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_ssao.frag" "mop_ssao_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_ssao_blur.frag" "mop_ssao_blur_frag_spv"
 

@@ -131,7 +131,24 @@ static void ensure_sphere(void) {
   sphere_generated = true;
 }
 
-/* Checker texture generation removed — ground plane removed */
+/* Generate a checker texture (RGBA8, `checks` squares per side) */
+#define CHECKER_SIZE 256
+#define CHECKER_SQUARES 8
+
+static void generate_checker(uint8_t *rgba, int size, int checks) {
+  int sq = size / checks;
+  for (int y = 0; y < size; y++) {
+    for (int x = 0; x < size; x++) {
+      int cx = x / sq, cy = y / sq;
+      uint8_t v = ((cx + cy) & 1) ? 200 : 50;
+      int i = (y * size + x) * 4;
+      rgba[i + 0] = v;
+      rgba[i + 1] = v;
+      rgba[i + 2] = v;
+      rgba[i + 3] = 255;
+    }
+  }
+}
 
 /* =========================================================================
  * Build the scene
@@ -202,6 +219,22 @@ static void build_scene(MopViewport *vp, Scene *sc) {
                             .metallic = 1.0f,
                             .roughness = 0.1f,
                         });
+
+  /* ---- Checker texture for pedestal cubes ---- */
+  {
+    uint8_t *checker_rgba = malloc(CHECKER_SIZE * CHECKER_SIZE * 4);
+    if (checker_rgba) {
+      generate_checker(checker_rgba, CHECKER_SIZE, CHECKER_SQUARES);
+      sc->checker_tex = mop_viewport_create_texture(vp, CHECKER_SIZE,
+                                                    CHECKER_SIZE, checker_rgba);
+      free(checker_rgba);
+      if (sc->checker_tex) {
+        mop_mesh_set_texture(sc->pedestal_base, sc->checker_tex);
+        mop_mesh_set_texture(sc->pedestal_mid, sc->checker_tex);
+        mop_mesh_set_texture(sc->pedestal_top, sc->checker_tex);
+      }
+    }
+  }
 
   /* ---- Orbiting spheres ---- */
   static const MopColor orbit_colors[] = {
@@ -477,7 +510,7 @@ int main(int argc, char *argv[]) {
       if (mop_viewport_set_environment(vp, &edesc)) {
         printf("[mop] HDRI loaded: %s\n", hdri);
         /* Show HDRI as skybox background */
-        mop_viewport_set_environment_background(vp, false);
+        mop_viewport_set_environment_background(vp, true);
         /* Sync with auto-exposure set by environment loader */
         sc.exposure = mop_viewport_get_exposure(vp);
       } else {

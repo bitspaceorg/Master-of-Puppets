@@ -281,9 +281,12 @@ static MopRhiDevice *vk_device_create(void) {
     VkSampleCountFlags supported =
         dev->dev_props.limits.framebufferColorSampleCounts &
         dev->dev_props.limits.framebufferDepthSampleCounts;
-    dev->msaa_samples = (supported & VK_SAMPLE_COUNT_4_BIT)
-                            ? VK_SAMPLE_COUNT_4_BIT
-                            : VK_SAMPLE_COUNT_1_BIT;
+    if (supported & VK_SAMPLE_COUNT_4_BIT)
+      dev->msaa_samples = VK_SAMPLE_COUNT_4_BIT;
+    else if (supported & VK_SAMPLE_COUNT_2_BIT)
+      dev->msaa_samples = VK_SAMPLE_COUNT_2_BIT;
+    else
+      dev->msaa_samples = VK_SAMPLE_COUNT_1_BIT;
     MOP_INFO("[VK] MSAA: %dx", (int)dev->msaa_samples);
   }
 
@@ -461,7 +464,23 @@ static MopRhiDevice *vk_device_create(void) {
   };
   r = vkCreateSampler(dev->device, &samp_ci, NULL, &dev->default_sampler);
   if (r != VK_SUCCESS) {
-    MOP_ERROR("[VK] vkCreateSampler failed: %d", r);
+    MOP_ERROR("[VK] vkCreateSampler (default) failed: %d", r);
+    goto fail;
+  }
+
+  /* Clamp-to-edge sampler for screen-space post-processing */
+  VkSamplerCreateInfo clamp_ci = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_LINEAR,
+      .minFilter = VK_FILTER_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .maxLod = 1.0f,
+  };
+  r = vkCreateSampler(dev->device, &clamp_ci, NULL, &dev->clamp_sampler);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] vkCreateSampler (clamp) failed: %d", r);
     goto fail;
   }
 
@@ -712,8 +731,14 @@ static MopRhiDevice *vk_device_create(void) {
       if (dev->shadow_vert && dev->shadow_frag) {
         dev->shadow_pipeline = mop_vk_create_shadow_pipeline(dev);
         if (dev->shadow_pipeline) {
-          dev->shadows_enabled = true;
-          MOP_INFO("[VK] cascade shadow mapping enabled (%dx%d, %d cascades)",
+          /* Shadow pipeline created but shadow RENDERING pass is not yet
+           * implemented (vk_compute_cascades is never called, no shadow
+           * draw commands are recorded).  Keep shadows_enabled = false
+           * to prevent the shader from sampling the uninitialized shadow
+           * depth texture.  TODO: implement shadow rendering pass. */
+          dev->shadows_enabled = false;
+          MOP_INFO("[VK] shadow pipeline ready (%dx%d, %d cascades) — "
+                   "rendering pass not yet implemented",
                    MOP_VK_SHADOW_MAP_SIZE, MOP_VK_SHADOW_MAP_SIZE,
                    MOP_VK_CASCADE_COUNT);
         }
@@ -727,6 +752,19 @@ static MopRhiDevice *vk_device_create(void) {
     }
   }
 shadow_done:
+
+  /* Transition shadow image to a valid layout so descriptor bindings don't
+   * reference UNDEFINED-layout memory (causes corruption on MoltenVK). */
+  if (dev->shadow_image && !dev->shadows_enabled) {
+    VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+    mop_vk_transition_image(cb, dev->shadow_image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED,
+                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, 0,
+                            VK_ACCESS_SHADER_READ_BIT,
+                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    mop_vk_end_oneshot(dev->device, dev->queue, dev->cmd_pool, cb);
+  }
 
   /* ---- Post-processing resources ---- */
   {
@@ -802,30 +840,21 @@ postprocess_done:
     if (tr != VK_SUCCESS) {
       MOP_WARN("[VK] tonemap render pass failed: %d", tr);
     } else {
-      /* Descriptor set layout: HDR + bloom + SSAO samplers */
-      VkDescriptorSetLayoutBinding tm_bindings[3] = {
-          {
-              .binding = 0,
-              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              .descriptorCount = 1,
-              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-          },
-          {
-              .binding = 1,
-              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              .descriptorCount = 1,
-              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-          },
-          {
-              .binding = 2,
-              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              .descriptorCount = 1,
-              .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-          },
-      };
+      /* Descriptor set layout: HDR + bloom[0..4] + SSAO (7 samplers).
+       * Multi-level bloom is combined directly in the tonemap shader to
+       * avoid a separate upsample chain (TBDR issues on MoltenVK). */
+      VkDescriptorSetLayoutBinding tm_bindings[7];
+      for (int b = 0; b < 7; b++) {
+        tm_bindings[b] = (VkDescriptorSetLayoutBinding){
+            .binding = (uint32_t)b,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+      }
       VkDescriptorSetLayoutCreateInfo tm_layout_ci = {
           .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-          .bindingCount = 3,
+          .bindingCount = 7,
           .pBindings = tm_bindings,
       };
       tr = vkCreateDescriptorSetLayout(dev->device, &tm_layout_ci, NULL,
@@ -933,6 +962,51 @@ tonemap_done:
           dev->bloom_blur_frag) {
         dev->bloom_extract_pipeline = mop_vk_create_bloom_extract_pipeline(dev);
         dev->bloom_blur_pipeline = mop_vk_create_bloom_blur_pipeline(dev);
+
+        /* Two-texture upsample: descriptor layout with 2 samplers */
+        VkDescriptorSetLayoutBinding up_bindings[2] = {
+            {
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+            {
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+        };
+        VkDescriptorSetLayoutCreateInfo up_layout_ci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 2,
+            .pBindings = up_bindings,
+        };
+        vkCreateDescriptorSetLayout(dev->device, &up_layout_ci, NULL,
+                                    &dev->bloom_upsample_desc_layout);
+
+        VkPushConstantRange up_push = {
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = 16,
+        };
+        VkPipelineLayoutCreateInfo up_pl_ci = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &dev->bloom_upsample_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &up_push,
+        };
+        vkCreatePipelineLayout(dev->device, &up_pl_ci, NULL,
+                               &dev->bloom_upsample_pl_layout);
+
+        dev->bloom_upsample_frag =
+            create_shader_module(dev->device, mop_bloom_upsample_frag_spv,
+                                 mop_bloom_upsample_frag_spv_size);
+        if (dev->bloom_upsample_frag && dev->bloom_upsample_pl_layout)
+          dev->bloom_upsample_pipeline =
+              mop_vk_create_bloom_upsample_pipeline(dev);
 
         if (dev->bloom_extract_pipeline && dev->bloom_blur_pipeline) {
           dev->bloom_threshold = 1.0f;
@@ -1312,6 +1386,8 @@ fail:
       if (dev->black_memory)
         vkFreeMemory(d, dev->black_memory, NULL);
 
+      if (dev->clamp_sampler)
+        vkDestroySampler(d, dev->clamp_sampler, NULL);
       if (dev->default_sampler)
         vkDestroySampler(d, dev->default_sampler, NULL);
       if (dev->desc_pool)
@@ -1418,16 +1494,24 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyPipeline(d, dev->bloom_extract_pipeline, NULL);
     if (dev->bloom_blur_pipeline)
       vkDestroyPipeline(d, dev->bloom_blur_pipeline, NULL);
+    if (dev->bloom_upsample_pipeline)
+      vkDestroyPipeline(d, dev->bloom_upsample_pipeline, NULL);
     if (dev->bloom_pipeline_layout)
       vkDestroyPipelineLayout(d, dev->bloom_pipeline_layout, NULL);
+    if (dev->bloom_upsample_pl_layout)
+      vkDestroyPipelineLayout(d, dev->bloom_upsample_pl_layout, NULL);
     if (dev->bloom_desc_layout)
       vkDestroyDescriptorSetLayout(d, dev->bloom_desc_layout, NULL);
+    if (dev->bloom_upsample_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->bloom_upsample_desc_layout, NULL);
     if (dev->bloom_render_pass)
       vkDestroyRenderPass(d, dev->bloom_render_pass, NULL);
     if (dev->bloom_extract_frag)
       vkDestroyShaderModule(d, dev->bloom_extract_frag, NULL);
     if (dev->bloom_blur_frag)
       vkDestroyShaderModule(d, dev->bloom_blur_frag, NULL);
+    if (dev->bloom_upsample_frag)
+      vkDestroyShaderModule(d, dev->bloom_upsample_frag, NULL);
 
     /* SSAO cleanup */
     if (dev->ssao_pipeline)
@@ -1755,6 +1839,23 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     return;
   }
 
+  /* R32_SFLOAT copy of depth for overlay pass sampling.
+   * MoltenVK can't reliably sample D32_SFLOAT across CB boundaries. */
+  r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height,
+      VK_FORMAT_R32_SFLOAT, VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      &fb->depth_copy_image, &fb->depth_copy_memory);
+  if (r != VK_SUCCESS) {
+    MOP_WARN("[VK] fb depth copy image: %d", r);
+  } else {
+    r = mop_vk_create_image_view(
+        dev->device, fb->depth_copy_image, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_ASPECT_COLOR_BIT, &fb->depth_copy_view);
+    if (r != VK_SUCCESS)
+      MOP_WARN("[VK] fb depth copy view: %d", r);
+  }
+
   /* ---- MSAA render targets (when msaa_samples > 1) ---- */
   if (dev->msaa_samples > VK_SAMPLE_COUNT_1_BIT) {
     /* MSAA color (HDR) — TRANSFER_SRC for manual resolve */
@@ -1907,6 +2008,50 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
       bw /= 2;
       bh /= 2;
     }
+
+    /* Bloom upsample output images (separate targets, avoids LOAD_OP_LOAD) */
+    bw = (uint32_t)width / 2;
+    bh = (uint32_t)height / 2;
+    for (int i = 0; i < MOP_VK_BLOOM_LEVELS; i++) {
+      if (bw < 1)
+        bw = 1;
+      if (bh < 1)
+        bh = 1;
+      r = mop_vk_create_image(
+          dev->device, &dev->mem_props, bw, bh, VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_SAMPLE_COUNT_1_BIT,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+          &fb->bloom_up_images[i], &fb->bloom_up_memory[i]);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom upsample image level %d failed: %d", i, r);
+        break;
+      }
+      r = mop_vk_create_image_view(
+          dev->device, fb->bloom_up_images[i], VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_IMAGE_ASPECT_COLOR_BIT, &fb->bloom_up_views[i]);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom upsample view level %d failed: %d", i, r);
+        break;
+      }
+      VkImageView buv = fb->bloom_up_views[i];
+      VkFramebufferCreateInfo bufb_ci = {
+          .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+          .renderPass = dev->bloom_render_pass,
+          .attachmentCount = 1,
+          .pAttachments = &buv,
+          .width = bw,
+          .height = bh,
+          .layers = 1,
+      };
+      r = vkCreateFramebuffer(dev->device, &bufb_ci, NULL,
+                              &fb->bloom_up_fbs[i]);
+      if (r != VK_SUCCESS) {
+        MOP_WARN("[VK] bloom upsample framebuffer level %d failed: %d", i, r);
+        break;
+      }
+      bw /= 2;
+      bh /= 2;
+    }
   }
 
   /* ---- SSAO attachments (R8_UNORM, full resolution) ---- */
@@ -2021,7 +2166,8 @@ static void vk_fb_create_attachments(MopRhiDevice *dev, MopRhiFramebuffer *fb,
   }
 
   r = mop_vk_create_buffer(dev->device, &dev->mem_props, depth_size,
-                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                            &fb->readback_depth_buf, &fb->readback_depth_mem);
@@ -2115,6 +2261,14 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
   if (fb->depth_memory)
     vkFreeMemory(d, fb->depth_memory, NULL);
 
+  /* Depth copy (R32_SFLOAT for overlay sampling) */
+  if (fb->depth_copy_view)
+    vkDestroyImageView(d, fb->depth_copy_view, NULL);
+  if (fb->depth_copy_image)
+    vkDestroyImage(d, fb->depth_copy_image, NULL);
+  if (fb->depth_copy_memory)
+    vkFreeMemory(d, fb->depth_copy_memory, NULL);
+
   /* MSAA render targets */
   if (fb->msaa_color_view)
     vkDestroyImageView(d, fb->msaa_color_view, NULL);
@@ -2198,6 +2352,15 @@ static void vk_fb_destroy_attachments(MopRhiDevice *dev,
       vkDestroyImage(d, fb->bloom_images[i], NULL);
     if (fb->bloom_memory[i])
       vkFreeMemory(d, fb->bloom_memory[i], NULL);
+    /* Bloom upsample output images */
+    if (fb->bloom_up_fbs[i])
+      vkDestroyFramebuffer(d, fb->bloom_up_fbs[i], NULL);
+    if (fb->bloom_up_views[i])
+      vkDestroyImageView(d, fb->bloom_up_views[i], NULL);
+    if (fb->bloom_up_images[i])
+      vkDestroyImage(d, fb->bloom_up_images[i], NULL);
+    if (fb->bloom_up_memory[i])
+      vkFreeMemory(d, fb->bloom_up_memory[i], NULL);
   }
 
   /* SSAO attachments */
@@ -3068,12 +3231,12 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       VkDescriptorSet sds;
       if (vkAllocateDescriptorSets(dev->device, &ds_ai, &sds) == VK_SUCCESS) {
         VkDescriptorImageInfo depth_info = {
-            .sampler = dev->default_sampler,
+            .sampler = dev->clamp_sampler,
             .imageView = fb->depth_view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
         VkDescriptorImageInfo noise_info = {
-            .sampler = dev->default_sampler,
+            .sampler = dev->default_sampler, /* noise tiles — keep REPEAT */
             .imageView = dev->ssao_noise_view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
@@ -3122,9 +3285,13 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
         };
         vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
 
+        /* Y-flipped viewport — must match tonemap's orientation so that
+         * the fullscreen vertex shader's UV flip produces correct UVs.
+         * Without this, the SSAO output is vertically inverted. */
         VkViewport vp = {
+            .y = (float)fb->height,
             .width = (float)fb->width,
-            .height = (float)fb->height,
+            .height = -(float)fb->height,
             .maxDepth = 1.0f,
         };
         VkRect2D sc = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}};
@@ -3147,8 +3314,8 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
           float _pad[2];
         } ssao_pc;
         memcpy(ssao_pc.projection, dev->cached_projection, 64);
-        ssao_pc.radius = 0.5f;
-        ssao_pc.bias = 0.025f;
+        ssao_pc.radius = 0.35f;
+        ssao_pc.bias = 0.04f;
         ssao_pc.kernel_size = 32; /* use 32 of 64 samples for perf */
         ssao_pc.reverse_z = dev->reverse_z ? 1 : 0;
         ssao_pc.noise_scale[0] = (float)fb->width / 4.0f;
@@ -3177,7 +3344,7 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       VkDescriptorSet bds;
       if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) == VK_SUCCESS) {
         VkDescriptorImageInfo ssao_info = {
-            .sampler = dev->default_sampler,
+            .sampler = dev->clamp_sampler,
             .imageView = fb->ssao_view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
@@ -3204,8 +3371,9 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
         vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
 
         VkViewport vp = {
+            .y = (float)fb->height,
             .width = (float)fb->width,
-            .height = (float)fb->height,
+            .height = -(float)fb->height,
             .maxDepth = 1.0f,
         };
         VkRect2D sc = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}};
@@ -3239,16 +3407,18 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
   /* ---- Bloom pass: extract bright → downsample → upsample chain ---- */
   if (dev->bloom_enabled && dev->bloom_extract_pipeline &&
       dev->bloom_blur_pipeline && fb->bloom_fbs[0]) {
-    /* Transition HDR color to SHADER_READ_ONLY for extract sampling */
+    /* Transition HDR color to SHADER_READ_ONLY for extract sampling.
+     * Use BOTTOM_OF_PIPE as src stage to ensure ALL render pass work
+     * (including TBDR tile stores) is fully complete before we read. */
     mop_vk_transition_image(
         dev->cmd_buf, fb->color_image, VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-    /* Transition all bloom images to COLOR_ATTACHMENT_OPTIMAL for first use */
+    /* Transition all bloom images to COLOR_ATTACHMENT_OPTIMAL for use */
     for (int i = 0; i < MOP_VK_BLOOM_LEVELS; i++) {
       if (!fb->bloom_images[i])
         break;
@@ -3285,7 +3455,7 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       VkDescriptorSet bds;
       if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) == VK_SUCCESS) {
         VkDescriptorImageInfo img_info = {
-            .sampler = dev->default_sampler,
+            .sampler = dev->clamp_sampler,
             .imageView = fb->color_view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         };
@@ -3311,8 +3481,9 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
         vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
 
         VkViewport vp = {
+            .y = (float)bloom_heights[0],
             .width = (float)bloom_widths[0],
-            .height = (float)bloom_heights[0],
+            .height = -(float)bloom_heights[0],
             .maxDepth = 1.0f,
         };
         VkRect2D sc = {.extent = {bloom_widths[0], bloom_heights[0]}};
@@ -3333,16 +3504,81 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
 
         vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
         vkCmdEndRenderPass(dev->cmd_buf);
+
+        /* Per-image barrier after extract: flush bloom[0] tile caches */
+        {
+          VkImageMemoryBarrier bar = {
+              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+              .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+              .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+              .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+              .image = fb->bloom_images[0],
+              .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                   .levelCount = 1,
+                                   .layerCount = 1},
+          };
+          vkCmdPipelineBarrier(dev->cmd_buf,
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
+                               NULL, 0, NULL, 1, &bar);
+        }
       }
     }
 
-    /* Step 2: Downsample chain — blur bloom[i-1] → bloom[i] */
+    /* Step 2: Downsample chain — blur bloom[i-1] → bloom[i].
+     * All levels are rendered to keep image layouts valid.  The tonemap
+     * shader only samples levels 0-1; deeper levels have MoltenVK TBDR
+     * corruption but are not read. */
     for (int i = 1; i < MOP_VK_BLOOM_LEVELS; i++) {
       if (!fb->bloom_fbs[i])
         break;
 
-      /* bloom[i-1] is now SHADER_READ_ONLY (from render pass final layout).
-       * bloom[i] needs COLOR_ATTACHMENT — already transitioned above. */
+      /* Two barriers: (1) source bloom[i-1] write→read, (2) dest bloom[i]
+       * transition to COLOR_ATTACHMENT.  Both per-image so MoltenVK emits
+       * proper Metal texture barriers for TBDR tile flushing. */
+      VkImageMemoryBarrier ds_bars[2] = {
+          {
+              /* Source: ensure previous render pass writes are visible */
+              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+              .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+              .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+              .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+              .image = fb->bloom_images[i - 1],
+              .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                   .levelCount = 1,
+                                   .layerCount = 1},
+          },
+          {
+              /* Dest: transition to COLOR_ATTACHMENT right before use.
+               * oldLayout=UNDEFINED discards stale contents (fine with
+               * LOAD_OP_CLEAR). Placing this barrier adjacent to the
+               * render pass avoids MoltenVK losing track of the layout
+               * across intervening render passes. */
+              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+              .srcAccessMask = 0,
+              .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+              .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+              .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+              .image = fb->bloom_images[i],
+              .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                   .levelCount = 1,
+                                   .layerCount = 1},
+          },
+      };
+      vkCmdPipelineBarrier(dev->cmd_buf,
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                           0, 0, NULL, 0, NULL, 2, ds_bars);
+
       VkDescriptorSetAllocateInfo ds_ai = {
           .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
           .descriptorPool = dev->desc_pool,
@@ -3354,7 +3590,7 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
         break;
 
       VkDescriptorImageInfo img_info = {
-          .sampler = dev->default_sampler,
+          .sampler = dev->clamp_sampler,
           .imageView = fb->bloom_views[i - 1],
           .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
       };
@@ -3380,8 +3616,9 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
 
       VkViewport vp = {
+          .y = (float)bloom_heights[i],
           .width = (float)bloom_widths[i],
-          .height = (float)bloom_heights[i],
+          .height = -(float)bloom_heights[i],
           .maxDepth = 1.0f,
       };
       VkRect2D sc = {.extent = {bloom_widths[i], bloom_heights[i]}};
@@ -3393,7 +3630,7 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               dev->bloom_pipeline_layout, 0, 1, &bds, 0, NULL);
 
-      /* Push blur constants: texel_size (of source), direction = horizontal */
+      /* Push blur constants: texel_size (of source), weight = 1.0 */
       float blur_pc[4] = {1.0f / (float)bloom_widths[i - 1],
                           1.0f / (float)bloom_heights[i - 1], 1.0f, 0.0f};
       vkCmdPushConstants(dev->cmd_buf, dev->bloom_pipeline_layout,
@@ -3403,83 +3640,12 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       vkCmdEndRenderPass(dev->cmd_buf);
     }
 
-    /* Step 3: Upsample chain — blur bloom[i+1] → bloom[i] */
-    for (int i = MOP_VK_BLOOM_LEVELS - 2; i >= 0; i--) {
-      if (!fb->bloom_fbs[i])
-        break;
-
-      /* bloom[i+1] is SHADER_READ_ONLY (render pass final layout).
-       * bloom[i] needs transition back to COLOR_ATTACHMENT for reuse. */
-      mop_vk_transition_image(
-          dev->cmd_buf, fb->bloom_images[i], VK_IMAGE_ASPECT_COLOR_BIT,
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
-          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-
-      VkDescriptorSetAllocateInfo ds_ai = {
-          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-          .descriptorPool = dev->desc_pool,
-          .descriptorSetCount = 1,
-          .pSetLayouts = &dev->bloom_desc_layout,
-      };
-      VkDescriptorSet bds;
-      if (vkAllocateDescriptorSets(dev->device, &ds_ai, &bds) != VK_SUCCESS)
-        break;
-
-      VkDescriptorImageInfo img_info = {
-          .sampler = dev->default_sampler,
-          .imageView = fb->bloom_views[i + 1],
-          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-      };
-      VkWriteDescriptorSet write = {
-          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet = bds,
-          .dstBinding = 0,
-          .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-          .pImageInfo = &img_info,
-      };
-      vkUpdateDescriptorSets(dev->device, 1, &write, 0, NULL);
-
-      VkClearValue clear = {.color = {{0, 0, 0, 0}}};
-      VkRenderPassBeginInfo rp_bi = {
-          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-          .renderPass = dev->bloom_render_pass,
-          .framebuffer = fb->bloom_fbs[i],
-          .renderArea = {.extent = {bloom_widths[i], bloom_heights[i]}},
-          .clearValueCount = 1,
-          .pClearValues = &clear,
-      };
-      vkCmdBeginRenderPass(dev->cmd_buf, &rp_bi, VK_SUBPASS_CONTENTS_INLINE);
-
-      VkViewport vp = {
-          .width = (float)bloom_widths[i],
-          .height = (float)bloom_heights[i],
-          .maxDepth = 1.0f,
-      };
-      VkRect2D sc = {.extent = {bloom_widths[i], bloom_heights[i]}};
-      vkCmdSetViewport(dev->cmd_buf, 0, 1, &vp);
-      vkCmdSetScissor(dev->cmd_buf, 0, 1, &sc);
-
-      vkCmdBindPipeline(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        dev->bloom_blur_pipeline);
-      vkCmdBindDescriptorSets(dev->cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              dev->bloom_pipeline_layout, 0, 1, &bds, 0, NULL);
-
-      /* Push blur constants: texel_size (of source), direction = vertical */
-      float blur_pc[4] = {1.0f / (float)bloom_widths[i + 1],
-                          1.0f / (float)bloom_heights[i + 1], 0.0f, 1.0f};
-      vkCmdPushConstants(dev->cmd_buf, dev->bloom_pipeline_layout,
-                         VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, blur_pc);
-
-      vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0);
-      vkCmdEndRenderPass(dev->cmd_buf);
-    }
-
-    /* bloom[0] is now SHADER_READ_ONLY — ready for tonemap sampling.
-     * HDR color is already SHADER_READ_ONLY from the transition above. */
+    /* No upsample chain — bloom levels are combined directly in the tonemap
+     * shader (multi-sample approach).  This avoids TBDR synchronization
+     * issues on MoltenVK/Apple GPUs where rendering to intermediate
+     * bloom_up images corrupts texture reads. All bloom[] images are
+     * already in SHADER_READ_ONLY_OPTIMAL from the downsample chain's
+     * render pass finalLayout. */
   }
 
   /* ---- HDR Tonemap pass: color_image (HDR) → ldr_color_image (LDR) ---- */
@@ -3492,8 +3658,8 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
           dev->cmd_buf, fb->color_image, VK_IMAGE_ASPECT_COLOR_BIT,
           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     }
 
@@ -3507,58 +3673,45 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
     VkDescriptorSet tm_ds;
     VkResult dr = vkAllocateDescriptorSets(dev->device, &ds_ai, &tm_ds);
     if (dr == VK_SUCCESS) {
-      /* Update descriptors: HDR color + bloom + SSAO */
-      VkDescriptorImageInfo tm_img_infos[3] = {
-          {
-              .sampler = dev->default_sampler,
-              .imageView = fb->color_view,
-              .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          },
-          {
-              /* Bloom: use first bloom mip if available, else black fallback */
-              .sampler = dev->default_sampler,
-              .imageView = (dev->bloom_enabled && fb->bloom_views[0])
-                               ? fb->bloom_views[0]
-                               : dev->black_view,
-              .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          },
-          {
-              /* SSAO: use blurred AO if available, else white fallback (no AO)
-               */
-              .sampler = dev->default_sampler,
-              .imageView = (dev->ssao_enabled && fb->ssao_blur_view)
-                               ? fb->ssao_blur_view
-                               : dev->white_view,
-              .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          },
+      /* Update descriptors: HDR + bloom[0..4] + SSAO (7 bindings).
+       * Multi-level bloom is combined directly in the tonemap shader. */
+      VkDescriptorImageInfo tm_img_infos[7];
+      /* Binding 0: HDR color */
+      tm_img_infos[0] = (VkDescriptorImageInfo){
+          .sampler = dev->clamp_sampler,
+          .imageView = fb->color_view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
       };
-      VkWriteDescriptorSet tm_writes[3] = {
-          {
-              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet = tm_ds,
-              .dstBinding = 0,
-              .descriptorCount = 1,
-              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              .pImageInfo = &tm_img_infos[0],
-          },
-          {
-              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet = tm_ds,
-              .dstBinding = 1,
-              .descriptorCount = 1,
-              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              .pImageInfo = &tm_img_infos[1],
-          },
-          {
-              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet = tm_ds,
-              .dstBinding = 2,
-              .descriptorCount = 1,
-              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-              .pImageInfo = &tm_img_infos[2],
-          },
+      /* Bindings 1-5: bloom levels 0-4 */
+      for (int b = 0; b < MOP_VK_BLOOM_LEVELS; b++) {
+        tm_img_infos[1 + b] = (VkDescriptorImageInfo){
+            .sampler = dev->clamp_sampler,
+            .imageView = (dev->bloom_enabled && fb->bloom_views[b])
+                             ? fb->bloom_views[b]
+                             : dev->black_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+      }
+      /* Binding 6: SSAO */
+      tm_img_infos[6] = (VkDescriptorImageInfo){
+          .sampler = dev->clamp_sampler,
+          .imageView = (dev->ssao_enabled && fb->ssao_blur_view)
+                           ? fb->ssao_blur_view
+                           : dev->white_view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
       };
-      vkUpdateDescriptorSets(dev->device, 3, tm_writes, 0, NULL);
+      VkWriteDescriptorSet tm_writes[7];
+      for (int b = 0; b < 7; b++) {
+        tm_writes[b] = (VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = tm_ds,
+            .dstBinding = (uint32_t)b,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &tm_img_infos[b],
+        };
+      }
+      vkUpdateDescriptorSets(dev->device, 7, tm_writes, 0, NULL);
 
       /* Begin tonemap render pass */
       VkClearValue clear = {.color = {{0, 0, 0, 1}}};
@@ -4331,22 +4484,30 @@ static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
                          NULL, 0, NULL, 1, &to_src);
   }
 
-  /* Transition resolved depth: TRANSFER_SRC → SHADER_READ_ONLY for sampling */
-  {
-    VkImageMemoryBarrier depth_to_read = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .image = fb->depth_image,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                             .levelCount = 1,
+  /* Upload depth readback data → R32_SFLOAT copy for shader sampling.
+   * MoltenVK cannot reliably sample D32_SFLOAT depth images across command
+   * buffer boundaries, so we copy the depth data (already in the readback
+   * buffer from the main CB) into a regular R32_SFLOAT color image. */
+  if (fb->depth_copy_image) {
+    mop_vk_transition_image(
+        cb, fb->depth_copy_image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy depth_region = {
+        .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                              .layerCount = 1},
+        .imageExtent = {(uint32_t)fb_width, (uint32_t)fb_height, 1},
     };
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
-                         NULL, 1, &depth_to_read);
+    vkCmdCopyBufferToImage(cb, fb->readback_depth_buf, fb->depth_copy_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &depth_region);
+    mop_vk_transition_image(
+        cb, fb->depth_copy_image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
   }
 
   /* Begin overlay render pass */
@@ -4381,8 +4542,9 @@ static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     VkResult gr = vkAllocateDescriptorSets(dev->device, &grid_ds_ai, &grid_ds);
     if (gr == VK_SUCCESS) {
       VkDescriptorImageInfo grid_depth = {
-          .sampler = dev->default_sampler,
-          .imageView = fb->depth_view,
+          .sampler = dev->clamp_sampler,
+          .imageView =
+              fb->depth_copy_view ? fb->depth_copy_view : fb->depth_view,
           .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
       };
       VkWriteDescriptorSet grid_write = {
@@ -4469,8 +4631,9 @@ static void vk_draw_overlays(MopRhiDevice *dev, MopRhiFramebuffer *fb,
     VkResult dr = vkAllocateDescriptorSets(dev->device, &ds_ai, &ds);
     if (dr == VK_SUCCESS) {
       VkDescriptorImageInfo depth_info = {
-          .sampler = dev->default_sampler,
-          .imageView = fb->depth_view,
+          .sampler = dev->clamp_sampler,
+          .imageView =
+              fb->depth_copy_view ? fb->depth_copy_view : fb->depth_view,
           .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
       };
       VkDescriptorBufferInfo ssbo_info = {

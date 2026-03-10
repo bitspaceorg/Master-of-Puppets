@@ -79,6 +79,7 @@ endif
 # -----------------------------------------------------------------------------
 BUILD_DIR       := build
 INTERACTIVE_OUT := $(BUILD_DIR)/mop_viewport
+SANCTUM_OUT     := $(BUILD_DIR)/dark_sanctum
 
 # -----------------------------------------------------------------------------
 # Shared header dependencies
@@ -90,7 +91,7 @@ COMMON_UI  := common/ui_toolbar.h
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
-.PHONY: all interactive run clean
+.PHONY: all interactive dark_sanctum run run-sanctum clean
 
 all: interactive
 
@@ -110,6 +111,24 @@ else
 endif
 
 run: $(INTERACTIVE_OUT)
+	MOP_BACKEND=vulkan ./$<
+
+# -----------------------------------------------------------------------------
+# Dark Sanctum AAA scene (requires SDL3)
+# -----------------------------------------------------------------------------
+dark_sanctum: $(SANCTUM_OUT)
+
+$(SANCTUM_OUT): dark_sanctum.c $(COMMON_GEO) $(COMMON_SDL) $(LIB) | $(BUILD_DIR)
+ifeq ($(HAS_SDL3),1)
+	$(CC) $(CFLAGS) $(SDL3_CFLAGS) $< $(LIB) $(SDL3_LDFLAGS) $(PLATFORM_LDFLAGS) -lm -o $@
+else
+	@echo "ERROR: SDL3 not found via pkg-config."
+	@echo "       Enter the examples nix shell first:"
+	@echo "         nix develop"
+	@exit 1
+endif
+
+run-sanctum: $(SANCTUM_OUT)
 	MOP_BACKEND=vulkan ./$<
 
 # -----------------------------------------------------------------------------

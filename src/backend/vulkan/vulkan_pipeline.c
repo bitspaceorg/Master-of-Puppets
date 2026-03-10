@@ -70,12 +70,13 @@ VkResult mop_vk_create_render_pass(VkDevice device,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         },
-        /* 3: Resolve color (1x, HDR) */
+        /* 3: Resolve color (1x, HDR) — CLEAR prevents stale tile data
+         * on MoltenVK/Metal TBDR; resolve overwrites all pixels anyway. */
         {
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
             .format = VK_FORMAT_R16G16B16A16_SFLOAT,
             .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -87,7 +88,7 @@ VkResult mop_vk_create_render_pass(VkDevice device,
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
             .format = VK_FORMAT_R32_UINT,
             .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -99,7 +100,7 @@ VkResult mop_vk_create_render_pass(VkDevice device,
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
             .format = VK_FORMAT_D32_SFLOAT,
             .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -167,10 +168,13 @@ VkResult mop_vk_create_render_pass(VkDevice device,
         .dstSubpass = VK_SUBPASS_EXTERNAL,
         .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask =
+            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
+        .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
     };
 
     VkRenderPassCreateInfo2 ci = {
@@ -240,16 +244,20 @@ VkResult mop_vk_create_render_pass(VkDevice device,
       .pDepthStencilAttachment = &depth_ref,
   };
 
-  /* Ensure the render pass transitions are visible before transfer */
+  /* Ensure the render pass transitions are visible before transfer AND
+   * fragment shader reads (post-processing on TBDR GPUs like Apple/MoltenVK
+   * needs the tile store to flush before bloom/SSAO sample the attachments) */
   VkSubpassDependency dep = {
       .srcSubpass = 0,
       .dstSubpass = VK_SUBPASS_EXTERNAL,
       .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
+                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
       .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-      .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+      .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
+      .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
   };
 
   VkRenderPassCreateInfo ci = {
@@ -964,7 +972,7 @@ VkResult mop_vk_create_postprocess_render_pass(VkDevice device,
   VkAttachmentDescription attachment = {
       .format = VK_FORMAT_R8G8B8A8_SRGB,
       .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -1120,7 +1128,7 @@ VkResult mop_vk_create_tonemap_render_pass(VkDevice device, VkRenderPass *out) {
   VkAttachmentDescription attachment = {
       .format = VK_FORMAT_R8G8B8A8_SRGB,
       .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -1730,7 +1738,7 @@ VkResult mop_vk_create_bloom_render_pass(VkDevice device, VkRenderPass *out) {
   VkAttachmentDescription attachment = {
       .format = VK_FORMAT_R16G16B16A16_SFLOAT,
       .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -1749,13 +1757,28 @@ VkResult mop_vk_create_bloom_render_pass(VkDevice device, VkRenderPass *out) {
       .pColorAttachments = &color_ref,
   };
 
-  VkSubpassDependency dep = {
-      .srcSubpass = VK_SUBPASS_EXTERNAL,
-      .dstSubpass = 0,
-      .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+  /* No BY_REGION_BIT: bloom chain uses different-sized framebuffers across
+   * passes; per-region dependencies can cause incomplete tile flushes on
+   * MoltenVK / Apple TBDR GPUs. */
+  VkSubpassDependency deps[2] = {
+      {
+          .srcSubpass = VK_SUBPASS_EXTERNAL,
+          .dstSubpass = 0,
+          .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .dstAccessMask =
+              VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      },
+      {
+          .srcSubpass = 0,
+          .dstSubpass = VK_SUBPASS_EXTERNAL,
+          .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+      },
   };
 
   VkRenderPassCreateInfo ci = {
@@ -1764,8 +1787,8 @@ VkResult mop_vk_create_bloom_render_pass(VkDevice device, VkRenderPass *out) {
       .pAttachments = &attachment,
       .subpassCount = 1,
       .pSubpasses = &subpass,
-      .dependencyCount = 1,
-      .pDependencies = &dep,
+      .dependencyCount = 2,
+      .pDependencies = deps,
   };
 
   return vkCreateRenderPass(device, &ci, NULL, out);
@@ -1984,6 +2007,119 @@ VkPipeline mop_vk_create_bloom_blur_pipeline(struct MopRhiDevice *dev) {
 }
 
 /* =========================================================================
+ * Bloom upsample render pass (LOAD_OP_LOAD for additive blend)
+ *
+ * Same as bloom render pass but preserves existing content so the upsample
+ * uses a two-texture shader to combine the smaller mip blur with the
+ * current level's downsample content.  Uses LOAD_OP_CLEAR render pass
+ * to avoid LOAD_OP_LOAD which fails on MoltenVK / TBDR GPUs.
+ * ========================================================================= */
+
+VkPipeline mop_vk_create_bloom_upsample_pipeline(struct MopRhiDevice *dev) {
+  if (!dev->bloom_upsample_frag || !dev->fullscreen_vert ||
+      !dev->bloom_render_pass || !dev->bloom_upsample_pl_layout)
+    return VK_NULL_HANDLE;
+
+  VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = dev->fullscreen_vert,
+          .pName = "main",
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = dev->bloom_upsample_frag,
+          .pName = "main",
+      },
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+
+  VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_VIEWPORT,
+      VK_DYNAMIC_STATE_SCISSOR,
+  };
+
+  VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamic_states,
+  };
+
+  VkPipelineViewportStateCreateInfo viewport_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+
+  VkPipelineRasterizationStateCreateInfo raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .lineWidth = 1.0f,
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisample = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+
+  VkPipelineDepthStencilStateCreateInfo depth_stencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_FALSE,
+      .depthWriteEnable = VK_FALSE,
+  };
+
+  /* No blending — shader combines both inputs and writes final color */
+  VkPipelineColorBlendAttachmentState blend_att = {
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+
+  VkPipelineColorBlendStateCreateInfo color_blend = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &blend_att,
+  };
+
+  VkGraphicsPipelineCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertex_input,
+      .pInputAssemblyState = &input_assembly,
+      .pViewportState = &viewport_state,
+      .pRasterizationState = &raster,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depth_stencil,
+      .pColorBlendState = &color_blend,
+      .pDynamicState = &dynamic_state,
+      .layout = dev->bloom_upsample_pl_layout,
+      .renderPass = dev->bloom_render_pass,
+      .subpass = 0,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkResult r = vkCreateGraphicsPipelines(dev->device, VK_NULL_HANDLE, 1, &ci,
+                                         NULL, &pipeline);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] bloom upsample pipeline creation failed: %d", r);
+    return VK_NULL_HANDLE;
+  }
+  return pipeline;
+}
+
+/* =========================================================================
  * SSAO render pass (R8_UNORM, single color attachment)
  * ========================================================================= */
 
@@ -1991,7 +2127,7 @@ VkResult mop_vk_create_ssao_render_pass(VkDevice device, VkRenderPass *out) {
   VkAttachmentDescription attachment = {
       .format = VK_FORMAT_R8_UNORM,
       .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -2010,13 +2146,30 @@ VkResult mop_vk_create_ssao_render_pass(VkDevice device, VkRenderPass *out) {
       .pColorAttachments = &color_ref,
   };
 
-  VkSubpassDependency dep = {
-      .srcSubpass = VK_SUBPASS_EXTERNAL,
-      .dstSubpass = 0,
-      .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+  /* Two dependencies to ensure correct read-after-write synchronization:
+   *   EXTERNAL → 0: previous pass's color writes visible to our fragment reads
+   *   0 → EXTERNAL: our color writes visible to next pass's fragment reads */
+  VkSubpassDependency deps[2] = {
+      {
+          .srcSubpass = VK_SUBPASS_EXTERNAL,
+          .dstSubpass = 0,
+          .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .dstAccessMask =
+              VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+      },
+      {
+          .srcSubpass = 0,
+          .dstSubpass = VK_SUBPASS_EXTERNAL,
+          .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+          .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+      },
   };
 
   VkRenderPassCreateInfo ci = {
@@ -2025,8 +2178,8 @@ VkResult mop_vk_create_ssao_render_pass(VkDevice device, VkRenderPass *out) {
       .pAttachments = &attachment,
       .subpassCount = 1,
       .pSubpasses = &subpass,
-      .dependencyCount = 1,
-      .pDependencies = &dep,
+      .dependencyCount = 2,
+      .pDependencies = deps,
   };
 
   return vkCreateRenderPass(device, &ci, NULL, out);

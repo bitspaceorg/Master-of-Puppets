@@ -313,23 +313,24 @@ void main() {
             /* Lambert diffuse (per-channel light color) */
             diffuse_accum += weight * light_color;
 
-            /* GGX Cook-Torrance specular */
-            vec3 h = normalize(l_dir + view_dir);
-            float ndoth = max(dot(n, h), 0.0);
-            float vdoth = max(dot(view_dir, h), 0.0);
+            /* GGX Cook-Torrance specular — only when contribution is non-zero
+             * to prevent inf * 0 = NaN (GGX D can be very large at low roughness) */
+            if (weight > 0.0) {
+                vec3 h = normalize(l_dir + view_dir);
+                float ndoth = max(dot(n, h), 0.0);
+                float vdoth = max(dot(view_dir, h), 0.0);
 
-            float D = distribution_ggx(ndoth, alpha2);
-            float g1l = geometry_schlick_g1(ndotl, k);
-            float G = g1v * g1l;
-            vec3 F = fresnel_schlick(vdoth, f0);
+                float D = distribution_ggx(ndoth, alpha2);
+                float g1l = geometry_schlick_g1(ndotl, k);
+                float G = g1v * g1l;
+                vec3 F = fresnel_schlick(vdoth, f0);
 
-            float spec_denom = max(4.0 * ndotl * ndotv, 1e-6);
-            float spec_term = D * G / spec_denom;
+                float spec_denom = max(4.0 * ndotl * ndotv, 1e-6);
+                float spec_term = min(D * G / spec_denom, 100.0);
 
-            /* Multiply by PI to match energy scale (diffuse omits 1/PI) */
-            specular_accum += spec_term * PI * intensity * attenuation *
-                              spot_factor * ndotl * light_shadow *
-                              F * light_color;
+                /* Multiply by PI to match energy scale (diffuse omits 1/PI) */
+                specular_accum += spec_term * PI * weight * F * light_color;
+            }
         }
 
         /* Final composition */
@@ -361,7 +362,15 @@ void main() {
         lit *= ao;
         lit += frag.emissive.rgb;
 
-        frag_color = vec4(max(lit, vec3(0.0)) * frag.exposure, base.a * frag.opacity);
+        /* Sanitize output: NaN/inf and extreme values corrupt downstream passes
+         * (bloom extract amplifies outlier pixels into visible artifacts).
+         * Cap at 100.0 — ACES tonemaps values > 10 to near-white, so 100 is
+         * far beyond any visible HDR range but prevents specular fireflies. */
+        vec3 final_color = lit * frag.exposure;
+        final_color.r = (final_color.r > 0.0) ? min(final_color.r, 100.0) : 0.0;
+        final_color.g = (final_color.g > 0.0) ? min(final_color.g, 100.0) : 0.0;
+        final_color.b = (final_color.b > 0.0) ? min(final_color.b, 100.0) : 0.0;
+        frag_color = vec4(final_color, base.a * frag.opacity);
     } else {
         /* Legacy single-light fallback (no PBR) */
         vec3 l = normalize(frag.light_dir.xyz);

@@ -53,7 +53,10 @@ void mop_orbit_camera_apply(const MopOrbitCamera *cam, MopViewport *vp) {
 
 void mop_orbit_camera_orbit(MopOrbitCamera *cam, float dx, float dy,
                             float sensitivity) {
-  cam->yaw -= dx * sensitivity;
+  /* When camera is upside down (|pitch| > π/2), flip horizontal orbit
+   * to maintain intuitive mouse direction — matches Blender behavior. */
+  float yaw_sign = (cosf(cam->pitch) < 0.0f) ? -1.0f : 1.0f;
+  cam->yaw -= dx * sensitivity * yaw_sign;
   cam->pitch += dy * sensitivity;
   /* Wrap pitch to [-π, π] — free 360° orbit like Blender */
   while (cam->pitch > (float)M_PI)

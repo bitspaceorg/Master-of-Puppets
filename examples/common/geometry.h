@@ -19,84 +19,132 @@
  * ------------------------------------------------------------------------- */
 
 static const MopVertex CUBE_VERTICES[] = {
-    /* Front (Z+) — red */
+    /* Front (Z+) */
     {.position = {-0.5f, -0.5f, 0.5f},
      .normal = {0, 0, 1},
-     .color = {0.9f, 0.2f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 0},
     {.position = {0.5f, -0.5f, 0.5f},
      .normal = {0, 0, 1},
-     .color = {0.9f, 0.2f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 0},
     {.position = {0.5f, 0.5f, 0.5f},
      .normal = {0, 0, 1},
-     .color = {0.9f, 0.2f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 1},
     {.position = {-0.5f, 0.5f, 0.5f},
      .normal = {0, 0, 1},
-     .color = {0.9f, 0.2f, 0.2f, 1}},
-    /* Back (Z-) — green */
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 1},
+    /* Back (Z-) */
     {.position = {0.5f, -0.5f, -0.5f},
      .normal = {0, 0, -1},
-     .color = {0.2f, 0.9f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 0},
     {.position = {-0.5f, -0.5f, -0.5f},
      .normal = {0, 0, -1},
-     .color = {0.2f, 0.9f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 0},
     {.position = {-0.5f, 0.5f, -0.5f},
      .normal = {0, 0, -1},
-     .color = {0.2f, 0.9f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 1},
     {.position = {0.5f, 0.5f, -0.5f},
      .normal = {0, 0, -1},
-     .color = {0.2f, 0.9f, 0.2f, 1}},
-    /* Top (Y+) — blue */
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 1},
+    /* Top (Y+) */
     {.position = {-0.5f, 0.5f, 0.5f},
      .normal = {0, 1, 0},
-     .color = {0.2f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 0},
     {.position = {0.5f, 0.5f, 0.5f},
      .normal = {0, 1, 0},
-     .color = {0.2f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 0},
     {.position = {0.5f, 0.5f, -0.5f},
      .normal = {0, 1, 0},
-     .color = {0.2f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 1},
     {.position = {-0.5f, 0.5f, -0.5f},
      .normal = {0, 1, 0},
-     .color = {0.2f, 0.2f, 0.9f, 1}},
-    /* Bottom (Y-) — yellow */
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 1},
+    /* Bottom (Y-) */
     {.position = {-0.5f, -0.5f, -0.5f},
      .normal = {0, -1, 0},
-     .color = {0.9f, 0.9f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 0},
     {.position = {0.5f, -0.5f, -0.5f},
      .normal = {0, -1, 0},
-     .color = {0.9f, 0.9f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 0},
     {.position = {0.5f, -0.5f, 0.5f},
      .normal = {0, -1, 0},
-     .color = {0.9f, 0.9f, 0.2f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 1},
     {.position = {-0.5f, -0.5f, 0.5f},
      .normal = {0, -1, 0},
-     .color = {0.9f, 0.9f, 0.2f, 1}},
-    /* Right (X+) — cyan */
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 1},
+    /* Right (X+) */
     {.position = {0.5f, -0.5f, 0.5f},
      .normal = {1, 0, 0},
-     .color = {0.2f, 0.9f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 0},
     {.position = {0.5f, -0.5f, -0.5f},
      .normal = {1, 0, 0},
-     .color = {0.2f, 0.9f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 0},
     {.position = {0.5f, 0.5f, -0.5f},
      .normal = {1, 0, 0},
-     .color = {0.2f, 0.9f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 1},
     {.position = {0.5f, 0.5f, 0.5f},
      .normal = {1, 0, 0},
-     .color = {0.2f, 0.9f, 0.9f, 1}},
-    /* Left (X-) — magenta */
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 1},
+    /* Left (X-) */
     {.position = {-0.5f, -0.5f, -0.5f},
      .normal = {-1, 0, 0},
-     .color = {0.9f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 0},
     {.position = {-0.5f, -0.5f, 0.5f},
      .normal = {-1, 0, 0},
-     .color = {0.9f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 0},
     {.position = {-0.5f, 0.5f, 0.5f},
      .normal = {-1, 0, 0},
-     .color = {0.9f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 1,
+     .v = 1},
     {.position = {-0.5f, 0.5f, -0.5f},
      .normal = {-1, 0, 0},
-     .color = {0.9f, 0.2f, 0.9f, 1}},
+     .color = {1, 1, 1, 1},
+     .u = 0,
+     .v = 1},
 };
 
 static const uint32_t CUBE_INDICES[] = {
@@ -112,6 +160,7 @@ static const uint32_t CUBE_INDICES[] = {
  * ------------------------------------------------------------------------- */
 
 static const MopVertex PLANE_VERTICES[] = {
+    /* Top face — normal up */
     {.position = {-5, 0, -5},
      .normal = {0, 1, 0},
      .color = {0.5f, 0.5f, 0.5f, 1}},
@@ -124,12 +173,28 @@ static const MopVertex PLANE_VERTICES[] = {
     {.position = {-5, 0, 5},
      .normal = {0, 1, 0},
      .color = {0.5f, 0.5f, 0.5f, 1}},
+    /* Bottom face — normal down */
+    {.position = {-5, 0, -5},
+     .normal = {0, -1, 0},
+     .color = {0.5f, 0.5f, 0.5f, 1}},
+    {.position = {5, 0, -5},
+     .normal = {0, -1, 0},
+     .color = {0.5f, 0.5f, 0.5f, 1}},
+    {.position = {5, 0, 5},
+     .normal = {0, -1, 0},
+     .color = {0.5f, 0.5f, 0.5f, 1}},
+    {.position = {-5, 0, 5},
+     .normal = {0, -1, 0},
+     .color = {0.5f, 0.5f, 0.5f, 1}},
 };
 
-static const uint32_t PLANE_INDICES[] = {0, 1, 2, 2, 3, 0};
+static const uint32_t PLANE_INDICES[] = {
+    0, 3, 2, 2, 1, 0, /* top face  (visible from above) */
+    4, 5, 6, 6, 7, 4, /* bottom face (visible from below) */
+};
 
-#define PLANE_VERTEX_COUNT 4
-#define PLANE_INDEX_COUNT 6
+#define PLANE_VERTEX_COUNT 8
+#define PLANE_INDEX_COUNT 12
 
 /* -------------------------------------------------------------------------
  * UV Sphere — runtime generation

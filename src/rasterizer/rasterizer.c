@@ -2760,12 +2760,25 @@ void mop_sw_hdr_resolve(MopSwFramebuffer *fb, float exposure) {
   size_t n = (size_t)fb->width * fb->height;
   for (size_t i = 0; i < n; i++) {
     size_t ci = i * 4;
-    float r = aces_tonemap(fb->color_hdr[ci + 0] * exposure);
-    float g = aces_tonemap(fb->color_hdr[ci + 1] * exposure);
-    float b = aces_tonemap(fb->color_hdr[ci + 2] * exposure);
-    fb->color[ci + 0] = (uint8_t)(r * 255.0f + 0.5f);
-    fb->color[ci + 1] = (uint8_t)(g * 255.0f + 0.5f);
-    fb->color[ci + 2] = (uint8_t)(b * 255.0f + 0.5f);
-    fb->color[ci + 3] = (uint8_t)(fb->color_hdr[ci + 3] * 255.0f + 0.5f);
+    /* object_id==0 marks background pixels (gradient / clear color).
+     * Background brightness stays constant regardless of exposure —
+     * only scene geometry (object_id > 0) gets tonemapped. */
+    if (fb->object_id[i] == 0) {
+      float r = fb->color_hdr[ci + 0];
+      float g = fb->color_hdr[ci + 1];
+      float b = fb->color_hdr[ci + 2];
+      fb->color[ci + 0] = (uint8_t)(fminf(r, 1.0f) * 255.0f + 0.5f);
+      fb->color[ci + 1] = (uint8_t)(fminf(g, 1.0f) * 255.0f + 0.5f);
+      fb->color[ci + 2] = (uint8_t)(fminf(b, 1.0f) * 255.0f + 0.5f);
+      fb->color[ci + 3] = 255;
+    } else {
+      float r = aces_tonemap(fb->color_hdr[ci + 0] * exposure);
+      float g = aces_tonemap(fb->color_hdr[ci + 1] * exposure);
+      float b = aces_tonemap(fb->color_hdr[ci + 2] * exposure);
+      fb->color[ci + 0] = (uint8_t)(r * 255.0f + 0.5f);
+      fb->color[ci + 1] = (uint8_t)(g * 255.0f + 0.5f);
+      fb->color[ci + 2] = (uint8_t)(b * 255.0f + 0.5f);
+      fb->color[ci + 3] = (uint8_t)(fb->color_hdr[ci + 3] * 255.0f + 0.5f);
+    }
   }
 }

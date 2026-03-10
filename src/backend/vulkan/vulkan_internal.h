@@ -159,6 +159,10 @@ struct MopRhiDevice {
   /* Default sampler (linear, repeat) */
   VkSampler default_sampler;
 
+  /* Clamp-to-edge sampler for screen-space post-processing (SSAO, bloom, etc.)
+   * REPEAT causes wrapping artifacts when blur kernels extend past edges. */
+  VkSampler clamp_sampler;
+
   /* 1x1 white fallback texture */
   VkImage white_image;
   VkDeviceMemory white_memory;
@@ -258,10 +262,15 @@ struct MopRhiDevice {
   VkRenderPass bloom_render_pass;
   VkPipeline bloom_extract_pipeline;
   VkPipeline bloom_blur_pipeline;
+  VkPipeline bloom_upsample_pipeline; /* two-texture upsample (LOAD_OP_CLEAR) */
   VkPipelineLayout bloom_pipeline_layout;
+  VkPipelineLayout bloom_upsample_pl_layout; /* 2-binding layout for upsample */
   VkDescriptorSetLayout bloom_desc_layout;
+  VkDescriptorSetLayout
+      bloom_upsample_desc_layout; /* 2 samplers for upsample */
   VkShaderModule bloom_extract_frag;
   VkShaderModule bloom_blur_frag;
+  VkShaderModule bloom_upsample_frag;
   bool bloom_enabled;
   float bloom_threshold; /* default 1.0 */
   float bloom_intensity; /* default 0.5 */
@@ -307,6 +316,13 @@ struct MopRhiFramebuffer {
   VkImage depth_image;
   VkDeviceMemory depth_memory;
   VkImageView depth_view;
+
+  /* R32_SFLOAT copy of depth for overlay sampling.
+   * MoltenVK cannot reliably sample D32_SFLOAT across CB boundaries,
+   * so we copy depth data into a regular color image for the overlay pass. */
+  VkImage depth_copy_image;
+  VkDeviceMemory depth_copy_memory;
+  VkImageView depth_copy_view;
 
   /* MSAA render targets (4x, only when msaa_samples > 1) */
   VkImage msaa_color_image;
@@ -363,12 +379,21 @@ struct MopRhiFramebuffer {
   VkDeviceSize instance_buf_size; /* allocated size in bytes */
   VkDeviceSize instance_offset;   /* current write offset */
 
-  /* Bloom mip chain (half-res, R16G16B16A16_SFLOAT) */
+  /* Bloom mip chain (half-res, R16G16B16A16_SFLOAT).
+   * MOP_VK_BLOOM_DOWNSAMPLE: levels actually rendered (deeper levels corrupt
+   * on MoltenVK TBDR when image dimensions fall below Metal tile size). */
 #define MOP_VK_BLOOM_LEVELS 5
+#define MOP_VK_BLOOM_DOWNSAMPLE 5
   VkImage bloom_images[MOP_VK_BLOOM_LEVELS];
   VkDeviceMemory bloom_memory[MOP_VK_BLOOM_LEVELS];
   VkImageView bloom_views[MOP_VK_BLOOM_LEVELS];
   VkFramebuffer bloom_fbs[MOP_VK_BLOOM_LEVELS];
+
+  /* Bloom upsample output images (separate targets to avoid LOAD_OP_LOAD) */
+  VkImage bloom_up_images[MOP_VK_BLOOM_LEVELS];
+  VkDeviceMemory bloom_up_memory[MOP_VK_BLOOM_LEVELS];
+  VkImageView bloom_up_views[MOP_VK_BLOOM_LEVELS];
+  VkFramebuffer bloom_up_fbs[MOP_VK_BLOOM_LEVELS];
 
   /* SSAO attachments (R8_UNORM) */
   VkImage ssao_image;
@@ -513,6 +538,9 @@ VkPipeline mop_vk_create_bloom_extract_pipeline(struct MopRhiDevice *dev);
 
 /* Create the bloom blur pipeline (fullscreen triangle + 9-tap Gaussian). */
 VkPipeline mop_vk_create_bloom_blur_pipeline(struct MopRhiDevice *dev);
+
+/* Create the bloom upsample pipeline (two-texture, LOAD_OP_CLEAR). */
+VkPipeline mop_vk_create_bloom_upsample_pipeline(struct MopRhiDevice *dev);
 
 /* Create the SSAO render pass (R8_UNORM, single color attachment). */
 VkResult mop_vk_create_ssao_render_pass(VkDevice device, VkRenderPass *out);

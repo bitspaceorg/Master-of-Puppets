@@ -79,14 +79,18 @@ void main() {
         int prim_type = int(d2.z);
         float prim_depth = d2.w;
 
-        /* Depth test: skip if overlay is behind scene geometry */
+        /* Depth test: skip if overlay is behind scene geometry.
+         * Reverse-Z depth = near/distance, so values are tiny for far objects
+         * (0.005–0.02 at typical distances).  A fixed bias would be too large;
+         * use a proportional bias instead. */
         if (prim_depth >= 0.0) {
-            float bias = 0.002;
             bool occluded;
             if (pc.reverse_z != 0u) {
+                float bias = max(0.00005, prim_depth * 0.02);
                 occluded = (scene_depth > 0.0001) &&
                            (prim_depth + bias < scene_depth);
             } else {
+                float bias = max(0.0001, prim_depth * 0.02);
                 occluded = (scene_depth < 0.9999) &&
                            (prim_depth - bias > scene_depth);
             }

@@ -8,16 +8,27 @@
  * with exposure control.  Output is written to an R8G8B8A8_SRGB target
  * which auto-applies linear -> sRGB conversion.
  *
+ * Bloom is combined directly in this pass: the two largest downsample
+ * levels (half-res + quarter-res) are bilinearly upsampled by the texture
+ * unit and blended into the HDR color.  Deeper mip levels are allocated
+ * for layout transitions but NOT sampled here — MoltenVK/Apple TBDR
+ * corrupts small render targets (< ~128px) at the Vulkan-to-Metal
+ * translation layer.
+ *
  * Binding 0: HDR color
- * Binding 1: Bloom (or 1x1 black if disabled)
- * Binding 2: SSAO (or 1x1 white if disabled)
+ * Binding 1-5: Bloom levels 0-4 (only 0-1 sampled; 2-4 for layout compat)
+ * Binding 6: SSAO (or 1x1 white if disabled)
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 layout(set = 0, binding = 0) uniform sampler2D u_hdr;
-layout(set = 0, binding = 1) uniform sampler2D u_bloom;
-layout(set = 0, binding = 2) uniform sampler2D u_ssao;
+layout(set = 0, binding = 1) uniform sampler2D u_bloom0;
+layout(set = 0, binding = 2) uniform sampler2D u_bloom1;
+layout(set = 0, binding = 3) uniform sampler2D u_bloom2;
+layout(set = 0, binding = 4) uniform sampler2D u_bloom3;
+layout(set = 0, binding = 5) uniform sampler2D u_bloom4;
+layout(set = 0, binding = 6) uniform sampler2D u_ssao;
 
 layout(push_constant) uniform PC {
     float exposure;
@@ -33,29 +44,31 @@ vec3 aces(vec3 x) {
 }
 
 void main() {
-    vec4 hdr_pixel = texture(u_hdr, v_uv);
+    vec4 hdr_sample = texture(u_hdr, v_uv);
+    vec3 hdr = hdr_sample.rgb;
+    float alpha = hdr_sample.a;
 
-    /* Alpha=0 marks background (clear color) pixels.  These should not
-     * receive exposure, bloom, AO, or ACES tonemapping — the background
-     * brightness must stay constant regardless of the exposure slider.
-     * Skybox pixels render with alpha>0 and get full treatment. */
-    if (hdr_pixel.a > 0.0) {
-        vec3 hdr = hdr_pixel.rgb;
-
-        /* Apply SSAO */
-        float ao = texture(u_ssao, v_uv).r;
-        hdr *= ao;
-
-        /* Add bloom */
-        vec3 bloom = texture(u_bloom, v_uv).rgb;
-        hdr += bloom * pc.bloom_intensity;
-
-        /* Apply exposure and tonemap */
-        hdr *= pc.exposure;
-        frag_color = vec4(aces(hdr), 1.0);
-    } else {
-        /* Background pixel — pass through unchanged.
-         * The sRGB output format handles linear→sRGB conversion. */
-        frag_color = vec4(hdr_pixel.rgb, 1.0);
+    /* Alpha=0 marks background pixels (gradient / clear color).
+     * Background brightness must stay constant regardless of exposure —
+     * only scene geometry and skybox (alpha=1) get tonemapped. */
+    if (alpha < 0.5) {
+        frag_color = vec4(hdr, 1.0);
+        return;
     }
+
+    float ao = texture(u_ssao, v_uv).r;
+
+    /* Two-level bloom: half-res (level 0) + quarter-res (level 1).
+     * Bilinear upsampling by the texture unit gives natural soft bloom. */
+    vec3 bloom = texture(u_bloom0, v_uv).rgb * 0.6
+               + texture(u_bloom1, v_uv).rgb * 0.4;
+
+    /* Combine: HDR + bloom, modulated by AO */
+    vec3 combined = (hdr + bloom * pc.bloom_intensity) * ao;
+
+    /* Exposure then ACES filmic tonemap */
+    combined *= pc.exposure;
+    vec3 ldr = aces(combined);
+
+    frag_color = vec4(ldr, 1.0);
 }
