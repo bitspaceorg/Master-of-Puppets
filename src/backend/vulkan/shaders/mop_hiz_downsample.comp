@@ -1,0 +1,72 @@
+#version 450
+
+/*
+ * Master of Puppets — Vulkan Backend
+ * mop_hiz_downsample.comp — Hi-Z depth pyramid downsampler (Phase 2C)
+ *
+ * Takes a source depth mip and produces the next level by computing the
+ * maximum depth in each 2×2 block.  For reversed-Z (closer = larger depth),
+ * max() selects the farthest depth, giving conservative occlusion.
+ * For standard Z, min() would be used — we support both via push constant.
+ *
+ * Dispatch: ceil(dst_width / 8) × ceil(dst_height / 8) workgroups.
+ *
+ * Descriptor layout (set 0):
+ *   binding 0: sampler2D src_depth  (previous mip level)
+ *   binding 1: image2D   dst_depth  (current mip level, writeonly)
+ *
+ * Push constant: ivec2 src_size (source level dimensions)
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src_depth;
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D dst_depth;
+
+layout(push_constant) uniform PushConstants {
+    ivec2 src_size;    /* source mip dimensions */
+    int   reverse_z;   /* 1 = reversed-Z (max = conservative), 0 = standard */
+} pc;
+
+void main() {
+    ivec2 dst_coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dst_size = imageSize(dst_depth);
+
+    if (dst_coord.x >= dst_size.x || dst_coord.y >= dst_size.y)
+        return;
+
+    /* Sample 2×2 block from source level.
+     * Use texel fetch at exact integer coords to avoid filtering. */
+    ivec2 src_coord = dst_coord * 2;
+
+    float d00 = texelFetch(src_depth, src_coord, 0).r;
+    float d10 = texelFetch(src_depth, src_coord + ivec2(1, 0), 0).r;
+    float d01 = texelFetch(src_depth, src_coord + ivec2(0, 1), 0).r;
+    float d11 = texelFetch(src_depth, src_coord + ivec2(1, 1), 0).r;
+
+    /* Handle odd-sized source: clamp out-of-bounds samples to valid depth.
+     * For reversed-Z, 0.0 is far — use 0.0 for clamped samples.
+     * For standard-Z, 1.0 is far — use 1.0 for clamped samples. */
+    float far_val = (pc.reverse_z != 0) ? 0.0 : 1.0;
+    if (src_coord.x + 1 >= pc.src_size.x) {
+        d10 = far_val;
+        d11 = far_val;
+    }
+    if (src_coord.y + 1 >= pc.src_size.y) {
+        d01 = far_val;
+        d11 = far_val;
+    }
+
+    /* For reversed-Z: max = most conservative (farthest) depth.
+     * For standard-Z: min = most conservative (farthest) depth. */
+    float result;
+    if (pc.reverse_z != 0) {
+        result = max(max(d00, d10), max(d01, d11));
+    } else {
+        result = min(min(d00, d10), min(d01, d11));
+    }
+
+    imageStore(dst_depth, dst_coord, vec4(result, 0.0, 0.0, 0.0));
+}

@@ -283,9 +283,11 @@ static void test_spot_cone_boundary(void) {
 }
 
 /* =========================================================================
- * 4. Max lights render — fill all 8 slots, render, remove all, re-add,
- *    render again. No crash.
+ * 4. Many lights render — add 16 lights (beyond initial capacity of 8),
+ *    render, remove all, re-add, render again. No crash.
  * ========================================================================= */
+
+#define TEST_LIGHT_COUNT 16
 
 static void test_max_lights_render(void) {
   TEST_BEGIN("max_lights_render");
@@ -299,10 +301,10 @@ static void test_max_lights_render(void) {
   MopMesh *cube = add_cube(vp, 1);
   TEST_ASSERT(cube != NULL);
 
-  /* Fill all slots */
+  /* Fill beyond initial capacity to test dynamic growth */
   mop_viewport_clear_lights(vp);
-  MopLight *lights[MOP_MAX_LIGHTS];
-  for (int i = 0; i < MOP_MAX_LIGHTS; i++) {
+  MopLight *lights[TEST_LIGHT_COUNT];
+  for (int i = 0; i < TEST_LIGHT_COUNT; i++) {
     MopLight dir = {
         .type = MOP_LIGHT_DIRECTIONAL,
         .direction = {(float)(i % 3) * 0.3f, 1.0f, (float)(i % 5) * 0.2f},
@@ -312,9 +314,9 @@ static void test_max_lights_render(void) {
     lights[i] = mop_viewport_add_light(vp, &dir);
     TEST_ASSERT(lights[i] != NULL);
   }
-  TEST_ASSERT(mop_viewport_light_count(vp) == MOP_MAX_LIGHTS);
+  TEST_ASSERT(mop_viewport_light_count(vp) == TEST_LIGHT_COUNT);
 
-  /* Render with full lights */
+  /* Render with many lights */
   mop_viewport_render(vp);
 
   int w = 0, h = 0;
@@ -325,7 +327,7 @@ static void test_max_lights_render(void) {
   mop_viewport_clear_lights(vp);
   TEST_ASSERT(mop_viewport_light_count(vp) == 0);
 
-  for (int i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (int i = 0; i < TEST_LIGHT_COUNT; i++) {
     MopLight point = {.type = MOP_LIGHT_POINT,
                       .position = {(float)i, 3, 0},
                       .color = {1, 1, 1, 1},
@@ -362,10 +364,13 @@ static void test_zero_intensity(void) {
   MopMesh *cube = add_cube(vp, 1);
   TEST_ASSERT(cube != NULL);
 
-  /* Render with zero intensity */
+  /* Render with zero intensity.
+   * Light direction {0,0,-1} shines into -Z; the front face normal is {0,0,1}.
+   * After negation (surface-to-light = {0,0,1}), ndotl = 1.0 → full diffuse
+   * contribution when intensity > 0. */
   mop_viewport_clear_lights(vp);
   MopLight dir_zero = {.type = MOP_LIGHT_DIRECTIONAL,
-                       .direction = {0.3f, 1.0f, 0.5f},
+                       .direction = {0.0f, 0.0f, -1.0f},
                        .color = {1, 1, 1, 1},
                        .intensity = 0.0f,
                        .active = true};

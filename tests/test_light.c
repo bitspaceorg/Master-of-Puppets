@@ -71,12 +71,12 @@ static void test_remove_light(void) {
   TEST_END();
 }
 
-static void test_max_lights(void) {
-  TEST_BEGIN("max_lights");
+static void test_many_lights(void) {
+  TEST_BEGIN("many_lights");
   MopViewport *vp = make_viewport();
 
-  /* Default already uses 1 slot. Add MOP_MAX_LIGHTS - 1 more */
-  for (int i = 1; i < MOP_MAX_LIGHTS; i++) {
+  /* Default already uses 1 slot. Add many more to exercise dynamic growth */
+  for (int i = 1; i < 64; i++) {
     MopLight dir = {
         .type = MOP_LIGHT_DIRECTIONAL,
         .direction = {0, 1, 0},
@@ -87,9 +87,9 @@ static void test_max_lights(void) {
     MopLight *l = mop_viewport_add_light(vp, &dir);
     TEST_ASSERT(l != NULL);
   }
-  TEST_ASSERT(mop_viewport_light_count(vp) == MOP_MAX_LIGHTS);
+  TEST_ASSERT(mop_viewport_light_count(vp) == 64);
 
-  /* One more should fail */
+  /* Adding beyond initial capacity should still succeed (dynamic growth) */
   MopLight extra = {
       .type = MOP_LIGHT_DIRECTIONAL,
       .direction = {0, 1, 0},
@@ -97,8 +97,9 @@ static void test_max_lights(void) {
       .intensity = 0.5f,
       .active = true,
   };
-  MopLight *fail = mop_viewport_add_light(vp, &extra);
-  TEST_ASSERT(fail == NULL);
+  MopLight *ok = mop_viewport_add_light(vp, &extra);
+  TEST_ASSERT(ok != NULL);
+  TEST_ASSERT(mop_viewport_light_count(vp) == 65);
 
   mop_viewport_destroy(vp);
   TEST_END();
@@ -152,7 +153,7 @@ int main(void) {
   TEST_RUN(test_default_light);
   TEST_RUN(test_add_light);
   TEST_RUN(test_remove_light);
-  TEST_RUN(test_max_lights);
+  TEST_RUN(test_many_lights);
   TEST_RUN(test_light_setters);
   TEST_RUN(test_legacy_compat);
 

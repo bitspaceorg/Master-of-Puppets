@@ -264,7 +264,12 @@ MopMat4 mop_mat4_inverse(MopMat4 m) {
 
   float det = a[0] * o[0] + a[1] * o[4] + a[2] * o[8] + a[3] * o[12];
   if (fabsf(det) < 1e-8f) {
-    MOP_WARN("singular matrix in inverse (det=%.2e)", det);
+    static int _warn_count = 0;
+    if (_warn_count < 3)
+      MOP_WARN("singular matrix in inverse (det=%.2e)", det);
+    else if (_warn_count == 3)
+      MOP_WARN("singular matrix in inverse (suppressing further warnings)");
+    _warn_count++;
     return mop_mat4_identity();
   }
 

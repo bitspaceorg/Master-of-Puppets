@@ -308,7 +308,7 @@ static float shadow_test_pcf(MopVec3 world_pos) {
   int cx = (int)u;
   int cy = (int)v;
 
-  float bias = 0.003f;
+  float bias = 0.005f;
   int lit = 0;
   int total = 0;
 
@@ -1496,7 +1496,8 @@ static float compute_multi_light(MopVec3 normal, MopVec3 world_pos,
     switch (lights[i].type) {
     case MOP_LIGHT_DIRECTIONAL: {
       MopVec3 dir = mop_vec3_normalize(lights[i].direction);
-      ndotl = mop_vec3_dot(normal, dir);
+      /* direction = where light shines; negate for surface-to-light */
+      ndotl = -mop_vec3_dot(normal, dir);
       break;
     }
     case MOP_LIGHT_POINT: {
@@ -1596,7 +1597,8 @@ static void compute_multi_light_rgb(MopVec3 normal, MopVec3 world_pos,
     switch (lights[i].type) {
     case MOP_LIGHT_DIRECTIONAL: {
       MopVec3 dir = mop_vec3_normalize(lights[i].direction);
-      ndotl = mop_vec3_dot(normal, dir);
+      /* direction = where light shines; negate for surface-to-light */
+      ndotl = -mop_vec3_dot(normal, dir);
       break;
     }
     case MOP_LIGHT_POINT: {
@@ -1716,9 +1718,11 @@ static void compute_multi_specular_ggx(MopVec3 normal, MopVec3 world_pos,
     float attenuation = 1.0f;
 
     switch (lights[i].type) {
-    case MOP_LIGHT_DIRECTIONAL:
-      l_dir = mop_vec3_normalize(lights[i].direction);
+    case MOP_LIGHT_DIRECTIONAL: {
+      MopVec3 d = mop_vec3_normalize(lights[i].direction);
+      l_dir = (MopVec3){-d.x, -d.y, -d.z}; /* negate: shines→to-light */
       break;
+    }
     case MOP_LIGHT_POINT:
     case MOP_LIGHT_SPOT: {
       MopVec3 to_light = mop_vec3_sub(lights[i].position, world_pos);

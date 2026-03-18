@@ -27,7 +27,8 @@ typedef enum MopOverlayId {
   MOP_OVERLAY_BOUNDS = 2,    /* per-mesh bounding boxes */
   MOP_OVERLAY_SELECTION = 3, /* selection highlight */
   MOP_OVERLAY_OUTLINE = 4,   /* always-on object outline (accent color) */
-  MOP_OVERLAY_BUILTIN_COUNT = 5,
+  MOP_OVERLAY_SKELETON = 5,  /* bone hierarchy lines + joint indicators */
+  MOP_OVERLAY_BUILTIN_COUNT = 6,
 } MopOverlayId;
 
 /* -------------------------------------------------------------------------
@@ -39,8 +40,6 @@ typedef void (*MopOverlayFn)(MopViewport *vp, void *user_data);
 /* -------------------------------------------------------------------------
  * Overlay entry — internal storage for both built-in and custom overlays
  * ------------------------------------------------------------------------- */
-
-#define MOP_MAX_OVERLAYS 16
 
 typedef struct MopOverlayEntry {
   const char *name;

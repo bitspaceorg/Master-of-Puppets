@@ -1,0 +1,181 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+/*
+ * Master of Puppets — Vulkan Backend
+ * mop_meshlet.mesh — Mesh shader for meshlet rendering (Phase 10)
+ *
+ * Receives meshlet indices from the task shader payload.
+ * Each workgroup processes one meshlet:
+ *   - Reads vertex indices from meshlet vertex index buffer
+ *   - Reads primitive indices from meshlet primitive index buffer
+ *   - Transforms vertices and outputs primitives
+ *
+ * Descriptor layout (set 0):
+ *   binding 0: readonly buffer MeshletSSBO      (MopMeshlet descriptors)
+ *   binding 1: readonly buffer ConeSSBO         (unused here, shared layout)
+ *   binding 2: uniform FrameGlobals             (camera matrices)
+ *   binding 3: readonly buffer ObjectSSBO       (per-object material)
+ *   binding 4: readonly buffer VertexBuffer     (source vertex data)
+ *   binding 5: readonly buffer VertexIndexSSBO  (meshlet vertex indices)
+ *   binding 6: readonly buffer PrimIndexSSBO    (meshlet primitive indices)
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Max vertices and primitives per meshlet (must match CPU-side constants) */
+layout(local_size_x = 64) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
+
+/* Meshlet descriptor — matches MopMeshlet (32 bytes) */
+struct Meshlet {
+    uint  vertex_offset;
+    uint  vertex_count;
+    uint  triangle_offset;
+    uint  triangle_count;
+    vec3  center;
+    float radius;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer MeshletSSBO {
+    Meshlet meshlets[];
+} meshlet_buf;
+
+/* binding 1 = ConeSSBO (shared layout with task shader, unused here) */
+
+layout(std140, set = 0, binding = 2) uniform FrameGlobals {
+    vec4  light_dir;
+    vec4  cam_pos;
+    int   shadows_enabled;
+    int   cascade_count;
+    int   num_lights;
+    float exposure;
+    mat4  cascade_vp[4];
+    vec4  cascade_splits;
+    mat4  view_proj;
+    vec4  frustum_planes[6];
+    uint  total_draws;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+} frame;
+
+/* Per-object data — matches ObjectData in bindless shaders */
+struct ObjectData {
+    mat4  model;
+    float ambient;
+    float opacity;
+    uint  object_id;
+    int   blend_mode;
+    float metallic;
+    float roughness;
+    int   base_tex_idx;
+    int   normal_tex_idx;
+    vec4  emissive;
+    int   mr_tex_idx;
+    int   ao_tex_idx;
+    int   _pad0;
+    int   _pad1;
+    vec4  bound_sphere;
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer ObjectSSBO {
+    ObjectData objects[];
+} obj_buf;
+
+/* Source vertex data — interleaved MopVertex layout:
+ *   vec3 position  (12 bytes, offset 0)
+ *   vec3 normal    (12 bytes, offset 12)
+ *   vec4 color     (16 bytes, offset 24)
+ *   vec2 texcoord  (8 bytes,  offset 40)
+ *   ... rest (tangent, joints, weights = 40 bytes)
+ *   Total: 88 bytes per vertex */
+struct Vertex {
+    float px, py, pz;       /* position */
+    float nx, ny, nz;       /* normal */
+    float cr, cg, cb, ca;   /* color */
+    float u, v;             /* texcoord */
+    float tx, ty, tz, tw;   /* tangent */
+    uint  joints;           /* packed 4x uint8 */
+    float w0, w1, w2, w3;   /* weights */
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer VertexBuffer {
+    Vertex vertices[];
+} vert_buf;
+
+/* Meshlet vertex indices — uint32 per entry */
+layout(std430, set = 0, binding = 5) readonly buffer VertexIndexSSBO {
+    uint indices[];
+} vert_idx_buf;
+
+/* Meshlet primitive indices — uint8 packed as uint32 (4 indices per uint) */
+layout(std430, set = 0, binding = 6) readonly buffer PrimIndexSSBO {
+    uint packed_indices[];
+} prim_idx_buf;
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    uint meshlet_offset;
+    uint meshlet_count;
+    uint draw_id;
+} pc;
+
+/* Payload from task shader */
+struct TaskPayload {
+    uint meshlet_indices[32];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+/* Fragment shader outputs (must match mop_solid_bindless.frag inputs) */
+layout(location = 0) out vec3 v_normal[];
+layout(location = 1) out vec4 v_color[];
+layout(location = 2) out vec2 v_texcoord[];
+layout(location = 3) out vec3 v_world_pos[];
+layout(location = 4) flat out uint v_draw_id[];
+
+/* Extract a uint8 from a packed uint32 buffer at byte offset */
+uint read_prim_index(uint base_offset, uint byte_idx) {
+    uint word_idx = (base_offset + byte_idx) / 4;
+    uint byte_off = (base_offset + byte_idx) % 4;
+    return (prim_idx_buf.packed_indices[word_idx] >> (byte_off * 8)) & 0xFF;
+}
+
+void main() {
+    uint meshlet_global = payload.meshlet_indices[gl_WorkGroupID.x];
+    Meshlet ml = meshlet_buf.meshlets[meshlet_global];
+    ObjectData obj = obj_buf.objects[pc.draw_id];
+
+    SetMeshOutputsEXT(ml.vertex_count, ml.triangle_count);
+
+    uint lid = gl_LocalInvocationIndex;
+
+    /* Emit vertices (each thread handles one or more vertices) */
+    if (lid < ml.vertex_count) {
+        uint global_vi = vert_idx_buf.indices[ml.vertex_offset + lid];
+        Vertex vtx = vert_buf.vertices[global_vi];
+
+        vec3 pos = vec3(vtx.px, vtx.py, vtx.pz);
+        vec3 nrm = vec3(vtx.nx, vtx.ny, vtx.nz);
+        vec4 col = vec4(vtx.cr, vtx.cg, vtx.cb, vtx.ca);
+        vec2 uv  = vec2(vtx.u, vtx.v);
+
+        vec4 world_pos = pc.model * vec4(pos, 1.0);
+        gl_MeshVerticesEXT[lid].gl_Position = frame.view_proj * world_pos;
+
+        v_normal[lid]    = mat3(pc.model) * nrm;
+        v_color[lid]     = col;
+        v_texcoord[lid]  = uv;
+        v_world_pos[lid] = world_pos.xyz;
+        v_draw_id[lid]   = pc.draw_id;
+    }
+
+    /* Emit triangles */
+    if (lid < ml.triangle_count) {
+        uint i0 = read_prim_index(ml.triangle_offset, lid * 3 + 0);
+        uint i1 = read_prim_index(ml.triangle_offset, lid * 3 + 1);
+        uint i2 = read_prim_index(ml.triangle_offset, lid * 3 + 2);
+        gl_PrimitiveTriangleIndicesEXT[lid] = uvec3(i0, i1, i2);
+    }
+}

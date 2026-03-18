@@ -2,7 +2,7 @@
  * Master of Puppets — Undo/Redo
  * undo.c — Ring buffer of TRS/material/batch snapshots for undo/redo
  *
- * The undo stack is a ring buffer of MOP_UNDO_CAPACITY entries embedded
+ * The undo stack is a dynamic ring buffer of undo_capacity entries
  * in the MopViewport struct.  Each entry is tagged (TRS, MATERIAL, BATCH)
  * and dispatched accordingly.  Batch entries heap-allocate sub-entries so
  * that multi-object transforms undo/redo atomically.
@@ -47,12 +47,13 @@ static void free_batch_entries(MopUndoEntry *entry) {
  * ------------------------------------------------------------------------- */
 
 static int alloc_slot(MopViewport *vp) {
-  int slot = (vp->undo_head + vp->undo_count) % MOP_UNDO_CAPACITY;
+  int cap = (int)vp->undo_capacity;
+  int slot = (vp->undo_head + vp->undo_count) % cap;
 
-  if (vp->undo_count == MOP_UNDO_CAPACITY) {
+  if (vp->undo_count == cap) {
     /* Discard oldest — free batch heap memory if present */
     free_batch_entries(&vp->undo_entries[vp->undo_head]);
-    vp->undo_head = (vp->undo_head + 1) % MOP_UNDO_CAPACITY;
+    vp->undo_head = (vp->undo_head + 1) % cap;
   } else {
     vp->undo_count++;
   }
@@ -62,7 +63,7 @@ static int alloc_slot(MopViewport *vp) {
 
   /* Any new push invalidates redo history — free batch memory in redo zone */
   for (int i = 0; i < vp->redo_count; i++) {
-    int redo_slot = (vp->undo_head + vp->undo_count + i) % MOP_UNDO_CAPACITY;
+    int redo_slot = (vp->undo_head + vp->undo_count + i) % cap;
     free_batch_entries(&vp->undo_entries[redo_slot]);
   }
   vp->redo_count = 0;
@@ -218,8 +219,9 @@ void mop_viewport_undo(MopViewport *vp) {
   if (!vp || vp->undo_count == 0)
     return;
 
+  int cap = (int)vp->undo_capacity;
   vp->undo_count--;
-  int slot = (vp->undo_head + vp->undo_count) % MOP_UNDO_CAPACITY;
+  int slot = (vp->undo_head + vp->undo_count) % cap;
 
   apply_entry(vp, &vp->undo_entries[slot]);
 
@@ -234,7 +236,8 @@ void mop_viewport_redo(MopViewport *vp) {
   if (!vp || vp->redo_count == 0)
     return;
 
-  int slot = (vp->undo_head + vp->undo_count) % MOP_UNDO_CAPACITY;
+  int cap = (int)vp->undo_capacity;
+  int slot = (vp->undo_head + vp->undo_count) % cap;
 
   apply_entry(vp, &vp->undo_entries[slot]);
 

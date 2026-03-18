@@ -385,6 +385,11 @@ static void gl_frame_end(MopRhiDevice *device, MopRhiFramebuffer *fb) {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void gl_frame_submit(MopRhiDevice *device, MopRhiFramebuffer *fb) {
+  (void)device;
+  (void)fb;
+}
+
 /* -------------------------------------------------------------------------
  * Draw call
  * ------------------------------------------------------------------------- */
@@ -693,6 +698,7 @@ static const MopRhiBackend GL_BACKEND = {
     .framebuffer_resize = gl_framebuffer_resize,
     .frame_begin = gl_frame_begin,
     .frame_end = gl_frame_end,
+    .frame_submit = gl_frame_submit,
     .draw = gl_draw,
     .pick_read_id = gl_pick_read_id,
     .pick_read_depth = gl_pick_read_depth,
@@ -702,6 +708,8 @@ static const MopRhiBackend GL_BACKEND = {
     .draw_instanced = gl_draw_instanced,
     .buffer_update = gl_buffer_update,
     .buffer_read = gl_buffer_read,
+    .shader_create = NULL,  /* TODO: implement for GL */
+    .shader_destroy = NULL, /* TODO: implement for GL */
 };
 
 const MopRhiBackend *mop_rhi_backend_opengl(void) { return &GL_BACKEND; }

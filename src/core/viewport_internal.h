@@ -11,6 +11,7 @@
 #include "core/subsystem.h"
 #include "rasterizer/rasterizer.h"
 #include "rhi/rhi.h"
+
 #include <mop/core/camera_object.h>
 #include <mop/core/display.h>
 #include <mop/core/environment.h>
@@ -20,6 +21,8 @@
 #include <mop/core/theme.h>
 #include <mop/interact/selection.h>
 #include <mop/mop.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* -------------------------------------------------------------------------
  * Opaque texture wrapper — maps public MopTexture to RHI texture
@@ -84,6 +87,42 @@ struct MopMesh {
   /* Cached local-space AABB for frustum culling */
   MopAABB aabb_local;
   bool aabb_valid;
+
+  /* Skeletal skinning — bind-pose data + bone matrices.
+   * When bone_count > 0, the mesh is considered skinned. Each frame,
+   * CPU skinning transforms bind_pose_data → vertex_buffer using
+   * bone_matrices, joints, and weights from the vertex format. */
+  void *bind_pose_data;   /* original vertex data (byte copy) */
+  MopMat4 *bone_matrices; /* array of bone_count transforms */
+  uint32_t bone_count;
+  bool skin_dirty; /* true when matrices changed, needs re-skin */
+
+  /* Bone hierarchy — parent index per bone (-1 = root).
+   * Set via mop_mesh_set_bone_hierarchy(). Used by bone overlay. */
+  int32_t *bone_parents; /* array of bone_count parent indices */
+
+  /* Morph targets (blend shapes).
+   * Each target is a flat float3 array (position deltas per vertex).
+   * CPU blending: final_pos = base_pos + sum(weight[i] * target[i][v]) */
+  float *morph_targets; /* packed: target_count * vertex_count * 3 */
+  float *morph_weights; /* array of target_count weights */
+  uint32_t morph_target_count;
+  bool morph_dirty; /* true when weights changed, needs re-blend */
+
+  /* LOD chain (Phase 9C).
+   * LOD 0 = base mesh (vertex_buffer/index_buffer above).
+   * lod_levels[i] stores alternate vertex/index buffers for LOD i+1.
+   * active_lod is set each frame by screen-space size selection. */
+  struct MopLodLevel {
+    MopRhiBuffer *vertex_buffer;
+    MopRhiBuffer *index_buffer;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    float screen_threshold; /* switch to this LOD below this pixel diameter */
+  } lod_levels[MOP_MAX_LOD_LEVELS - 1]; /* LOD 1..7 */
+  uint32_t lod_level_count; /* number of extra LOD levels (0 = no LOD) */
+  uint32_t active_lod;      /* currently selected LOD (0 = highest detail) */
+  uint32_t prev_lod;        /* previous frame's LOD (for transition detect) */
 };
 
 /* -------------------------------------------------------------------------
@@ -116,10 +155,46 @@ struct MopInstancedMesh {
 };
 
 /* -------------------------------------------------------------------------
- * Camera object (Phase 5)
+ * Dynamic array initial capacities
  * ------------------------------------------------------------------------- */
 
-#define MOP_MAX_CAMERAS 16
+#define MOP_INITIAL_LIGHT_CAPACITY 8
+#define MOP_INITIAL_CAMERA_CAPACITY 16
+#define MOP_INITIAL_SELECTED_CAPACITY 256
+#define MOP_INITIAL_EVENT_CAPACITY 64
+#define MOP_INITIAL_OVERLAY_CAPACITY 16
+#define MOP_INITIAL_HOOK_CAPACITY 64
+#define MOP_INITIAL_UNDO_CAPACITY 256
+#define MOP_INITIAL_SUBSYSTEM_CAPACITY 32
+#define MOP_INITIAL_SELECTED_ELEMENTS_CAPACITY 4096
+
+/* -------------------------------------------------------------------------
+ * Dynamic array growth helper
+ *
+ * Doubles the capacity of a heap-allocated array when full.
+ * Zero-initializes newly allocated elements.
+ * Returns true on success, false on allocation failure.
+ * ------------------------------------------------------------------------- */
+
+static inline bool mop_dyn_grow(void **arr, uint32_t *cap, size_t elem_size,
+                                uint32_t initial_cap) {
+  uint32_t old_cap = *cap;
+  uint32_t new_cap = old_cap ? old_cap * 2 : initial_cap;
+  if (new_cap < old_cap)
+    return false; /* overflow */
+  void *new_arr = realloc(*arr, (size_t)new_cap * elem_size);
+  if (!new_arr)
+    return false;
+  memset((char *)new_arr + (size_t)old_cap * elem_size, 0,
+         (size_t)(new_cap - old_cap) * elem_size);
+  *arr = new_arr;
+  *cap = new_cap;
+  return true;
+}
+
+/* -------------------------------------------------------------------------
+ * Camera object (Phase 5)
+ * ------------------------------------------------------------------------- */
 
 struct MopCameraObject {
   MopVec3 position;
@@ -220,9 +295,6 @@ typedef struct MopGridParams {
  * Undo ring buffer (Phase 4B)
  * ------------------------------------------------------------------------- */
 
-#define MOP_UNDO_CAPACITY 256
-#define MOP_MAX_SELECTED 256
-
 typedef enum MopUndoEntryType {
   MOP_UNDO_TRS = 0,
   MOP_UNDO_MATERIAL = 1,
@@ -275,8 +347,6 @@ typedef enum MopInteractState {
   MOP_INTERACT_GIZMO_DRAG
 } MopInteractState;
 
-#define MOP_MAX_EVENTS 64
-
 struct MopViewport {
   /* Backend */
   const MopRhiBackend *rhi;
@@ -296,9 +366,10 @@ struct MopViewport {
   float ambient; /* legacy — kept for backward compat, syncs with lights[0] */
   MopShadingMode shading_mode;
 
-  /* Multi-light system */
-  MopLight lights[MOP_MAX_LIGHTS];
-  uint32_t light_count;      /* high-water mark for iteration */
+  /* Multi-light system (dynamic array) */
+  MopLight *lights;
+  uint32_t light_count; /* high-water mark for iteration */
+  uint32_t light_capacity;
   bool default_light_active; /* true until user calls add_light */
 
   /* Camera */
@@ -308,6 +379,8 @@ struct MopViewport {
   float cam_fov_radians;
   float cam_near;
   float cam_far;
+  MopCameraMode cam_mode; /* perspective or orthographic */
+  float cam_ortho_size;   /* ortho half-height in world units */
 
   /* Computed camera matrices */
   MopMat4 view_matrix;
@@ -328,9 +401,10 @@ struct MopViewport {
   MopOrbitCamera camera;
   MopMesh *grid;
 
-  /* Camera objects (Phase 5) */
-  struct MopCameraObject cameras[MOP_MAX_CAMERAS];
+  /* Camera objects (Phase 5) — dynamic array */
+  struct MopCameraObject *cameras;
   uint32_t camera_count;
+  uint32_t camera_capacity;
   struct MopCameraObject *active_camera; /* NULL = use orbit camera */
 
   /* Gradient background (clip-space quad) */
@@ -343,9 +417,10 @@ struct MopViewport {
   uint32_t axis_ind_vcnt[3];
   uint32_t axis_ind_icnt[3];
 
-  /* Selection (multi-object) */
-  uint32_t selected_ids[MOP_MAX_SELECTED];
+  /* Selection (multi-object) — dynamic array */
+  uint32_t *selected_ids;
   uint32_t selected_count;
+  uint32_t selected_capacity;
   uint32_t selected_id; /* backward compat: selected_ids[0] or 0 */
 
   /* Sub-element selection (Phase 3) */
@@ -357,15 +432,17 @@ struct MopViewport {
   MopGizmoAxis pending_gizmo_axis; /* gizmo hit on pointer-down, deferred */
   float click_start_x, click_start_y;
 
-  /* Event queue (ring buffer) */
-  MopEvent events[MOP_MAX_EVENTS];
+  /* Event queue (ring buffer) — dynamic array, capacity always power of 2 */
+  MopEvent *events;
+  uint32_t event_capacity;
   int event_head, event_tail;
 
   /* Profiling (Phase 5C) */
   MopFrameStats last_stats;
 
-  /* Undo/redo (Phase 4B) */
-  MopUndoEntry undo_entries[MOP_UNDO_CAPACITY];
+  /* Undo/redo (Phase 4B) — dynamic ring buffer */
+  MopUndoEntry *undo_entries;
+  uint32_t undo_capacity;
   int undo_head;
   int undo_count;
   int redo_count;
@@ -388,10 +465,11 @@ struct MopViewport {
   uint32_t post_effects;
   MopFogParams fog_params;
 
-  /* Overlay system */
-  MopOverlayEntry overlays[MOP_MAX_OVERLAYS];
+  /* Overlay system — dynamic arrays */
+  MopOverlayEntry *overlays;
   uint32_t overlay_count;
-  bool overlay_enabled[MOP_MAX_OVERLAYS];
+  uint32_t overlay_capacity;
+  bool *overlay_enabled;
 
   /* Display settings */
   MopDisplaySettings display;
@@ -399,22 +477,23 @@ struct MopViewport {
   /* Theme (design language) */
   MopTheme theme;
 
-/* Pipeline hooks (Phase D) */
-#define MOP_MAX_HOOKS 56 /* 7 stages * 8 per stage */
-  struct {
+  /* Pipeline hooks (Phase D) — dynamic array */
+  struct MopHookEntry {
     MopPipelineHookFn fn;
     void *data;
     MopPipelineStage stage;
     bool active;
-  } hooks[MOP_MAX_HOOKS];
+  } *hooks;
   uint32_t hook_count;
+  uint32_t hook_capacity;
 
   /* Frame callback */
   MopFrameCallbackFn frame_cb;
   void *frame_cb_data;
 
-  /* Light indicators (visual representations of lights) */
-  MopMesh *light_indicators[MOP_MAX_LIGHTS];
+  /* Light indicators (visual representations of lights) — dynamic, tracks
+   * light_capacity */
+  MopMesh **light_indicators;
 
   /* SSAA (Supersampling Anti-Aliasing) — backend-agnostic smooth rendering */
   int ssaa_factor;         /* 1 = off, 2 = 2x SSAA (default) */
@@ -433,6 +512,12 @@ struct MopViewport {
   /* Bloom parameters */
   float bloom_threshold; /* default 1.0 */
   float bloom_intensity; /* default 0.5 */
+
+  /* SSR parameters */
+  float ssr_intensity; /* default 0.5 */
+
+  /* Volumetric fog parameters */
+  MopVolumetricParams volumetric_params;
 
   /* Environment map (HDRI / procedural sky) */
   MopEnvironmentType env_type;
@@ -469,9 +554,32 @@ struct MopViewport {
   float *trans_sort_dist;
   uint32_t trans_sort_capacity;
 
+  /* Shader plugins — custom render passes injected by host app */
+  struct MopShaderPlugin **shader_plugins;
+  uint32_t shader_plugin_count;
+  uint32_t shader_plugin_capacity;
+
+  /* TAA (Temporal Anti-Aliasing) state */
+  uint32_t taa_frame_index;         /* monotonic frame counter for jitter */
+  float taa_jitter_x, taa_jitter_y; /* current frame jitter in pixels */
+  MopMat4 taa_prev_view;            /* previous frame view matrix */
+  MopMat4 taa_prev_proj;            /* previous frame projection matrix */
+  bool taa_has_history;             /* false on first frame / after resize */
+
+  /* Debug visualization mode (Phase 9B) */
+  MopDebugViz debug_viz;
+
+  /* LOD bias (Phase 9C) — shifts LOD level selection */
+  float lod_bias;
+
   /* Error tracking for mop_viewport_render */
   MopRenderResult last_render_result;
   char last_render_error[256];
+
+  /* Generic thread pool for render graph MT execution (Phase 1B).
+   * Created in viewport_create, destroyed in viewport_destroy.
+   * NULL if thread creation fails (falls back to single-threaded). */
+  struct MopThreadPool *thread_pool;
 };
 
 /* -------------------------------------------------------------------------
@@ -504,6 +612,10 @@ void mop_gizmo_set_handles_opacity(MopGizmo *gizmo, float opacity);
 /* -------------------------------------------------------------------------
  * Overlay command buffer push helpers
  * ------------------------------------------------------------------------- */
+
+/* Shader plugin internals */
+void mop_shader_plugins_destroy_all(MopViewport *vp);
+void mop_shader_plugins_dispatch(MopViewport *vp, MopShaderPluginStage stage);
 
 void mop_overlay_push_line(MopViewport *vp, float x0, float y0, float x1,
                            float y1, float r, float g, float b, float width,

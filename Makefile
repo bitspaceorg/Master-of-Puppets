@@ -66,12 +66,15 @@ CORE_SRCS := \
   src/core/vertex_format.c \
   src/core/theme.c \
   src/core/light.c \
+  src/core/decal.c \
   src/core/display.c \
   src/core/overlay.c \
   src/core/overlay_builtin.c \
   src/core/subsystem.c \
   src/core/camera_object.c \
   src/core/environment.c \
+  src/core/render_graph.c \
+  src/core/thread_pool.c \
   src/rasterizer/rasterizer.c \
   src/rasterizer/rasterizer_mt.c \
   src/interact/gizmo.c \
@@ -83,6 +86,7 @@ CORE_SRCS := \
   src/loader/obj_loader.c \
   src/loader/mop_loader.c \
   src/loader/loader.c \
+  src/loader/gltf_loader.c \
   src/util/log.c \
   src/util/profile.c \
   src/subsystem/particle.c \
@@ -98,6 +102,10 @@ CORE_SRCS := \
   src/export/obj_export.c \
   src/export/scene_export.c \
   src/loader/mop_scene.c \
+  src/core/material_graph.c \
+  src/core/texture_pipeline.c \
+  src/core/meshlet.c \
+  src/render/shader_plugin.c \
   src/backend/cpu/cpu_backend.c
 
 # C++ sources (tinyexr requires C++)
@@ -133,7 +141,8 @@ endif
 ifdef MOP_ENABLE_VULKAN
   CORE_SRCS += src/backend/vulkan/vulkan_backend.c \
                src/backend/vulkan/vulkan_pipeline.c \
-               src/backend/vulkan/vulkan_memory.c
+               src/backend/vulkan/vulkan_memory.c \
+               src/backend/vulkan/vulkan_suballoc.c
   CFLAGS    += -DMOP_HAS_VULKAN=1
   # Use pkg-config for Vulkan headers/libs if available (nix)
   VK_CFLAGS  := $(shell pkg-config --cflags vulkan 2>/dev/null)
@@ -156,7 +165,7 @@ LIB_OUT   := $(LIB_DIR)/libmop.a
 # -----------------------------------------------------------------------------
 # Default target — static library only
 # -----------------------------------------------------------------------------
-.PHONY: all lib clean install test torture tools conformance conformance-tier1 conformance-tier2 conformance-tier3 conformance-tier4 conformance-update-golden
+.PHONY: all lib clean install test torture tools shaders conformance conformance-tier1 conformance-tier2 conformance-tier3 conformance-tier4 conformance-update-golden
 
 all: lib
 
@@ -189,6 +198,7 @@ obj_dirs:
 	@mkdir -p $(OBJ_DIR)/subsystem
 	@mkdir -p $(OBJ_DIR)/query
 	@mkdir -p $(OBJ_DIR)/export
+	@mkdir -p $(OBJ_DIR)/render
 	@mkdir -p $(OBJ_DIR)/backend/cpu
 	@mkdir -p $(OBJ_DIR)/backend/opengl
 	@mkdir -p $(OBJ_DIR)/backend/vulkan
@@ -278,6 +288,14 @@ conformance-update-golden: conformance
 	python3 conformance/render_oracle.py --scene=torture --output=conformance/baselines --export-only
 	@echo "Golden baseline scene/camera exported to conformance/baselines/"
 	@echo "Run your reference renderer to generate frame PNGs."
+
+# -----------------------------------------------------------------------------
+# Shader compilation (Vulkan GLSL -> SPIR-V -> embedded C arrays)
+# Requires: glslc (from shaderc / Vulkan SDK)
+# -----------------------------------------------------------------------------
+shaders:
+	@echo "Compiling Vulkan shaders..."
+	cd src/backend/vulkan/shaders && ./compile.sh
 
 # -----------------------------------------------------------------------------
 # Tools

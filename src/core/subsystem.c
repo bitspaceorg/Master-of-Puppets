@@ -6,18 +6,30 @@
  */
 
 #include "core/subsystem.h"
+#include "core/viewport_internal.h"
 #include <mop/util/log.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 bool mop_subsystem_register(MopSubsystemRegistry *reg, MopSubsystem *sub) {
   if (!reg || !sub || !sub->vtable)
     return false;
 
-  if (reg->count >= MOP_MAX_SUBSYSTEMS) {
-    MOP_WARN("subsystem registry full (%d), cannot register '%s'",
-             MOP_MAX_SUBSYSTEMS, sub->vtable->name ? sub->vtable->name : "?");
-    return false;
+  if (reg->count >= reg->capacity) {
+    uint32_t new_cap =
+        reg->capacity ? reg->capacity * 2 : MOP_INITIAL_SUBSYSTEM_CAPACITY;
+    MopSubsystem **new_entries =
+        realloc(reg->entries, (size_t)new_cap * sizeof(MopSubsystem *));
+    if (!new_entries) {
+      MOP_WARN("subsystem registry grow failed, cannot register '%s'",
+               sub->vtable->name ? sub->vtable->name : "?");
+      return false;
+    }
+    memset(new_entries + reg->capacity, 0,
+           (size_t)(new_cap - reg->capacity) * sizeof(MopSubsystem *));
+    reg->entries = new_entries;
+    reg->capacity = new_cap;
   }
 
   reg->entries[reg->count++] = sub;
@@ -66,4 +78,7 @@ void mop_subsystem_destroy_all(MopSubsystemRegistry *reg, MopViewport *vp) {
     reg->entries[i] = NULL;
   }
   reg->count = 0;
+  free(reg->entries);
+  reg->entries = NULL;
+  reg->capacity = 0;
 }

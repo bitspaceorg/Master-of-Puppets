@@ -7,6 +7,7 @@
 
 #include "core/viewport_internal.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -26,18 +27,36 @@ MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc) {
   if (!vp || !desc)
     return NULL;
 
-  /* Find a free slot */
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  /* Find an inactive slot below the high-water mark */
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     if (!vp->lights[i].active) {
       vp->lights[i] = *desc;
       vp->lights[i].active = true;
-      if (vp->light_count <= i) {
-        vp->light_count = i + 1;
-      }
       return &vp->lights[i];
     }
   }
-  return NULL; /* all slots full */
+
+  /* No inactive slot — grow if at capacity */
+  if (vp->light_count >= vp->light_capacity) {
+    if (!mop_dyn_grow((void **)&vp->lights, &vp->light_capacity,
+                      sizeof(MopLight), MOP_INITIAL_LIGHT_CAPACITY))
+      return NULL;
+    /* Grow light_indicators to match */
+    MopMesh **new_ind = realloc(vp->light_indicators,
+                                (size_t)vp->light_capacity * sizeof(MopMesh *));
+    if (!new_ind)
+      return NULL;
+    /* Zero the newly allocated portion */
+    uint32_t old_ind_count = vp->light_count; /* was == old capacity */
+    memset(new_ind + old_ind_count, 0,
+           (size_t)(vp->light_capacity - old_ind_count) * sizeof(MopMesh *));
+    vp->light_indicators = new_ind;
+  }
+
+  uint32_t idx = vp->light_count++;
+  vp->lights[idx] = *desc;
+  vp->lights[idx].active = true;
+  return &vp->lights[idx];
 }
 
 void mop_viewport_remove_light(MopViewport *vp, MopLight *light) {
@@ -49,7 +68,7 @@ void mop_viewport_remove_light(MopViewport *vp, MopLight *light) {
 void mop_viewport_clear_lights(MopViewport *vp) {
   if (!vp)
     return;
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     vp->lights[i].active = false;
   }
   vp->light_count = 0;
@@ -83,7 +102,7 @@ uint32_t mop_viewport_light_count(const MopViewport *vp) {
   if (!vp)
     return 0;
   uint32_t count = 0;
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     if (vp->lights[i].active)
       count++;
   }
@@ -99,7 +118,7 @@ uint32_t mop_viewport_light_count(const MopViewport *vp) {
  * ========================================================================= */
 
 static void li_destroy(MopViewport *vp, uint32_t idx) {
-  if (vp->light_indicators[idx]) {
+  if (idx < vp->light_capacity && vp->light_indicators[idx]) {
     mop_viewport_remove_mesh(vp, vp->light_indicators[idx]);
     vp->light_indicators[idx] = NULL;
   }
@@ -117,7 +136,7 @@ void mop_light_update_indicators(MopViewport *vp) {
    * the 2D SDF overlay (mop_overlay_builtin_light_indicators) and picking
    * is handled by screen-space distance (pick_light_screen).  Clean up
    * any leftover meshes from previous code paths. */
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     if (vp->light_indicators[i]) {
       li_destroy(vp, i);
     }
@@ -127,7 +146,7 @@ void mop_light_update_indicators(MopViewport *vp) {
 void mop_light_destroy_indicators(MopViewport *vp) {
   if (!vp)
     return;
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     li_destroy(vp, i);
   }
 }

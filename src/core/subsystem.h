@@ -54,11 +54,10 @@ struct MopSubsystem {
  * Registry — fixed-size array owned by the viewport
  * ------------------------------------------------------------------------- */
 
-#define MOP_MAX_SUBSYSTEMS 32
-
 typedef struct MopSubsystemRegistry {
-  MopSubsystem *entries[MOP_MAX_SUBSYSTEMS];
+  MopSubsystem **entries;
   uint32_t count;
+  uint32_t capacity;
 } MopSubsystemRegistry;
 
 /* Register a subsystem.  Returns false if the registry is full. */

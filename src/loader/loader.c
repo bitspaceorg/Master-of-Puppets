@@ -63,6 +63,33 @@ bool mop_load(const char *path, MopLoadedMesh *out) {
     return true;
   }
 
+  if (strcmp(ext, ".glb") == 0 || strcmp(ext, ".gltf") == 0) {
+    MopGltfScene gltf;
+    if (!mop_gltf_load(path, &gltf))
+      return false;
+    /* Import only the first primitive of the first mesh for the
+     * unified loader.  Full glTF import should use mop_gltf_load
+     * + mop_gltf_import directly for multi-mesh scenes. */
+    if (gltf.mesh_count > 0 && gltf.meshes[0].primitive_count > 0) {
+      MopGltfPrimitive *p = &gltf.meshes[0].primitives[0];
+      /* Transfer ownership of vertex/index arrays */
+      out->vertices = p->vertices;
+      out->vertex_count = p->vertex_count;
+      out->indices = p->indices;
+      out->index_count = p->index_count;
+      out->bbox_min = p->bbox_min;
+      out->bbox_max = p->bbox_max;
+      out->tangents = NULL;
+      out->_format = MOP_FORMAT_GLTF;
+      out->_mmapped = false;
+      /* Clear pointers to prevent double-free */
+      p->vertices = NULL;
+      p->indices = NULL;
+    }
+    mop_gltf_free(&gltf);
+    return out->vertices != NULL;
+  }
+
   MOP_ERROR("mop_load: unsupported file extension '%s'", ext);
   return false;
 }

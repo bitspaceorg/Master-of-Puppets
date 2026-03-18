@@ -31,6 +31,7 @@
 #include <SDL3/SDL.h>
 #include <mop/core/environment.h>
 #include <mop/mop.h>
+#include <mop/render/postprocess.h>
 
 #include <math.h>
 #include <stdbool.h>
@@ -161,14 +162,33 @@ static void build_scene(MopViewport *vp, Scene *sc) {
   sc->shading = MOP_SHADING_SMOOTH;
   sc->exposure = 1.0f;
 
-  /* ---- Lighting ---- */
-  mop_viewport_set_ambient(vp, 0.15f);
+  /* ---- 3-point lighting ---- */
+  mop_viewport_set_ambient(vp, 0.08f);
 
-  /* Bright point light — creates HDR highlights on metallic surfaces */
-  mop_viewport_add_light(vp, &(MopLight){.type = MOP_LIGHT_POINT,
-                                         .position = {2.0f, 4.0f, 3.0f},
+  /* Key: warm directional sun — casts shadows */
+  mop_viewport_add_light(vp, &(MopLight){.type = MOP_LIGHT_DIRECTIONAL,
+                                         .direction = {-0.5f, -0.8f, -0.3f},
                                          .color = {1.0f, 0.95f, 0.85f, 1.0f},
-                                         .intensity = 80.0f,
+                                         .intensity = 3.0f,
+                                         .active = true});
+
+  /* Fill: soft point light from the left */
+  mop_viewport_add_light(vp, &(MopLight){.type = MOP_LIGHT_POINT,
+                                         .position = {-5.0f, 3.0f, 2.0f},
+                                         .color = {0.7f, 0.8f, 1.0f, 1.0f},
+                                         .intensity = 40.0f,
+                                         .range = 20.0f,
+                                         .active = true});
+
+  /* Accent: spot from above-right for specular highlights */
+  mop_viewport_add_light(vp, &(MopLight){.type = MOP_LIGHT_SPOT,
+                                         .position = {4.0f, 6.0f, 4.0f},
+                                         .direction = {-0.4f, -0.8f, -0.4f},
+                                         .color = {1.0f, 0.9f, 0.7f, 1.0f},
+                                         .intensity = 60.0f,
+                                         .range = 25.0f,
+                                         .spot_inner_cos = 0.94f, /* ~20° */
+                                         .spot_outer_cos = 0.82f, /* ~35° */
                                          .active = true});
 
   /* Ground plane removed — grid provides spatial reference */
@@ -488,7 +508,7 @@ int main(int argc, char *argv[]) {
     theme.bg_bottom = (MopColor){0.0514f, 0.0514f, 0.0514f, 1.0f};
     mop_viewport_set_theme(vp, &theme);
   }
-  mop_viewport_set_clear_color(vp, (MopColor){0.0514f, 0.0514f, 0.0514f, 1.0f});
+  mop_viewport_set_clear_color(vp, (MopColor){0.0514f, 0.0514f, 0.0514f, 0.0f});
 
   printf("[mop] Interactive Viewport  %dx%d  backend=%s\n", win_w, win_h,
          mop_backend_name(backend));
@@ -497,7 +517,12 @@ int main(int argc, char *argv[]) {
   Scene sc;
   build_scene(vp, &sc);
 
-  /* Load HDRI environment map if MOP_HDRI env var is set */
+  /* ---- Post-processing pipeline ---- */
+  mop_viewport_set_post_effects(vp, MOP_POST_TONEMAP | MOP_POST_BLOOM |
+                                        MOP_POST_SSAO | MOP_POST_FXAA);
+  mop_viewport_set_bloom(vp, 1.0f, 0.3f);
+
+  /* ---- HDRI environment map (IBL + optional skybox) ---- */
   {
     const char *hdri = getenv("MOP_HDRI");
     if (hdri) {
@@ -509,9 +534,7 @@ int main(int argc, char *argv[]) {
       };
       if (mop_viewport_set_environment(vp, &edesc)) {
         printf("[mop] HDRI loaded: %s\n", hdri);
-        /* Show HDRI as skybox background */
         mop_viewport_set_environment_background(vp, true);
-        /* Sync with auto-exposure set by environment loader */
         sc.exposure = mop_viewport_get_exposure(vp);
       } else {
         fprintf(stderr, "[mop] Failed to load HDRI: %s\n", hdri);
@@ -528,6 +551,8 @@ int main(int argc, char *argv[]) {
   Uint64 last = SDL_GetPerformanceCounter();
   Uint64 freq = SDL_GetPerformanceFrequency();
   float total_time = 0.0f;
+  int frame_count = 0;
+  float fps_accum = 0.0f;
   bool running = true;
 
   /* RNG seed from time */
@@ -755,6 +780,19 @@ int main(int argc, char *argv[]) {
       SDL_RenderTexture(renderer, tex, NULL, NULL);
       draw_hud(renderer, win_w, win_h, &sc, mop_viewport_get_selected(vp));
       SDL_RenderPresent(renderer);
+    }
+
+    /* ---- FPS in window title ---- */
+    frame_count++;
+    fps_accum += dt;
+    if (fps_accum >= 0.5f) {
+      float fps = (float)frame_count / fps_accum;
+      char title[128];
+      snprintf(title, sizeof(title), "MOP Interactive — %.1f FPS (%.2f ms)",
+               fps, 1000.0f / fps);
+      SDL_SetWindowTitle(window, title);
+      frame_count = 0;
+      fps_accum = 0.0f;
     }
 
     /* ---- Poll MOP events ---- */

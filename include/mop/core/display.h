@@ -14,6 +14,25 @@
 #include <mop/types.h>
 
 /* -------------------------------------------------------------------------
+ * Debug visualization modes (Phase 9B)
+ *
+ * These replace normal shading with diagnostic visualizations.
+ * Set via mop_viewport_set_debug_viz().  MOP_DEBUG_VIZ_NONE restores
+ * normal rendering.
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopDebugViz {
+  MOP_DEBUG_VIZ_NONE = 0,            /* normal rendering */
+  MOP_DEBUG_VIZ_OVERDRAW = 1,        /* overdraw heatmap (red = high) */
+  MOP_DEBUG_VIZ_SHADOW_CASCADES = 2, /* tint by shadow cascade index */
+  MOP_DEBUG_VIZ_LOD_LEVEL = 3,       /* color by active LOD level */
+  MOP_DEBUG_VIZ_CULL_RESULT = 4, /* green=visible, red=culled (1-frame lag) */
+  MOP_DEBUG_VIZ_DEPTH = 5,       /* linear depth grayscale */
+  MOP_DEBUG_VIZ_NORMALS = 6,     /* world normals as RGB */
+  MOP_DEBUG_VIZ_MIPMAP = 7,      /* Hi-Z mip level visualization */
+} MopDebugViz;
+
+/* -------------------------------------------------------------------------
  * Vertex map visualization modes
  * ------------------------------------------------------------------------- */
 
@@ -48,6 +67,9 @@ typedef struct MopDisplaySettings {
   /* Vertex map coloring */
   MopVertexMapDisplay vertex_map_mode;
   uint32_t vertex_map_channel; /* which CUSTOM attrib */
+
+  /* Debug visualization (Phase 9B) */
+  MopDebugViz debug_viz;
 } MopDisplaySettings;
 
 /* -------------------------------------------------------------------------

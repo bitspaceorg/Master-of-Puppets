@@ -1,0 +1,162 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+/*
+ * Master of Puppets — Vulkan Backend
+ * mop_meshlet.task — Task shader for meshlet culling (Phase 10)
+ *
+ * Each workgroup processes one meshlet.  The task shader performs:
+ *   - Frustum culling (bounding sphere vs 6 planes)
+ *   - Backface cone culling (normal cone vs camera)
+ *
+ * Surviving meshlets emit mesh shader workgroups.
+ *
+ * Descriptor layout (set 0):
+ *   binding 0: readonly buffer MeshletSSBO    (MopMeshlet descriptors)
+ *   binding 1: readonly buffer ConeSSBO       (MopMeshletCone per meshlet)
+ *   binding 2: uniform FrameGlobals           (frustum planes, camera)
+ *   binding 3: readonly buffer ObjectSSBO     (per-object data)
+ *
+ * Push constants:
+ *   mat4  model          — object model matrix
+ *   uint  meshlet_offset — first meshlet index for this object
+ *   uint  meshlet_count  — number of meshlets in this object
+ *   uint  draw_id        — object index into ObjectSSBO
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+layout(local_size_x = 32) in;
+
+/* Meshlet descriptor — matches MopMeshlet (32 bytes) */
+struct Meshlet {
+    uint  vertex_offset;
+    uint  vertex_count;
+    uint  triangle_offset;
+    uint  triangle_count;
+    vec3  center;
+    float radius;
+};
+
+/* Normal cone — matches MopMeshletCone (32 bytes) */
+struct MeshletCone {
+    vec3  axis;
+    float cutoff;
+    vec3  apex;
+    float _pad;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer MeshletSSBO {
+    Meshlet meshlets[];
+} meshlet_buf;
+
+layout(std430, set = 0, binding = 1) readonly buffer ConeSSBO {
+    MeshletCone cones[];
+} cone_buf;
+
+layout(std140, set = 0, binding = 2) uniform FrameGlobals {
+    vec4  light_dir;
+    vec4  cam_pos;
+    int   shadows_enabled;
+    int   cascade_count;
+    int   num_lights;
+    float exposure;
+    mat4  cascade_vp[4];
+    vec4  cascade_splits;
+    mat4  view_proj;
+    vec4  frustum_planes[6];
+    uint  total_draws;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+} frame;
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    uint meshlet_offset;
+    uint meshlet_count;
+    uint draw_id;
+} pc;
+
+/* Payload passed to mesh shader */
+struct TaskPayload {
+    uint meshlet_indices[32];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+shared uint s_task_count;
+
+/* Frustum cull a world-space bounding sphere */
+bool frustum_cull(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(frame.frustum_planes[i].xyz, center) +
+                     frame.frustum_planes[i].w;
+        if (dist < -radius)
+            return false;
+    }
+    return true;
+}
+
+/* Backface cone cull: if the entire meshlet faces away from camera,
+ * we can skip it.  The cone has an axis (average normal) and cutoff
+ * (cosine of half-angle).  If dot(cone_axis, view_dir) < -cutoff,
+ * all triangles are back-facing. */
+bool cone_cull(vec3 cone_apex, vec3 cone_axis, float cone_cutoff,
+               vec3 cam_pos) {
+    /* Degenerate cone — never cull */
+    if (cone_cutoff <= -1.0)
+        return false;
+
+    vec3 view_dir = normalize(cam_pos - cone_apex);
+    return dot(view_dir, cone_axis) < -cone_cutoff;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationIndex;
+
+    if (lid == 0)
+        s_task_count = 0;
+    barrier();
+
+    uint meshlet_id = gl_WorkGroupID.x * 32 + lid;
+    uint global_meshlet = pc.meshlet_offset + meshlet_id;
+
+    if (meshlet_id < pc.meshlet_count) {
+        Meshlet ml = meshlet_buf.meshlets[global_meshlet];
+        MeshletCone cone = cone_buf.cones[global_meshlet];
+
+        /* Transform bounding sphere to world space */
+        vec4 world_center = pc.model * vec4(ml.center, 1.0);
+
+        /* Scale radius by maximum axis scale */
+        vec3 col0 = vec3(pc.model[0][0], pc.model[0][1], pc.model[0][2]);
+        vec3 col1 = vec3(pc.model[1][0], pc.model[1][1], pc.model[1][2]);
+        vec3 col2 = vec3(pc.model[2][0], pc.model[2][1], pc.model[2][2]);
+        float max_scale = max(length(col0), max(length(col1), length(col2)));
+        float world_radius = ml.radius * max_scale;
+
+        bool visible = true;
+
+        /* Frustum cull */
+        if (visible)
+            visible = frustum_cull(world_center.xyz, world_radius);
+
+        /* Backface cone cull */
+        if (visible) {
+            vec3 world_apex = (pc.model * vec4(cone.apex, 1.0)).xyz;
+            vec3 world_axis = normalize(mat3(pc.model) * cone.axis);
+            visible = !cone_cull(world_apex, world_axis, cone.cutoff,
+                                 frame.cam_pos.xyz);
+        }
+
+        if (visible) {
+            uint slot = atomicAdd(s_task_count, 1);
+            payload.meshlet_indices[slot] = global_meshlet;
+        }
+    }
+
+    barrier();
+
+    EmitMeshTasksEXT(s_task_count, 1, 1);
+}

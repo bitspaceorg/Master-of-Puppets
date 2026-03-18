@@ -32,8 +32,12 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     int   num_lights;
     float metallic;
     float roughness;
+    int   has_normal_map;
+    int   has_mr_map;
+    int   has_ao_map;
+    int   _pad_maps;
     vec4  cam_pos;
-    Light lights[8];
+    vec4  emissive;
 
     /* Shadow mapping (cascade) — must match solid shader UBO layout */
     int   shadows_enabled;
@@ -41,7 +45,16 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     float _pad_shadow[2];
     mat4  cascade_vp[4];
     vec4  cascade_splits;
+    float exposure;
+    float _pad_e0;
+    float _pad_e1;
+    float _pad_e2;
 } frag;
+
+/* Light SSBO (binding 9) — must be declared even if unused to match layout */
+layout(set = 0, binding = 9) readonly buffer LightSSBO {
+    Light lights[];
+} light_buf;
 
 layout(set = 0, binding = 1) uniform sampler2D u_texture;
 layout(set = 0, binding = 2) uniform sampler2DArrayShadow u_shadow_map;

@@ -21,7 +21,11 @@ typedef enum MopPostEffect {
   MOP_POST_FOG = 1 << 3,
   MOP_POST_FXAA = 1 << 4,
   MOP_POST_BLOOM = 1 << 5,
-  MOP_POST_SSAO = 1 << 6
+  MOP_POST_SSAO = 1 << 6,
+  MOP_POST_TAA = 1 << 7,
+  MOP_POST_SSR = 1 << 8,
+  MOP_POST_OIT = 1 << 9,
+  MOP_POST_VOLUMETRIC = 1 << 10
 } MopPostEffect;
 
 typedef struct MopFogParams {
@@ -43,5 +47,25 @@ float mop_viewport_get_exposure(const MopViewport *viewport);
  * Default: threshold=1.0, intensity=0.5. */
 void mop_viewport_set_bloom(MopViewport *viewport, float threshold,
                             float intensity);
+
+/* Screen-Space Reflections control.
+ * intensity: reflection strength (0..1).  Default: 0.5. */
+void mop_viewport_set_ssr(MopViewport *viewport, float intensity);
+
+/* Volumetric fog parameters.
+ * density: fog density (0..inf, typical 0.01-0.1).
+ * color: scattering color (light scattered towards camera).
+ * anisotropy: Henyey-Greenstein g parameter (-1..1).
+ *   0 = isotropic, >0 forward scatter (god rays), <0 back scatter.
+ * steps: raymarch steps (4..64, default 32).  More = quality, less = speed. */
+typedef struct MopVolumetricParams {
+  float density;
+  MopColor color;
+  float anisotropy;
+  int steps;
+} MopVolumetricParams;
+
+void mop_viewport_set_volumetric(MopViewport *viewport,
+                                 const MopVolumetricParams *params);
 
 #endif /* MOP_RENDER_POSTPROCESS_H */

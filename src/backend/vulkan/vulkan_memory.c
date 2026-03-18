@@ -129,6 +129,63 @@ VkResult mop_vk_create_image(VkDevice device,
 }
 
 /* -------------------------------------------------------------------------
+ * Create a VkImage with mip chain
+ * ------------------------------------------------------------------------- */
+
+VkResult mop_vk_create_image_mipped(
+    VkDevice device, const VkPhysicalDeviceMemoryProperties *props,
+    uint32_t width, uint32_t height, VkFormat format, uint32_t mip_levels,
+    VkImageUsageFlags usage, VkImage *out_image, VkDeviceMemory *out_memory) {
+  if (mip_levels == 0)
+    mip_levels = 1;
+
+  VkImageCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = format,
+      .extent = {width, height, 1},
+      .mipLevels = mip_levels,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = usage,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+
+  VkResult r = vkCreateImage(device, &ci, NULL, out_image);
+  if (r != VK_SUCCESS)
+    return r;
+
+  VkMemoryRequirements req;
+  vkGetImageMemoryRequirements(device, *out_image, &req);
+
+  int mem_idx = mop_vk_find_memory_type(props, req.memoryTypeBits,
+                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  if (mem_idx < 0) {
+    vkDestroyImage(device, *out_image, NULL);
+    *out_image = VK_NULL_HANDLE;
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+  }
+
+  VkMemoryAllocateInfo ai = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = req.size,
+      .memoryTypeIndex = (uint32_t)mem_idx,
+  };
+
+  r = vkAllocateMemory(device, &ai, NULL, out_memory);
+  if (r != VK_SUCCESS) {
+    vkDestroyImage(device, *out_image, NULL);
+    *out_image = VK_NULL_HANDLE;
+    return r;
+  }
+
+  vkBindImageMemory(device, *out_image, *out_memory, 0);
+  return VK_SUCCESS;
+}
+
+/* -------------------------------------------------------------------------
  * Create a VkImageView
  * ------------------------------------------------------------------------- */
 
@@ -151,6 +208,40 @@ VkResult mop_vk_create_image_view(VkDevice device, VkImage image,
           {
               .aspectMask = aspect,
               .baseMipLevel = 0,
+              .levelCount = 1,
+              .baseArrayLayer = 0,
+              .layerCount = 1,
+          },
+  };
+
+  return vkCreateImageView(device, &ci, NULL, out_view);
+}
+
+/* -------------------------------------------------------------------------
+ * Create a VkImageView for a specific mip level
+ * ------------------------------------------------------------------------- */
+
+VkResult mop_vk_create_image_view_mip(VkDevice device, VkImage image,
+                                      VkFormat format,
+                                      VkImageAspectFlags aspect,
+                                      uint32_t mip_level,
+                                      VkImageView *out_view) {
+  VkImageViewCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = format,
+      .components =
+          {
+              .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+              .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+              .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+              .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+          },
+      .subresourceRange =
+          {
+              .aspectMask = aspect,
+              .baseMipLevel = mip_level,
               .levelCount = 1,
               .baseArrayLayer = 0,
               .layerCount = 1,

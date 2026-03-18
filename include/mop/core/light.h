@@ -2,8 +2,8 @@
  * Master of Puppets — Backend-Agnostic Viewport Rendering Engine
  * light.h — Multi-light system
  *
- * Supports directional, point, and spot lights.  Up to MOP_MAX_LIGHTS
- * may be active per viewport simultaneously.
+ * Supports directional, point, and spot lights.  The viewport dynamically
+ * grows its light array — there is no fixed upper limit.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -12,8 +12,6 @@
 #define MOP_CORE_LIGHT_H
 
 #include <mop/types.h>
-
-#define MOP_MAX_LIGHTS 8
 
 /* -------------------------------------------------------------------------
  * Light types
@@ -53,7 +51,7 @@ typedef struct MopLight {
 typedef struct MopViewport MopViewport;
 
 /* Add a light to the viewport.  Returns pointer to the slot, or NULL
- * if MOP_MAX_LIGHTS is reached.  The viewport copies the descriptor. */
+ * on allocation failure.  The viewport copies the descriptor. */
 MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc);
 
 /* Remove a light (sets active = false). */

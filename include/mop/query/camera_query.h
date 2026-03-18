@@ -8,6 +8,7 @@
 #ifndef MOP_QUERY_CAMERA_QUERY_H
 #define MOP_QUERY_CAMERA_QUERY_H
 
+#include <mop/interact/camera.h>
 #include <mop/types.h>
 
 /* Forward declaration */
@@ -28,6 +29,8 @@ typedef struct MopCameraState {
   float near_plane;
   float far_plane;
   float aspect_ratio;
+  float ortho_size;   /* ortho half-height (0 in perspective mode) */
+  MopCameraMode mode; /* perspective or orthographic */
   MopMat4 view_matrix;
   MopMat4 projection_matrix;
 } MopCameraState;

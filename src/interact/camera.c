@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "core/viewport_internal.h"
+
 #include <math.h>
 #include <mop/core/viewport.h>
 #include <mop/interact/camera.h>
@@ -25,6 +27,8 @@ MopOrbitCamera mop_orbit_camera_default(void) {
       .far_plane = 100.0f,
       .max_pitch = 3.14159265f,
       .target_distance = 4.5f,
+      .mode = MOP_CAMERA_PERSPECTIVE,
+      .ortho_size = 5.0f,
   };
 }
 
@@ -38,6 +42,13 @@ MopVec3 mop_orbit_camera_eye(const MopOrbitCamera *cam) {
 }
 
 void mop_orbit_camera_apply(const MopOrbitCamera *cam, MopViewport *vp) {
+  if (!vp)
+    return;
+  /* Sync camera mode + ortho size to viewport before projection computation */
+  MopViewport *vpi = vp; /* viewport_internal.h provides full struct def */
+  vpi->cam_mode = cam->mode;
+  vpi->cam_ortho_size = cam->ortho_size;
+
   /* Derive up vector from orbit angles (pitch tangent on the sphere).
    * This is always perpendicular to the view direction, avoiding gimbal
    * lock at ±90° pitch where a fixed (0,1,0) up would fail. */
@@ -66,7 +77,9 @@ void mop_orbit_camera_orbit(MopOrbitCamera *cam, float dx, float dy,
 }
 
 void mop_orbit_camera_pan(MopOrbitCamera *cam, float dx, float dy) {
-  float s = cam->distance * 0.003f;
+  float scale =
+      (cam->mode == MOP_CAMERA_ORTHOGRAPHIC) ? cam->ortho_size : cam->distance;
+  float s = scale * 0.003f;
   float cos_yaw = cosf(cam->yaw);
   float sin_yaw = sinf(cam->yaw);
   cam->target.x -= cos_yaw * dx * s;
@@ -75,12 +88,21 @@ void mop_orbit_camera_pan(MopOrbitCamera *cam, float dx, float dy) {
 }
 
 void mop_orbit_camera_zoom(MopOrbitCamera *cam, float delta) {
-  cam->distance -= delta * 0.3f;
-  if (cam->distance < 0.5f)
-    cam->distance = 0.5f;
-  if (cam->distance > 500.0f)
-    cam->distance = 500.0f;
-  cam->target_distance = cam->distance;
+  if (cam->mode == MOP_CAMERA_ORTHOGRAPHIC) {
+    /* Ortho: zoom by scaling the visible area */
+    cam->ortho_size -= delta * cam->ortho_size * 0.1f;
+    if (cam->ortho_size < 0.01f)
+      cam->ortho_size = 0.01f;
+    if (cam->ortho_size > 1000.0f)
+      cam->ortho_size = 1000.0f;
+  } else {
+    cam->distance -= delta * 0.3f;
+    if (cam->distance < 0.5f)
+      cam->distance = 0.5f;
+    if (cam->distance > 500.0f)
+      cam->distance = 500.0f;
+    cam->target_distance = cam->distance;
+  }
 }
 
 void mop_orbit_camera_move(MopOrbitCamera *cam, float forward, float right) {

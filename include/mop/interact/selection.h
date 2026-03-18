@@ -21,13 +21,12 @@ typedef enum MopEditMode {
   MOP_EDIT_FACE = 3,   /* face edit mode */
 } MopEditMode;
 
-#define MOP_MAX_SELECTED_ELEMENTS 4096
-
 typedef struct MopSelection {
   MopEditMode mode;
   uint32_t mesh_object_id; /* which mesh we're editing */
-  uint32_t elements[MOP_MAX_SELECTED_ELEMENTS];
+  uint32_t *elements;
   uint32_t element_count;
+  uint32_t element_capacity;
 } MopSelection;
 
 /* Enter/exit edit mode on a mesh */

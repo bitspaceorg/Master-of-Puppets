@@ -355,7 +355,7 @@ static void test_geometry_update_cycle(void) {
 
 /* =========================================================================
  * 7. Undo overflow — send 300 POINTER_DOWN/UP events, exceeding
- *    MOP_UNDO_CAPACITY=256. Must not crash.
+ *    the initial undo capacity (256). Must not crash.
  * ========================================================================= */
 
 static void test_undo_overflow(void) {

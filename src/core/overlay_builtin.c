@@ -380,6 +380,164 @@ void mop_overlay_builtin_bounds(MopViewport *vp, void *user_data) {
 }
 
 /* -------------------------------------------------------------------------
+ * Skeleton overlay (Phase 6B)
+ *
+ * For each active skinned mesh with bone hierarchy, draw lines from each
+ * bone to its parent (bone_matrices translation column = joint position
+ * in mesh-local space).  Also draw small filled circles at joint positions
+ * via the 2D overlay prim buffer.
+ * ------------------------------------------------------------------------- */
+
+void mop_overlay_builtin_skeleton(MopViewport *vp, void *user_data) {
+  (void)user_data;
+  if (!vp)
+    return;
+
+  for (uint32_t mi = 0; mi < vp->mesh_count; mi++) {
+    struct MopMesh *m = &vp->meshes[mi];
+    if (!m->active || m->bone_count == 0 || !m->bone_matrices ||
+        !m->bone_parents)
+      continue;
+    if (m->object_id == 0 || m->object_id >= 0xFFFE0000u)
+      continue;
+
+    /* Count lines: one per bone that has a parent */
+    uint32_t line_count = 0;
+    for (uint32_t b = 0; b < m->bone_count; b++) {
+      if (m->bone_parents[b] >= 0 &&
+          (uint32_t)m->bone_parents[b] < m->bone_count)
+        line_count++;
+    }
+    if (line_count == 0)
+      continue;
+
+    uint32_t line_vc = line_count * 2;
+    uint32_t line_ic = line_count * 2;
+    MopVertex *line_v = malloc(line_vc * sizeof(MopVertex));
+    uint32_t *line_i = malloc(line_ic * sizeof(uint32_t));
+    if (!line_v || !line_i) {
+      free(line_v);
+      free(line_i);
+      continue;
+    }
+
+    /* Bone color: cyan for lines */
+    MopColor bone_color = {0.0f, 0.9f, 0.9f, 1.0f};
+    MopVec3 zero_n = {0, 1, 0};
+
+    uint32_t idx = 0;
+    for (uint32_t b = 0; b < m->bone_count; b++) {
+      int32_t pi = m->bone_parents[b];
+      if (pi < 0 || (uint32_t)pi >= m->bone_count)
+        continue;
+
+      /* Extract bone position from translation column (column-major) */
+      const float *cm = m->bone_matrices[b].d;
+      MopVec3 child_pos = {cm[12], cm[13], cm[14]};
+
+      const float *pm = m->bone_matrices[pi].d;
+      MopVec3 parent_pos = {pm[12], pm[13], pm[14]};
+
+      line_v[idx * 2 + 0] = (MopVertex){parent_pos, zero_n, bone_color, 0, 0};
+      line_v[idx * 2 + 1] = (MopVertex){child_pos, zero_n, bone_color, 0, 0};
+      line_i[idx * 2 + 0] = idx * 2;
+      line_i[idx * 2 + 1] = idx * 2 + 1;
+      idx++;
+    }
+
+    /* Create temp buffers */
+    MopRhiBufferDesc vb_desc = {.data = line_v,
+                                .size = line_vc * sizeof(MopVertex)};
+    MopRhiBufferDesc ib_desc = {.data = line_i,
+                                .size = line_ic * sizeof(uint32_t)};
+    MopRhiBuffer *vb = vp->rhi->buffer_create(vp->device, &vb_desc);
+    MopRhiBuffer *ib = vp->rhi->buffer_create(vp->device, &ib_desc);
+    free(line_v);
+    free(line_i);
+
+    if (!vb || !ib) {
+      if (vb)
+        vp->rhi->buffer_destroy(vp->device, vb);
+      if (ib)
+        vp->rhi->buffer_destroy(vp->device, ib);
+      continue;
+    }
+
+    MopMat4 mvp = mop_mat4_multiply(
+        vp->projection_matrix,
+        mop_mat4_multiply(vp->view_matrix, m->world_transform));
+
+    MopRhiDrawCall call = {
+        .vertex_buffer = vb,
+        .index_buffer = ib,
+        .vertex_count = line_vc,
+        .index_count = line_ic,
+        .object_id = 0,
+        .model = m->world_transform,
+        .view = vp->view_matrix,
+        .projection = vp->projection_matrix,
+        .mvp = mvp,
+        .base_color = (MopColor){1, 1, 1, 1},
+        .opacity = 1.0f,
+        .light_dir = vp->light_dir,
+        .ambient = 1.0f,
+        .shading_mode = MOP_SHADING_FLAT,
+        .wireframe = true,
+        .depth_test = true,
+        .backface_cull = false,
+        .texture = NULL,
+        .blend_mode = MOP_BLEND_OPAQUE,
+        .metallic = 0.0f,
+        .roughness = 0.5f,
+        .emissive = (MopVec3){0, 0, 0},
+        .lights = NULL,
+        .light_count = 0,
+        .vertex_format = NULL,
+    };
+    vp->rhi->draw(vp->device, vp->framebuffer, &call);
+
+    vp->rhi->buffer_destroy(vp->device, vb);
+    vp->rhi->buffer_destroy(vp->device, ib);
+
+    /* Joint indicators — project bone positions to screen-space and push
+     * filled circles via the 2D overlay prim buffer. */
+    for (uint32_t b = 0; b < m->bone_count; b++) {
+      const float *bm = m->bone_matrices[b].d;
+      MopVec3 bpos = {bm[12], bm[13], bm[14]};
+
+      /* Transform to clip space via world_transform → view → projection */
+      float w4[4] = {bpos.x, bpos.y, bpos.z, 1.0f};
+      /* Apply world transform */
+      const float *wm = m->world_transform.d;
+      float wx = wm[0] * w4[0] + wm[4] * w4[1] + wm[8] * w4[2] + wm[12];
+      float wy = wm[1] * w4[0] + wm[5] * w4[1] + wm[9] * w4[2] + wm[13];
+      float wz = wm[2] * w4[0] + wm[6] * w4[1] + wm[10] * w4[2] + wm[14];
+      /* MVP */
+      const float *mp = mvp.d;
+      float cx = mp[0] * bpos.x + mp[4] * bpos.y + mp[8] * bpos.z + mp[12];
+      float cy = mp[1] * bpos.x + mp[5] * bpos.y + mp[9] * bpos.z + mp[13];
+      float cz = mp[2] * bpos.x + mp[6] * bpos.y + mp[10] * bpos.z + mp[14];
+      float cw = mp[3] * bpos.x + mp[7] * bpos.y + mp[11] * bpos.z + mp[15];
+      if (cw <= 0.001f)
+        continue; /* behind camera */
+
+      float ndcx = cx / cw;
+      float ndcy = cy / cw;
+      float ndcz = cz / cw;
+      /* NDC to pixel */
+      float sx = (ndcx * 0.5f + 0.5f) * (float)vp->width;
+      float sy = (1.0f - (ndcy * 0.5f + 0.5f)) * (float)vp->height;
+
+      /* Yellow filled circles for joints */
+      mop_overlay_push_circle(vp, sx, sy, 3.0f, 1.0f, 0.9f, 0.1f, 0.9f, ndcz);
+      (void)wx;
+      (void)wy;
+      (void)wz;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
  * Selection highlight overlay
  *
  * If a mesh is in the selection set, redraw it with additive blend at a
@@ -1382,7 +1540,7 @@ void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data) {
   float line_w = 3.0f;
   float opacity = 1.0f;
 
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     if (!vp->lights[i].active)
       continue;
     const MopLight *light = &vp->lights[i];
@@ -1789,7 +1947,7 @@ void mop_overlay_builtin_camera_objects(MopViewport *vp, void *user_data) {
   float line_w = vp->theme.camera_frustum_line_width;
   float opacity = 1.0f;
 
-  for (uint32_t ci = 0; ci < MOP_MAX_CAMERAS; ci++) {
+  for (uint32_t ci = 0; ci < vp->camera_count; ci++) {
     const struct MopCameraObject *cam = &vp->cameras[ci];
     if (!cam->active)
       continue;

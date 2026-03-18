@@ -49,7 +49,7 @@ void mop_viewport_select_element(MopViewport *vp, uint32_t element_index) {
   }
 
   /* Add if not at max */
-  if (sel->element_count < MOP_MAX_SELECTED_ELEMENTS) {
+  if (sel->element_count < sel->element_capacity) {
     sel->elements[sel->element_count] = element_index;
     sel->element_count++;
   }
@@ -92,7 +92,7 @@ void mop_viewport_toggle_element(MopViewport *vp, uint32_t element_index) {
   }
 
   /* Not present — add */
-  if (sel->element_count < MOP_MAX_SELECTED_ELEMENTS) {
+  if (sel->element_count < sel->element_capacity) {
     sel->elements[sel->element_count] = element_index;
     sel->element_count++;
   }
@@ -125,7 +125,7 @@ void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive) {
   }
 
   /* Add to selection */
-  if (vp->selected_count < MOP_MAX_SELECTED) {
+  if (vp->selected_count < vp->selected_capacity) {
     vp->selected_ids[vp->selected_count] = id;
     vp->selected_count++;
   }

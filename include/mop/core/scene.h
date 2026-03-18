@@ -8,6 +8,7 @@
 #ifndef MOP_CORE_SCENE_H
 #define MOP_CORE_SCENE_H
 
+#include <mop/core/display.h>
 #include <mop/core/vertex_format.h>
 #include <mop/types.h>
 
@@ -154,6 +155,58 @@ void mop_mesh_set_parent(MopMesh *mesh, MopMesh *parent, MopViewport *viewport);
 void mop_mesh_clear_parent(MopMesh *mesh);
 
 /* -------------------------------------------------------------------------
+ * Skeletal skinning
+ *
+ * Set bone matrices for a skinned mesh.  The mesh must have been created
+ * with mop_viewport_add_mesh_ex() using a vertex format that includes
+ * MOP_ATTRIB_JOINTS (ubyte4) and MOP_ATTRIB_WEIGHTS (float4).
+ *
+ * On the first call, MOP copies the current vertex data as the "bind pose".
+ * Subsequent calls update bone matrices and mark the mesh for re-skinning.
+ * Skinning is applied automatically before the next render.
+ *
+ * matrices: array of bone_count transform matrices (bind-to-current).
+ * Ownership: MOP copies the data; the caller may free after return.
+ * ------------------------------------------------------------------------- */
+
+void mop_mesh_set_bone_matrices(MopMesh *mesh, MopViewport *viewport,
+                                const MopMat4 *matrices, uint32_t bone_count);
+
+/* -------------------------------------------------------------------------
+ * Bone hierarchy (for skeleton visualization)
+ *
+ * parent_indices: array of bone_count signed integers.  parent_indices[i]
+ * is the parent bone index for bone i, or -1 if bone i is a root.
+ * Ownership: MOP copies the data; the caller may free after return.
+ * Must be called after mop_mesh_set_bone_matrices().
+ * ------------------------------------------------------------------------- */
+
+void mop_mesh_set_bone_hierarchy(MopMesh *mesh, const int32_t *parent_indices,
+                                 uint32_t bone_count);
+
+/* -------------------------------------------------------------------------
+ * Morph targets / blend shapes
+ *
+ * Each morph target is a position-delta array (float3 per vertex,
+ * tightly packed).  The engine blends targets using weights each frame:
+ *   final_pos = base_pos + sum(weight[i] * target[i][vertex])
+ *
+ * targets: packed float array, target_count * vertex_count * 3 floats.
+ *          target[t] starts at offset t * vertex_count * 3.
+ * weights: array of target_count blend weights (0.0 = off, 1.0 = full).
+ * Ownership: MOP copies all data; the caller may free after return.
+ * ------------------------------------------------------------------------- */
+
+void mop_mesh_set_morph_targets(MopMesh *mesh, MopViewport *viewport,
+                                const float *targets, const float *weights,
+                                uint32_t target_count);
+
+/* Update morph weights without re-uploading target data.
+ * weights: array of target_count floats. */
+void mop_mesh_set_morph_weights(MopMesh *mesh, const float *weights,
+                                uint32_t target_count);
+
+/* -------------------------------------------------------------------------
  * Instanced mesh API (Phase 6B)
  *
  * An instanced mesh stores a single piece of geometry with multiple
@@ -178,5 +231,39 @@ void mop_instanced_mesh_update_transforms(MopInstancedMesh *mesh,
 /* Remove an instanced mesh from the viewport and free its resources. */
 void mop_viewport_remove_instanced_mesh(MopViewport *viewport,
                                         MopInstancedMesh *mesh);
+
+/* -------------------------------------------------------------------------
+ * LOD (Level of Detail) — Phase 9C
+ *
+ * Each mesh can carry a chain of LOD levels.  LOD 0 is the base mesh
+ * (the geometry provided at creation time).  Additional levels have
+ * progressively fewer triangles.  The engine selects the active LOD
+ * based on screen-space projected size each frame.
+ *
+ * screen_threshold: if the mesh's projected diameter in pixels is below
+ *   this value, the engine switches to the next lower LOD.  LOD 0 has
+ *   no threshold (always used when the mesh is large enough).
+ *
+ * lod_bias: global LOD bias offset.  Positive = prefer lower detail,
+ *   negative = prefer higher detail.  Default 0.0.
+ * ------------------------------------------------------------------------- */
+
+#define MOP_MAX_LOD_LEVELS 8
+
+/* Add a LOD level to a mesh.  Returns the LOD index (1..MOP_MAX_LOD_LEVELS-1),
+ * or -1 on failure.  LOD 0 is always the original mesh geometry.
+ * screen_threshold: projected diameter in pixels below which this LOD
+ *   is preferred over the previous (higher-detail) level. */
+int32_t mop_mesh_add_lod(MopMesh *mesh, MopViewport *viewport,
+                         const MopMeshDesc *desc, float screen_threshold);
+
+/* Set the global LOD bias for a viewport.
+ * Positive values shift towards lower detail; negative towards higher. */
+void mop_viewport_set_lod_bias(MopViewport *viewport, float bias);
+float mop_viewport_get_lod_bias(const MopViewport *viewport);
+
+/* Set debug visualization mode for the viewport. */
+void mop_viewport_set_debug_viz(MopViewport *viewport, MopDebugViz mode);
+MopDebugViz mop_viewport_get_debug_viz(const MopViewport *viewport);
 
 #endif /* MOP_CORE_SCENE_H */

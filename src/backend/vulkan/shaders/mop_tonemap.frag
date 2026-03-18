@@ -18,6 +18,7 @@
  * Binding 0: HDR color
  * Binding 1-5: Bloom levels 0-4 (only 0-1 sampled; 2-4 for layout compat)
  * Binding 6: SSAO (or 1x1 white if disabled)
+ * Binding 7: SSR  (or 1x1 black if disabled) — reflection RGB + confidence A
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +30,7 @@ layout(set = 0, binding = 3) uniform sampler2D u_bloom2;
 layout(set = 0, binding = 4) uniform sampler2D u_bloom3;
 layout(set = 0, binding = 5) uniform sampler2D u_bloom4;
 layout(set = 0, binding = 6) uniform sampler2D u_ssao;
+layout(set = 0, binding = 7) uniform sampler2D u_ssr;
 
 layout(push_constant) uniform PC {
     float exposure;
@@ -57,11 +59,17 @@ void main() {
     }
 
     float ao = texture(u_ssao, v_uv).r;
+    /* Guard against broken AO binding (white fallback reads 0 on some drivers) */
+    if (ao < 0.01) ao = 1.0;
 
     /* Two-level bloom: half-res (level 0) + quarter-res (level 1).
      * Bilinear upsampling by the texture unit gives natural soft bloom. */
     vec3 bloom = texture(u_bloom0, v_uv).rgb * 0.6
                + texture(u_bloom1, v_uv).rgb * 0.4;
+
+    /* SSR: add reflections weighted by confidence (alpha channel) */
+    vec4 ssr = texture(u_ssr, v_uv);
+    hdr += ssr.rgb * ssr.a;
 
     /* Combine: HDR + bloom, modulated by AO */
     vec3 combined = (hdr + bloom * pc.bloom_intensity) * ao;

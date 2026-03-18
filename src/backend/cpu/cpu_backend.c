@@ -15,10 +15,9 @@
 #include "rasterizer/rasterizer_mt.h"
 #include "rhi/rhi.h"
 
+#include <math.h>
 #include <mop/core/vertex_format.h>
 #include <mop/util/log.h>
-
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -171,6 +170,11 @@ static void cpu_frame_begin(MopRhiDevice *device, MopRhiFramebuffer *fb,
 }
 
 static void cpu_frame_end(MopRhiDevice *device, MopRhiFramebuffer *fb) {
+  (void)device;
+  (void)fb;
+}
+
+static void cpu_frame_submit(MopRhiDevice *device, MopRhiFramebuffer *fb) {
   (void)device;
   (void)fb;
 }
@@ -987,6 +991,7 @@ static const MopRhiBackend CPU_BACKEND = {
     .framebuffer_resize = cpu_framebuffer_resize,
     .frame_begin = cpu_frame_begin,
     .frame_end = cpu_frame_end,
+    .frame_submit = cpu_frame_submit,
     .draw = cpu_draw,
     .pick_read_id = cpu_pick_read_id,
     .pick_read_depth = cpu_pick_read_depth,
@@ -1001,11 +1006,19 @@ static const MopRhiBackend CPU_BACKEND = {
     .buffer_read = cpu_buffer_read,
     .frame_gpu_time_ms = cpu_frame_gpu_time_ms,
     .set_exposure = cpu_set_exposure,
-    .set_bloom = NULL, /* bloom is GPU-only */
-    .set_ssao = NULL,  /* SSAO is GPU-only */
+    .set_bloom = NULL,      /* bloom is GPU-only */
+    .set_ssao = NULL,       /* SSAO is GPU-only */
+    .set_ssr = NULL,        /* SSR is GPU-only */
+    .set_oit = NULL,        /* OIT is GPU-only */
+    .add_decal = NULL,      /* decals are GPU-only */
+    .remove_decal = NULL,   /* decals are GPU-only */
+    .clear_decals = NULL,   /* decals are GPU-only */
+    .set_volumetric = NULL, /* volumetric fog is GPU-only */
     .set_ibl_textures = cpu_set_ibl_textures,
     .draw_skybox = cpu_draw_skybox,
     .draw_overlays = cpu_draw_overlays,
+    .shader_create = NULL,  /* shaders are GPU-only */
+    .shader_destroy = NULL, /* shaders are GPU-only */
 };
 
 const MopRhiBackend *mop_rhi_backend_cpu(void) { return &CPU_BACKEND; }

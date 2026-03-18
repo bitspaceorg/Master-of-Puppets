@@ -183,6 +183,32 @@ void mop_viewport_set_post_effects(MopViewport *viewport, uint32_t effects) {
     bool enabled = (effects & MOP_POST_SSAO) != 0;
     viewport->rhi->set_ssao(viewport->device, enabled);
   }
+
+  /* Propagate SSR enable/disable to GPU backend */
+  if (viewport->rhi && viewport->device && viewport->rhi->set_ssr) {
+    bool enabled = (effects & MOP_POST_SSR) != 0;
+    viewport->rhi->set_ssr(viewport->device, enabled, viewport->ssr_intensity);
+  }
+
+  /* Propagate OIT enable/disable to GPU backend */
+  if (viewport->rhi && viewport->device && viewport->rhi->set_oit) {
+    bool enabled = (effects & MOP_POST_OIT) != 0;
+    viewport->rhi->set_oit(viewport->device, enabled);
+  }
+
+  /* Propagate volumetric fog enable/disable to GPU backend.
+   * When enabled via flag without prior set_volumetric, uses defaults. */
+  if (viewport->rhi && viewport->device && viewport->rhi->set_volumetric) {
+    if (effects & MOP_POST_VOLUMETRIC) {
+      viewport->rhi->set_volumetric(viewport->device,
+                                    viewport->volumetric_params.density,
+                                    viewport->volumetric_params.color.r,
+                                    viewport->volumetric_params.color.g,
+                                    viewport->volumetric_params.color.b,
+                                    viewport->volumetric_params.anisotropy,
+                                    viewport->volumetric_params.steps);
+    }
+  }
 }
 
 void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog) {
@@ -198,6 +224,32 @@ void mop_viewport_set_exposure(MopViewport *vp, float exposure) {
 
 float mop_viewport_get_exposure(const MopViewport *vp) {
   return vp ? vp->exposure : 1.0f;
+}
+
+void mop_viewport_set_ssr(MopViewport *vp, float intensity) {
+  if (!vp)
+    return;
+  vp->ssr_intensity = intensity > 0.0f ? intensity : 0.0f;
+
+  /* Propagate to GPU backend */
+  if (vp->rhi && vp->device && vp->rhi->set_ssr) {
+    bool enabled = (vp->post_effects & MOP_POST_SSR) != 0;
+    vp->rhi->set_ssr(vp->device, enabled, vp->ssr_intensity);
+  }
+}
+
+void mop_viewport_set_volumetric(MopViewport *vp,
+                                 const MopVolumetricParams *params) {
+  if (!vp || !params)
+    return;
+  vp->volumetric_params = *params;
+
+  /* Propagate to GPU backend */
+  if (vp->rhi && vp->device && vp->rhi->set_volumetric) {
+    vp->rhi->set_volumetric(vp->device, params->density, params->color.r,
+                            params->color.g, params->color.b,
+                            params->anisotropy, params->steps);
+  }
 }
 
 void mop_viewport_set_bloom(MopViewport *vp, float threshold, float intensity) {

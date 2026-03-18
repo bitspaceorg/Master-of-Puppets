@@ -24,6 +24,7 @@ typedef struct MopRhiDevice MopRhiDevice;
 typedef struct MopRhiBuffer MopRhiBuffer;
 typedef struct MopRhiFramebuffer MopRhiFramebuffer;
 typedef struct MopRhiTexture MopRhiTexture;
+typedef struct MopRhiShader MopRhiShader;
 
 /* -------------------------------------------------------------------------
  * Buffer descriptor
@@ -96,6 +97,11 @@ typedef struct MopRhiDrawCall {
   /* Line rendering (Phase 1) */
   float line_width; /* wireframe line width in pixels, default 1.0 */
   float depth_bias; /* z offset for coplanar overlay prevention */
+
+  /* Local-space bounding box (Phase 2B) — for GPU frustum culling.
+   * Zero min/max = no bounds available (skip culling for this draw). */
+  MopVec3 aabb_min;
+  MopVec3 aabb_max;
 } MopRhiDrawCall;
 
 /* -------------------------------------------------------------------------
@@ -131,6 +137,7 @@ typedef struct MopRhiBackend {
   void (*frame_begin)(MopRhiDevice *device, MopRhiFramebuffer *fb,
                       MopColor clear_color);
   void (*frame_end)(MopRhiDevice *device, MopRhiFramebuffer *fb);
+  void (*frame_submit)(MopRhiDevice *device, MopRhiFramebuffer *fb);
   void (*draw)(MopRhiDevice *device, MopRhiFramebuffer *fb,
                const MopRhiDrawCall *call);
 
@@ -196,6 +203,36 @@ typedef struct MopRhiBackend {
   /* Enable/disable SSAO. GPU backends toggle the SSAO pass. */
   void (*set_ssao)(MopRhiDevice *dev, bool enabled);
 
+  /* Enable/disable SSR. GPU backends toggle the SSR pass.
+   * intensity: reflection strength (0..1). */
+  void (*set_ssr)(MopRhiDevice *dev, bool enabled, float intensity);
+
+  /* Enable/disable OIT (Order-Independent Transparency).
+   * GPU backends use Weighted Blended OIT (McGuire/Bavoil 2013). */
+  void (*set_oit)(MopRhiDevice *dev, bool enabled);
+
+  /* Deferred decals: add/remove/clear projected decal volumes.
+   * transform: 16 floats (column-major 4x4 decal box transform).
+   * Returns decal ID (0..255) or -1 on failure. */
+  int32_t (*add_decal)(MopRhiDevice *dev, const float *transform, float opacity,
+                       int32_t texture_idx);
+  void (*remove_decal)(MopRhiDevice *dev, int32_t decal_id);
+  void (*clear_decals)(MopRhiDevice *dev);
+
+  /* Volumetric fog control.  GPU backends store parameters; CPU is a no-op. */
+  void (*set_volumetric)(MopRhiDevice *dev, float density, float r, float g,
+                         float b, float anisotropy, int steps);
+
+  /* Set TAA parameters for the temporal anti-aliasing resolve pass.
+   * inv_vp_jittered: 16 floats, inverse of (jittered projection * view).
+   * prev_vp: 16 floats, previous frame's (unjittered) VP matrix.
+   * jitter_x/y: sub-pixel jitter in pixels for current frame.
+   * first_frame: true when no history is available.
+   * GPU backends store for use in frame_end; CPU backend is a no-op. */
+  void (*set_taa_params)(MopRhiDevice *dev, const float *inv_vp_jittered,
+                         const float *prev_vp, float jitter_x, float jitter_y,
+                         bool first_frame);
+
   /* Set IBL textures for environment-based lighting.
    * GPU backends store image views for descriptor binding.
    * CPU backend is a no-op (IBL handled via mop_sw_ibl_set). */
@@ -221,6 +258,13 @@ typedef struct MopRhiBackend {
   void (*draw_overlays)(MopRhiDevice *dev, MopRhiFramebuffer *fb,
                         const void *prims, uint32_t prim_count,
                         const void *grid_params, int fb_width, int fb_height);
+
+  /* Shader module management (Phase 0C — runtime shader loading).
+   * bytecode: SPIR-V uint32 array for Vulkan, ignored by CPU.
+   * Returns opaque handle; NULL on failure or unsupported backend. */
+  MopRhiShader *(*shader_create)(MopRhiDevice *dev, const uint32_t *bytecode,
+                                 size_t size);
+  void (*shader_destroy)(MopRhiDevice *dev, MopRhiShader *shader);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------

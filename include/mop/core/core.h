@@ -12,9 +12,12 @@
 #include <mop/core/display.h>
 #include <mop/core/light.h>
 #include <mop/core/material.h>
+#include <mop/core/material_graph.h>
+#include <mop/core/meshlet.h>
 #include <mop/core/overlay.h>
 #include <mop/core/pipeline.h>
 #include <mop/core/scene.h>
+#include <mop/core/texture_pipeline.h>
 #include <mop/core/theme.h>
 #include <mop/core/vertex_format.h>
 #include <mop/core/viewport.h>

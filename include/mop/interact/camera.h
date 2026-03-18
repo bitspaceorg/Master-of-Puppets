@@ -14,6 +14,15 @@
 typedef struct MopViewport MopViewport;
 
 /* -------------------------------------------------------------------------
+ * Camera projection mode
+ * ------------------------------------------------------------------------- */
+
+typedef enum MopCameraMode {
+  MOP_CAMERA_PERSPECTIVE = 0,
+  MOP_CAMERA_ORTHOGRAPHIC = 1,
+} MopCameraMode;
+
+/* -------------------------------------------------------------------------
  * Orbit camera
  *
  * A spherical camera that orbits around a target point.  Standard controls
@@ -31,6 +40,9 @@ typedef struct MopOrbitCamera {
   float max_pitch; /* pitch clamp (default π — full vertical orbit) */
 
   float target_distance; /* smooth zoom target (interpolated by tick) */
+
+  MopCameraMode mode; /* perspective or orthographic */
+  float ortho_size;   /* ortho half-height in world units (default 5.0) */
 } MopOrbitCamera;
 
 /* Return sensible defaults: distance 4.5, yaw 0.6, pitch 0.4, fov 60,

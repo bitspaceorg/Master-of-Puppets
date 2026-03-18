@@ -8,6 +8,7 @@
 #include "core/viewport_internal.h"
 #include <math.h>
 #include <mop/mop.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -24,21 +25,41 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
     return NULL;
   if (desc->object_id == 0)
     return NULL;
-  if (vp->camera_count >= MOP_MAX_CAMERAS)
-    return NULL;
 
   /* Find first inactive slot */
-  MopCameraObject *cam = NULL;
-  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+  for (uint32_t i = 0; i < vp->camera_count; i++) {
     if (!vp->cameras[i].active) {
-      cam = &vp->cameras[i];
-      break;
+      MopCameraObject *cam = &vp->cameras[i];
+      memset(cam, 0, sizeof(*cam));
+      cam->position = desc->position;
+      cam->target = desc->target;
+      cam->up = desc->up;
+      cam->fov_degrees = desc->fov_degrees;
+      cam->near_plane = desc->near_plane;
+      cam->far_plane = desc->far_plane;
+      cam->aspect_ratio = desc->aspect_ratio;
+      cam->object_id = desc->object_id;
+      cam->active = true;
+      cam->frustum_visible = true;
+      if (desc->name) {
+        strncpy(cam->name, desc->name, sizeof(cam->name) - 1);
+        cam->name[sizeof(cam->name) - 1] = '\0';
+      }
+      return cam;
     }
   }
-  if (!cam)
-    return NULL;
 
-  /* Populate fields */
+  /* No inactive slot — grow if at capacity */
+  if (vp->camera_count >= vp->camera_capacity) {
+    if (!mop_dyn_grow((void **)&vp->cameras, &vp->camera_capacity,
+                      sizeof(struct MopCameraObject),
+                      MOP_INITIAL_CAMERA_CAPACITY))
+      return NULL;
+    /* Reset active_camera pointer — realloc may have moved the array */
+    vp->active_camera = NULL;
+  }
+
+  MopCameraObject *cam = &vp->cameras[vp->camera_count++];
   memset(cam, 0, sizeof(*cam));
   cam->position = desc->position;
   cam->target = desc->target;
@@ -60,8 +81,6 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
 
   cam->frustum_mesh = NULL;
   cam->icon_mesh = NULL;
-
-  vp->camera_count++;
 
   return cam;
 }
@@ -218,7 +237,7 @@ MopCameraObject *mop_viewport_get_camera(const MopViewport *vp,
 
   /* Walk active slots */
   uint32_t found = 0;
-  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+  for (uint32_t i = 0; i < vp->camera_count; i++) {
     if (vp->cameras[i].active) {
       if (found == index)
         return (MopCameraObject *)&vp->cameras[i];

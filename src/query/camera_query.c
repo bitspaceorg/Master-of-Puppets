@@ -25,6 +25,8 @@ MopCameraState mop_viewport_get_camera_state(const MopViewport *vp) {
   s.far_plane = vp->cam_far;
   s.aspect_ratio =
       (vp->height > 0) ? (float)vp->width / (float)vp->height : 1.0f;
+  s.ortho_size = vp->cam_ortho_size;
+  s.mode = vp->cam_mode;
   s.view_matrix = vp->view_matrix;
   s.projection_matrix = vp->projection_matrix;
   return s;
@@ -101,6 +103,13 @@ MopRay mop_viewport_pixel_to_ray(const MopViewport *vp, float x, float y) {
                     far_world.z * inv_fw};
 
   ray.origin = near_pt;
-  ray.direction = mop_vec3_normalize(mop_vec3_sub(far_pt, near_pt));
+
+  if (vp->cam_mode == MOP_CAMERA_ORTHOGRAPHIC) {
+    /* Ortho: all rays are parallel, direction = normalize(target - eye) */
+    ray.direction =
+        mop_vec3_normalize(mop_vec3_sub(vp->cam_target, vp->cam_eye));
+  } else {
+    ray.direction = mop_vec3_normalize(mop_vec3_sub(far_pt, near_pt));
+  }
   return ray;
 }

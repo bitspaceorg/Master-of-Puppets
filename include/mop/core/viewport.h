@@ -8,6 +8,7 @@
 #ifndef MOP_CORE_VIEWPORT_H
 #define MOP_CORE_VIEWPORT_H
 
+#include <mop/interact/camera.h>
 #include <mop/render/backend.h>
 #include <mop/types.h>
 
@@ -92,6 +93,11 @@ void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
                                    MopVec3 target, MopVec3 up,
                                    float fov_degrees, float near_plane,
                                    float far_plane);
+
+/* Set camera projection mode (perspective or orthographic).
+ * Ortho size is the half-height in world units; scroll adjusts it. */
+void mop_viewport_set_camera_mode(MopViewport *viewport, MopCameraMode mode);
+MopCameraMode mop_viewport_get_camera_mode(const MopViewport *viewport);
 
 /* -------------------------------------------------------------------------
  * Rendering

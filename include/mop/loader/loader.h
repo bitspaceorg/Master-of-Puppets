@@ -8,6 +8,7 @@
 #ifndef MOP_LOADER_LOADER_H
 #define MOP_LOADER_LOADER_H
 
+#include <mop/loader/gltf.h>
 #include <mop/loader/mop_scene.h>
 #include <mop/types.h>
 
@@ -74,6 +75,7 @@ typedef enum MopMeshFormat {
   MOP_FORMAT_UNKNOWN = 0,
   MOP_FORMAT_OBJ,
   MOP_FORMAT_MOP_BINARY,
+  MOP_FORMAT_GLTF, /* .gltf / .glb (use mop_gltf_load for full data) */
 } MopMeshFormat;
 
 typedef struct MopLoadedMesh {

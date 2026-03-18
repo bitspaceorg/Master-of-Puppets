@@ -12,6 +12,7 @@
  * Binding 6: normal map
  * Binding 7: metallic-roughness map (glTF: G=roughness, B=metallic)
  * Binding 8: ambient occlusion map (R channel)
+ * Binding 9: Light SSBO (all scene lights, no per-draw limit)
  *
  * Outputs to two attachments:
  *   location 0: vec4  color    (R8G8B8A8_SRGB)
@@ -52,7 +53,6 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     int   _pad_maps;
     vec4  cam_pos;       /* xyz = camera eye position, w = unused */
     vec4  emissive;      /* rgb = emissive color, w = unused */
-    Light lights[8];
 
     /* Shadow mapping (cascade) */
     int   shadows_enabled;       /* bool: 1 = shadows active, 0 = off */
@@ -66,6 +66,11 @@ layout(set = 0, binding = 0) uniform FragUniforms {
     float _pad_e1;
     float _pad_e2;
 } frag;
+
+/* Light SSBO — all scene lights, shared across draw calls (no per-draw limit) */
+layout(set = 0, binding = 9) readonly buffer LightSSBO {
+    Light lights[];
+} light_buf;
 
 layout(set = 0, binding = 1) uniform sampler2D u_texture;
 layout(set = 0, binding = 2) uniform sampler2DArrayShadow u_shadow_map;
@@ -241,29 +246,30 @@ void main() {
         float shadow_factor = compute_shadow(world_pos);
 
         for (int i = 0; i < frag.num_lights; i++) {
-            if (frag.lights[i].params.w < 0.5) continue; /* inactive */
+            if (light_buf.lights[i].params.w < 0.5) continue; /* inactive */
 
-            int light_type = int(frag.lights[i].position.w + 0.5);
+            int light_type = int(light_buf.lights[i].position.w + 0.5);
             float attenuation = 1.0;
             float spot_factor = 1.0;
-            float intensity = frag.lights[i].color.w;
-            vec3 light_color = frag.lights[i].color.rgb;
+            float intensity = light_buf.lights[i].color.w;
+            vec3 light_color = light_buf.lights[i].color.rgb;
             vec3 l_dir;
 
             /* Apply shadow only to directional lights (type 0) */
             float light_shadow = 1.0;
 
             if (light_type == 0) {
-                /* Directional */
-                l_dir = normalize(frag.lights[i].direction.xyz);
+                /* Directional — direction field is "where light shines" (from
+                 * light toward scene), so negate to get surface-to-light dir */
+                l_dir = -normalize(light_buf.lights[i].direction.xyz);
                 light_shadow = shadow_factor;
             } else if (light_type == 1) {
                 /* Point */
-                vec3 to_light = frag.lights[i].position.xyz - world_pos;
+                vec3 to_light = light_buf.lights[i].position.xyz - world_pos;
                 float dist = length(to_light);
                 l_dir = to_light / max(dist, 1e-6);
 
-                float range = frag.lights[i].params.x;
+                float range = light_buf.lights[i].params.x;
                 if (range > 0.0) {
                     float r = dist / range;
                     attenuation = max(1.0 - r, 0.0);
@@ -274,14 +280,14 @@ void main() {
                 }
             } else {
                 /* Spot */
-                vec3 to_light = frag.lights[i].position.xyz - world_pos;
+                vec3 to_light = light_buf.lights[i].position.xyz - world_pos;
                 float dist = length(to_light);
                 l_dir = to_light / max(dist, 1e-6);
 
-                vec3 spot_dir = normalize(frag.lights[i].direction.xyz);
+                vec3 spot_dir = normalize(light_buf.lights[i].direction.xyz);
                 float cos_angle = -dot(l_dir, spot_dir);
-                float outer_cos = frag.lights[i].params.z;
-                float inner_cos = frag.lights[i].params.y;
+                float outer_cos = light_buf.lights[i].params.z;
+                float inner_cos = light_buf.lights[i].params.y;
 
                 if (cos_angle < outer_cos) {
                     spot_factor = 0.0;
@@ -293,7 +299,7 @@ void main() {
                     }
                 }
 
-                float range = frag.lights[i].params.x;
+                float range = light_buf.lights[i].params.x;
                 if (range > 0.0) {
                     float r = dist / range;
                     attenuation = max(1.0 - r, 0.0);

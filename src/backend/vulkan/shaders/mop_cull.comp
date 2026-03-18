@@ -1,0 +1,219 @@
+#version 450
+
+/*
+ * Master of Puppets — Vulkan Backend
+ * mop_cull.comp — GPU frustum + occlusion culling compute shader
+ *
+ * For each object in the input SSBO, test its world-space bounding sphere
+ * against 6 frustum planes.  If visible and Hi-Z occlusion culling is
+ * enabled, project the bounding sphere to screen space and test against
+ * the Hi-Z depth pyramid.  Visible objects have their indirect draw
+ * commands copied to the compacted output buffer.
+ *
+ * Dispatch: ceil(total_draws / 256) workgroups.
+ *
+ * Descriptor layout (set 0):
+ *   binding 0: readonly buffer ObjectSSBO    (per-object data + bounds)
+ *   binding 1: uniform FrameGlobals         (frustum planes + total_draws)
+ *   binding 2: readonly buffer InputDrawCmds (pre-populated by CPU)
+ *   binding 3: writeonly buffer OutputDrawCmds (compacted visible draws)
+ *   binding 4: buffer DrawCount             (atomic visible count)
+ *   binding 5: sampler2D HiZPyramid         (Hi-Z depth, Phase 2C)
+ *
+ * Push constants:
+ *   int hiz_enabled   — 1 to enable Hi-Z occlusion test
+ *   ivec2 hiz_size    — Hi-Z level-0 dimensions
+ *   int reverse_z     — 1 if using reversed-Z depth
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+layout(local_size_x = 256) in;
+
+/* Per-object data — must match MopVkObjectData (144 bytes, std430). */
+struct ObjectData {
+    mat4  model;
+    float ambient;
+    float opacity;
+    uint  object_id;
+    int   blend_mode;
+    float metallic;
+    float roughness;
+    int   base_tex_idx;
+    int   normal_tex_idx;
+    vec4  emissive;
+    int   mr_tex_idx;
+    int   ao_tex_idx;
+    int   _pad0;
+    int   _pad1;
+    vec4  bound_sphere;   /* local-space: center xyz + radius */
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer ObjectSSBO {
+    ObjectData objects[];
+} obj_buf;
+
+/* Frame globals — must match MopVkFrameGlobals (std140). */
+layout(std140, set = 0, binding = 1) uniform FrameGlobals {
+    vec4  light_dir;
+    vec4  cam_pos;
+    int   shadows_enabled;
+    int   cascade_count;
+    int   num_lights;
+    float exposure;
+    mat4  cascade_vp[4];
+    vec4  cascade_splits;
+    mat4  view_proj;
+    vec4  frustum_planes[6];   /* L, R, B, T, Near, Far */
+    uint  total_draws;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+} frame;
+
+/* VkDrawIndexedIndirectCommand layout (20 bytes per command) */
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;    /* = draw_id for object SSBO indexing */
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer InputDrawCmds {
+    DrawCommand commands[];
+} input_cmds;
+
+layout(std430, set = 0, binding = 3) writeonly buffer OutputDrawCmds {
+    DrawCommand commands[];
+} output_cmds;
+
+layout(std430, set = 0, binding = 4) buffer DrawCount {
+    uint visible_count;
+} count_buf;
+
+/* Hi-Z depth pyramid (Phase 2C) — sampled at appropriate mip level */
+layout(set = 0, binding = 5) uniform sampler2D hiz_pyramid;
+
+/* Push constants for Hi-Z parameters */
+layout(push_constant) uniform PushConstants {
+    int   hiz_enabled;
+    ivec2 hiz_size;
+    int   reverse_z;
+} pc;
+
+/* Test world-space bounding sphere against 6 frustum planes.
+ * Returns true if the sphere is at least partially inside the frustum. */
+bool frustum_cull(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(frame.frustum_planes[i].xyz, center) +
+                     frame.frustum_planes[i].w;
+        if (dist < -radius)
+            return false;  /* entirely outside this plane */
+    }
+    return true;
+}
+
+/* Hi-Z occlusion test (Phase 2C).
+ * Projects the bounding sphere to screen space, determines the appropriate
+ * mip level based on screen-space size, and compares against the Hi-Z
+ * pyramid.  Returns true if the object may be visible.
+ *
+ * The key insight: a sphere of screen-space radius r pixels can be
+ * tested against mip level ceil(log2(2r)).  At that level, a single
+ * texel covers the entire sphere, so a single depth fetch suffices. */
+bool hiz_occlusion_test(vec3 world_center, float world_radius) {
+    /* Project center to clip space */
+    vec4 clip = frame.view_proj * vec4(world_center, 1.0);
+
+    /* Behind camera — conservatively visible */
+    if (clip.w <= 0.0)
+        return true;
+
+    /* NDC coordinates */
+    vec3 ndc = clip.xyz / clip.w;
+
+    /* Off-screen in NDC — already handled by frustum cull, but be safe */
+    if (any(lessThan(ndc.xy, vec2(-1.0))) || any(greaterThan(ndc.xy, vec2(1.0))))
+        return true;
+
+    /* Screen-space radius (in pixels).
+     * Approximate: project a point offset by radius along the screen-space
+     * horizontal axis.  For a perspective projection, the projected size
+     * scales as radius / clip.w * (hiz_size / 2). */
+    float screen_radius = world_radius / clip.w * float(pc.hiz_size.x) * 0.5;
+
+    /* Choose mip level: we want a level where the sphere fits in ~1 texel.
+     * mip = ceil(log2(2 * screen_radius)).
+     * Clamp to [0, max_mip] — textureLod handles this anyway but be safe. */
+    float mip = ceil(log2(max(2.0 * screen_radius, 1.0)));
+    float max_mip = float(textureQueryLevels(hiz_pyramid) - 1);
+    mip = clamp(mip, 0.0, max_mip);
+
+    /* Convert NDC to UV [0,1] */
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+
+    /* Sample the Hi-Z pyramid at the chosen mip level */
+    float hiz_depth = textureLod(hiz_pyramid, uv, mip).r;
+
+    /* Compute the nearest depth of the bounding sphere.
+     * Project (center - radius * view_dir) — approximation:
+     * use the center's projected depth adjusted by the radius. */
+    float sphere_near_depth = ndc.z;
+
+    /* For reversed-Z (near=1, far=0):
+     *   Object is occluded if its nearest depth < hiz_depth (farther away).
+     *   sphere_near = ndc.z + projected_offset (closer to camera = larger Z)
+     * For standard-Z (near=0, far=1):
+     *   Object is occluded if its nearest depth > hiz_depth.
+     *   sphere_near = ndc.z - projected_offset (closer to camera = smaller Z) */
+    float depth_offset = world_radius / clip.w;
+    if (pc.reverse_z != 0) {
+        sphere_near_depth = ndc.z + depth_offset; /* closer = larger in rev-Z */
+        /* Occluded if sphere's nearest point is farther than Hi-Z */
+        if (sphere_near_depth < hiz_depth)
+            return false;
+    } else {
+        sphere_near_depth = ndc.z - depth_offset; /* closer = smaller in std-Z */
+        if (sphere_near_depth > hiz_depth)
+            return false;
+    }
+
+    return true;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= frame.total_draws)
+        return;
+
+    ObjectData obj = obj_buf.objects[idx];
+
+    /* Skip objects with no bounding data (radius == 0) — always visible */
+    bool visible = true;
+    if (obj.bound_sphere.w > 0.0) {
+        /* Transform local-space bounding sphere center to world space */
+        vec4 world_center = obj.model * vec4(obj.bound_sphere.xyz, 1.0);
+
+        /* Scale radius by maximum axis scale of the model matrix.
+         * Approximation: take the max column length of upper-left 3×3. */
+        vec3 col0 = vec3(obj.model[0][0], obj.model[0][1], obj.model[0][2]);
+        vec3 col1 = vec3(obj.model[1][0], obj.model[1][1], obj.model[1][2]);
+        vec3 col2 = vec3(obj.model[2][0], obj.model[2][1], obj.model[2][2]);
+        float max_scale = max(length(col0), max(length(col1), length(col2)));
+        float world_radius = obj.bound_sphere.w * max_scale;
+
+        /* Frustum culling (always active) */
+        visible = frustum_cull(world_center.xyz, world_radius);
+
+        /* Hi-Z occlusion culling (Phase 2C — optional) */
+        if (visible && pc.hiz_enabled != 0) {
+            visible = hiz_occlusion_test(world_center.xyz, world_radius);
+        }
+    }
+
+    if (visible) {
+        uint slot = atomicAdd(count_buf.visible_count, 1);
+        output_cmds.commands[slot] = input_cmds.commands[idx];
+    }
+}

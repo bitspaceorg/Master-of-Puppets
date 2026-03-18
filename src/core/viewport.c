@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "core/render_graph.h"
+#include "core/thread_pool.h"
 #include "core/viewport_internal.h"
 #include "rhi/rhi.h"
 
@@ -13,8 +15,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_POSIX_C_SOURCE) && !defined(MOP_PLATFORM_MACOS)
+#define _POSIX_C_SOURCE 200112L
+#endif
+#include <unistd.h>
+
 /* Profiling helper — defined in profile.c */
 double mop_profile_now_ms(void);
+
+/* -------------------------------------------------------------------------
+ * Halton sequence for TAA sub-pixel jitter
+ *
+ * Returns values in [0, 1).  Subtracted by 0.5 to center around zero.
+ * base=2 for X, base=3 for Y gives a low-discrepancy 2D sequence.
+ * ------------------------------------------------------------------------- */
+
+static float mop_halton(uint32_t index, uint32_t base) {
+  float f = 1.0f;
+  float result = 0.0f;
+  uint32_t i = index;
+  while (i > 0) {
+    f /= (float)base;
+    result += f * (float)(i % base);
+    i /= base;
+  }
+  return result;
+}
 
 /* -------------------------------------------------------------------------
  * Pipeline hooks — dispatch helper
@@ -42,8 +68,11 @@ uint32_t mop_viewport_add_hook(MopViewport *vp, MopPipelineStage stage,
     }
   }
   if (slot == UINT32_MAX) {
-    if (vp->hook_count >= MOP_MAX_HOOKS)
-      return UINT32_MAX;
+    if (vp->hook_count >= vp->hook_capacity) {
+      if (!mop_dyn_grow((void **)&vp->hooks, &vp->hook_capacity,
+                        sizeof(struct MopHookEntry), MOP_INITIAL_HOOK_CAPACITY))
+        return UINT32_MAX;
+    }
     slot = vp->hook_count++;
   }
 
@@ -67,6 +96,25 @@ void mop_viewport_set_frame_callback(MopViewport *vp, MopFrameCallbackFn fn,
     return;
   vp->frame_cb = fn;
   vp->frame_cb_data = user_data;
+}
+
+/* -------------------------------------------------------------------------
+ * Projection matrix helper — handles perspective, ortho, and reverse-Z
+ * ------------------------------------------------------------------------- */
+
+static MopMat4 compute_projection(MopCameraMode mode, float fov_radians,
+                                  float ortho_size, float aspect,
+                                  float near_plane, float far_plane,
+                                  bool reverse_z) {
+  if (mode == MOP_CAMERA_ORTHOGRAPHIC) {
+    float half_w = ortho_size * aspect;
+    float half_h = ortho_size;
+    return mop_mat4_ortho(-half_w, half_w, -half_h, half_h, near_plane,
+                          far_plane);
+  }
+  if (reverse_z)
+    return mop_mat4_perspective_reverse_z(fov_radians, aspect, near_plane);
+  return mop_mat4_perspective(fov_radians, aspect, near_plane, far_plane);
 }
 
 #define MOP_INITIAL_MESH_CAPACITY 64
@@ -465,6 +513,13 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   vp->exposure = 1.0f;
   vp->bloom_threshold = 1.0f;
   vp->bloom_intensity = 0.5f;
+  vp->ssr_intensity = 0.5f;
+  vp->volumetric_params = (MopVolumetricParams){
+      .density = 0.02f,
+      .color = {1.0f, 1.0f, 1.0f, 1.0f},
+      .anisotropy = 0.3f,
+      .steps = 32,
+  };
   vp->env_type = MOP_ENV_GRADIENT;
   vp->env_intensity = 1.0f;
   vp->mesh_count = 0;
@@ -475,8 +530,22 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   vp->theme = mop_theme_default();
   vp->clear_color = vp->theme.bg_bottom;
 
-  /* Multi-light: lights[0] mirrors legacy light_dir + ambient */
-  memset(vp->lights, 0, sizeof(vp->lights));
+  /* Multi-light system (dynamic array) */
+  vp->light_capacity = MOP_INITIAL_LIGHT_CAPACITY;
+  vp->lights = calloc(vp->light_capacity, sizeof(MopLight));
+  vp->light_indicators = calloc(vp->light_capacity, sizeof(MopMesh *));
+  if (!vp->lights || !vp->light_indicators) {
+    free(vp->lights);
+    free(vp->light_indicators);
+    free(vp->overlay_prims);
+    free(vp->ssaa_color_buf);
+    free(vp->instanced_meshes);
+    free(vp->meshes);
+    rhi->framebuffer_destroy(device, fb);
+    rhi->device_destroy(device);
+    free(vp);
+    return NULL;
+  }
   vp->lights[0] = (MopLight){
       .type = MOP_LIGHT_DIRECTIONAL,
       .direction = vp->light_dir,
@@ -487,11 +556,57 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   vp->light_count = 1;
   vp->default_light_active = true;
 
+  /* Dynamic arrays: cameras, hooks, overlays, selected, events, undo */
+  vp->camera_capacity = MOP_INITIAL_CAMERA_CAPACITY;
+  vp->cameras = calloc(vp->camera_capacity, sizeof(struct MopCameraObject));
+
+  vp->hook_capacity = MOP_INITIAL_HOOK_CAPACITY;
+  vp->hooks = calloc(vp->hook_capacity, sizeof(struct MopHookEntry));
+
+  vp->overlay_capacity = MOP_INITIAL_OVERLAY_CAPACITY;
+  vp->overlays = calloc(vp->overlay_capacity, sizeof(MopOverlayEntry));
+  vp->overlay_enabled = calloc(vp->overlay_capacity, sizeof(bool));
+
+  vp->selected_capacity = MOP_INITIAL_SELECTED_CAPACITY;
+  vp->selected_ids = calloc(vp->selected_capacity, sizeof(uint32_t));
+
+  vp->event_capacity = MOP_INITIAL_EVENT_CAPACITY;
+  vp->events = calloc(vp->event_capacity, sizeof(MopEvent));
+
+  vp->undo_capacity = MOP_INITIAL_UNDO_CAPACITY;
+  vp->undo_entries = calloc(vp->undo_capacity, sizeof(MopUndoEntry));
+
+  vp->selection.element_capacity = MOP_INITIAL_SELECTED_ELEMENTS_CAPACITY;
+  vp->selection.elements =
+      calloc(vp->selection.element_capacity, sizeof(uint32_t));
+
+  /* Verify all dynamic allocations */
+  if (!vp->cameras || !vp->hooks || !vp->overlays || !vp->overlay_enabled ||
+      !vp->selected_ids || !vp->events || !vp->undo_entries ||
+      !vp->selection.elements) {
+    free(vp->selection.elements);
+    free(vp->undo_entries);
+    free(vp->events);
+    free(vp->selected_ids);
+    free(vp->overlay_enabled);
+    free(vp->overlays);
+    free(vp->hooks);
+    free(vp->cameras);
+    free(vp->light_indicators);
+    free(vp->lights);
+    free(vp->overlay_prims);
+    free(vp->ssaa_color_buf);
+    free(vp->instanced_meshes);
+    free(vp->meshes);
+    rhi->framebuffer_destroy(device, fb);
+    rhi->device_destroy(device);
+    free(vp);
+    return NULL;
+  }
+
   /* Display settings + overlays: all disabled by default except outline */
   vp->display = mop_display_settings_default();
   vp->overlay_count = MOP_OVERLAY_BUILTIN_COUNT;
-  memset(vp->overlays, 0, sizeof(vp->overlays));
-  memset(vp->overlay_enabled, 0, sizeof(vp->overlay_enabled));
   vp->overlay_enabled[MOP_OVERLAY_OUTLINE] = true; /* always-on by default */
 
   /* Owned subsystems */
@@ -522,6 +637,18 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   /* Apply camera to set initial matrices */
   mop_orbit_camera_apply(&vp->camera, vp);
 
+  /* Create generic thread pool for render graph MT execution.
+   * Non-fatal: NULL pool falls back to sequential execution. */
+  {
+    int num_threads = 3; /* leave 1 core for main thread */
+#if defined(_SC_NPROCESSORS_ONLN)
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n > 1)
+      num_threads = (int)(n - 1 > 15 ? 15 : n - 1);
+#endif
+    vp->thread_pool = mop_threadpool_create(num_threads);
+  }
+
   return vp;
 }
 
@@ -531,7 +658,7 @@ void mop_viewport_destroy(MopViewport *viewport) {
   }
 
   /* Destroy camera object meshes (Phase 5) */
-  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+  for (uint32_t i = 0; i < viewport->camera_count; i++) {
     struct MopCameraObject *cam = &viewport->cameras[i];
     if (cam->active) {
       if (cam->frustum_mesh)
@@ -550,6 +677,9 @@ void mop_viewport_destroy(MopViewport *viewport) {
     mop_gizmo_destroy(viewport->gizmo);
     viewport->gizmo = NULL;
   }
+
+  /* Destroy shader plugins (before device teardown) */
+  mop_shader_plugins_destroy_all(viewport);
 
   /* Destroy all registered subsystems (water, particles, postprocess, etc.)
    * Must happen before meshes since subsystems may own internal meshes. */
@@ -635,6 +765,29 @@ void mop_viewport_destroy(MopViewport *viewport) {
   mop_sw_framebuffer_free(&viewport->shadow_fb);
   free(viewport->instanced_meshes);
   free(viewport->meshes);
+
+  /* Free dynamic arrays */
+  free(viewport->lights);
+  free(viewport->light_indicators);
+  free(viewport->cameras);
+  free(viewport->hooks);
+  free(viewport->overlays);
+  free(viewport->overlay_enabled);
+  free(viewport->selected_ids);
+  free(viewport->events);
+  /* Free batch heap memory in undo entries before freeing the array */
+  for (uint32_t i = 0; i < viewport->undo_capacity; i++) {
+    if (viewport->undo_entries[i].type == MOP_UNDO_BATCH &&
+        viewport->undo_entries[i].batch.entries) {
+      free(viewport->undo_entries[i].batch.entries);
+    }
+  }
+  free(viewport->undo_entries);
+  free(viewport->selection.elements);
+
+  /* Destroy thread pool (Phase 1B) */
+  mop_threadpool_destroy(viewport->thread_pool);
+
   free(viewport);
 }
 
@@ -659,16 +812,14 @@ void mop_viewport_resize(MopViewport *viewport, int width, int height) {
   viewport->ssaa_color_buf =
       calloc((size_t)width * height * 4, sizeof(uint8_t));
 
+  /* Invalidate TAA history — resolution changed */
+  viewport->taa_has_history = false;
+
   /* Recompute projection matrix */
   float aspect = (float)width / (float)height;
-  if (viewport->reverse_z) {
-    viewport->projection_matrix = mop_mat4_perspective_reverse_z(
-        viewport->cam_fov_radians, aspect, viewport->cam_near);
-  } else {
-    viewport->projection_matrix =
-        mop_mat4_perspective(viewport->cam_fov_radians, aspect,
-                             viewport->cam_near, viewport->cam_far);
-  }
+  viewport->projection_matrix = compute_projection(
+      viewport->cam_mode, viewport->cam_fov_radians, viewport->cam_ortho_size,
+      aspect, viewport->cam_near, viewport->cam_far, viewport->reverse_z);
 }
 
 void mop_viewport_set_clear_color(MopViewport *viewport, MopColor color) {
@@ -723,13 +874,9 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
   viewport->view_matrix = mop_mat4_look_at(eye, target, up);
 
   float aspect = (float)viewport->width / (float)viewport->height;
-  if (viewport->reverse_z) {
-    viewport->projection_matrix = mop_mat4_perspective_reverse_z(
-        viewport->cam_fov_radians, aspect, near_plane);
-  } else {
-    viewport->projection_matrix = mop_mat4_perspective(
-        viewport->cam_fov_radians, aspect, near_plane, far_plane);
-  }
+  viewport->projection_matrix = compute_projection(
+      viewport->cam_mode, viewport->cam_fov_radians, viewport->cam_ortho_size,
+      aspect, near_plane, far_plane, viewport->reverse_z);
 
   /* Sync the orbit camera so mop_orbit_camera_apply() won't overwrite.
    * Convert eye/target to spherical orbit parameters (distance, yaw, pitch). */
@@ -763,13 +910,9 @@ void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
   viewport->view_matrix = mop_mat4_look_at(eye, target, up);
 
   float aspect = (float)viewport->width / (float)viewport->height;
-  if (viewport->reverse_z) {
-    viewport->projection_matrix = mop_mat4_perspective_reverse_z(
-        viewport->cam_fov_radians, aspect, near_plane);
-  } else {
-    viewport->projection_matrix = mop_mat4_perspective(
-        viewport->cam_fov_radians, aspect, near_plane, far_plane);
-  }
+  viewport->projection_matrix = compute_projection(
+      viewport->cam_mode, viewport->cam_fov_radians, viewport->cam_ortho_size,
+      aspect, near_plane, far_plane, viewport->reverse_z);
   /* Skip orbit parameter reconstruction — the orbit camera already holds
    * the authoritative pitch/yaw/distance values and asinf() would clamp
    * pitch to [-π/2, π/2], preventing full vertical orbit. */
@@ -785,6 +928,33 @@ float mop_viewport_gpu_frame_time_ms(MopViewport *viewport) {
   if (!viewport || !viewport->rhi || !viewport->rhi->frame_gpu_time_ms)
     return 0.0f;
   return viewport->rhi->frame_gpu_time_ms(viewport->device);
+}
+
+void mop_viewport_set_camera_mode(MopViewport *viewport, MopCameraMode mode) {
+  if (!viewport)
+    return;
+  viewport->cam_mode = mode;
+  viewport->camera.mode = mode;
+
+  /* Compute matching ortho_size from current perspective params so switching
+   * modes preserves the visible scene extent at the target point. */
+  if (mode == MOP_CAMERA_ORTHOGRAPHIC && viewport->camera.ortho_size <= 0.0f) {
+    float half_fov = viewport->cam_fov_radians * 0.5f;
+    viewport->camera.ortho_size = viewport->camera.distance * tanf(half_fov);
+    viewport->cam_ortho_size = viewport->camera.ortho_size;
+  }
+
+  /* Recompute projection */
+  float aspect = (float)viewport->width / (float)viewport->height;
+  viewport->projection_matrix = compute_projection(
+      viewport->cam_mode, viewport->cam_fov_radians, viewport->cam_ortho_size,
+      aspect, viewport->cam_near, viewport->cam_far, viewport->reverse_z);
+}
+
+MopCameraMode mop_viewport_get_camera_mode(const MopViewport *viewport) {
+  if (!viewport)
+    return MOP_CAMERA_PERSPECTIVE;
+  return viewport->cam_mode;
 }
 
 MopVec3 mop_viewport_get_camera_eye(const MopViewport *viewport) {
@@ -1032,6 +1202,31 @@ void mop_viewport_remove_mesh(MopViewport *viewport, MopMesh *mesh) {
   }
   free(mesh->vertex_format);
   mesh->vertex_format = NULL;
+  free(mesh->bind_pose_data);
+  mesh->bind_pose_data = NULL;
+  free(mesh->bone_matrices);
+  mesh->bone_matrices = NULL;
+  free(mesh->bone_parents);
+  mesh->bone_parents = NULL;
+  mesh->bone_count = 0;
+  free(mesh->morph_targets);
+  mesh->morph_targets = NULL;
+  free(mesh->morph_weights);
+  mesh->morph_weights = NULL;
+  mesh->morph_target_count = 0;
+
+  /* Destroy LOD buffers (Phase 9C) */
+  for (uint32_t li = 0; li < mesh->lod_level_count; li++) {
+    if (mesh->lod_levels[li].vertex_buffer)
+      viewport->rhi->buffer_destroy(viewport->device,
+                                    mesh->lod_levels[li].vertex_buffer);
+    if (mesh->lod_levels[li].index_buffer)
+      viewport->rhi->buffer_destroy(viewport->device,
+                                    mesh->lod_levels[li].index_buffer);
+  }
+  mesh->lod_level_count = 0;
+  mesh->active_lod = 0;
+
   mesh->active = false;
 }
 
@@ -1103,6 +1298,289 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
     mesh->index_capacity = new_cap;
   }
   mesh->index_count = index_count;
+}
+
+/* -------------------------------------------------------------------------
+ * Skeletal skinning — set bone matrices and apply CPU-side deformation
+ * ------------------------------------------------------------------------- */
+
+void mop_mesh_set_bone_matrices(MopMesh *mesh, MopViewport *viewport,
+                                const MopMat4 *matrices, uint32_t bone_count) {
+  if (!mesh || !viewport || !matrices || bone_count == 0)
+    return;
+
+  /* Vertex format must include joints + weights */
+  const MopVertexFormat *fmt = mesh->vertex_format;
+  if (!fmt)
+    return; /* standard MopVertex has no joints/weights */
+  const MopVertexAttrib *joints_attr =
+      mop_vertex_format_find(fmt, MOP_ATTRIB_JOINTS);
+  const MopVertexAttrib *weights_attr =
+      mop_vertex_format_find(fmt, MOP_ATTRIB_WEIGHTS);
+  if (!joints_attr || !weights_attr)
+    return;
+
+  /* On first call, snapshot the bind-pose vertex data */
+  if (!mesh->bind_pose_data) {
+    size_t vb_size = (size_t)mesh->vertex_count * fmt->stride;
+    const void *raw = viewport->rhi->buffer_read(mesh->vertex_buffer);
+    if (!raw)
+      return;
+    mesh->bind_pose_data = malloc(vb_size);
+    if (!mesh->bind_pose_data)
+      return;
+    memcpy(mesh->bind_pose_data, raw, vb_size);
+  }
+
+  /* Copy bone matrices */
+  if (bone_count != mesh->bone_count) {
+    free(mesh->bone_matrices);
+    mesh->bone_matrices = malloc(bone_count * sizeof(MopMat4));
+    if (!mesh->bone_matrices) {
+      mesh->bone_count = 0;
+      return;
+    }
+    mesh->bone_count = bone_count;
+  }
+  memcpy(mesh->bone_matrices, matrices, bone_count * sizeof(MopMat4));
+  mesh->skin_dirty = true;
+}
+
+/* Apply CPU skinning for a single mesh.
+ * Reads joints/weights from bind_pose_data, transforms positions and normals
+ * using bone_matrices, and writes to a temporary buffer that is uploaded
+ * to the vertex buffer. */
+static void mop_skin_apply(MopMesh *mesh, MopViewport *viewport) {
+  if (!mesh->skin_dirty || !mesh->bind_pose_data || mesh->bone_count == 0)
+    return;
+  mesh->skin_dirty = false;
+
+  const MopVertexFormat *fmt = mesh->vertex_format;
+  if (!fmt)
+    return;
+
+  const MopVertexAttrib *pos_attr =
+      mop_vertex_format_find(fmt, MOP_ATTRIB_POSITION);
+  const MopVertexAttrib *norm_attr =
+      mop_vertex_format_find(fmt, MOP_ATTRIB_NORMAL);
+  const MopVertexAttrib *joints_attr =
+      mop_vertex_format_find(fmt, MOP_ATTRIB_JOINTS);
+  const MopVertexAttrib *weights_attr =
+      mop_vertex_format_find(fmt, MOP_ATTRIB_WEIGHTS);
+  if (!pos_attr || !joints_attr || !weights_attr)
+    return;
+
+  size_t vb_size = (size_t)mesh->vertex_count * fmt->stride;
+  uint8_t *deformed = malloc(vb_size);
+  if (!deformed)
+    return;
+  memcpy(deformed, mesh->bind_pose_data, vb_size);
+
+  const uint8_t *src = (const uint8_t *)mesh->bind_pose_data;
+
+  for (uint32_t v = 0; v < mesh->vertex_count; v++) {
+    const uint8_t *vert = src + (size_t)v * fmt->stride;
+    uint8_t *out = deformed + (size_t)v * fmt->stride;
+
+    /* Read joint indices (ubyte4) */
+    const uint8_t *jdata = vert + joints_attr->offset;
+    uint8_t j0 = jdata[0], j1 = jdata[1], j2 = jdata[2], j3 = jdata[3];
+
+    /* Read weights (float4) */
+    const float *wdata = (const float *)(vert + weights_attr->offset);
+    float w0 = wdata[0], w1 = wdata[1], w2 = wdata[2], w3 = wdata[3];
+
+    /* Read bind-pose position (float3) */
+    const float *pdata = (const float *)(vert + pos_attr->offset);
+    float px = pdata[0], py = pdata[1], pz = pdata[2];
+
+    /* Compute skinned position: sum(w[i] * M[j[i]] * pos) */
+    float sx = 0, sy = 0, sz = 0;
+    const struct {
+      uint8_t j;
+      float w;
+    } bones[4] = {{j0, w0}, {j1, w1}, {j2, w2}, {j3, w3}};
+    for (int b = 0; b < 4; b++) {
+      if (bones[b].w <= 0.0f)
+        continue;
+      uint32_t bi = bones[b].j;
+      if (bi >= mesh->bone_count)
+        continue;
+      const float *m = mesh->bone_matrices[bi].d;
+      /* Column-major: result = M * vec4(pos, 1) */
+      float rx = m[0] * px + m[4] * py + m[8] * pz + m[12];
+      float ry = m[1] * px + m[5] * py + m[9] * pz + m[13];
+      float rz = m[2] * px + m[6] * py + m[10] * pz + m[14];
+      sx += bones[b].w * rx;
+      sy += bones[b].w * ry;
+      sz += bones[b].w * rz;
+    }
+    float *opos = (float *)(out + pos_attr->offset);
+    opos[0] = sx;
+    opos[1] = sy;
+    opos[2] = sz;
+
+    /* Skin normal (if present) — use upper-left 3x3 (no translation) */
+    if (norm_attr) {
+      const float *ndata = (const float *)(vert + norm_attr->offset);
+      float nx = ndata[0], ny = ndata[1], nz = ndata[2];
+      float snx = 0, sny = 0, snz = 0;
+      for (int b = 0; b < 4; b++) {
+        if (bones[b].w <= 0.0f)
+          continue;
+        uint32_t bi = bones[b].j;
+        if (bi >= mesh->bone_count)
+          continue;
+        const float *m = mesh->bone_matrices[bi].d;
+        float rx = m[0] * nx + m[4] * ny + m[8] * nz;
+        float ry = m[1] * nx + m[5] * ny + m[9] * nz;
+        float rz = m[2] * nx + m[6] * ny + m[10] * nz;
+        snx += bones[b].w * rx;
+        sny += bones[b].w * ry;
+        snz += bones[b].w * rz;
+      }
+      /* Normalize */
+      float len = sqrtf(snx * snx + sny * sny + snz * snz);
+      if (len > 1e-8f) {
+        snx /= len;
+        sny /= len;
+        snz /= len;
+      }
+      float *onorm = (float *)(out + norm_attr->offset);
+      onorm[0] = snx;
+      onorm[1] = sny;
+      onorm[2] = snz;
+    }
+  }
+
+  /* Upload deformed data to vertex buffer */
+  viewport->rhi->buffer_update(viewport->device, mesh->vertex_buffer, deformed,
+                               0, vb_size);
+  free(deformed);
+  mesh->aabb_valid = false;
+}
+
+/* -------------------------------------------------------------------------
+ * Bone hierarchy (for skeleton visualization)
+ * ------------------------------------------------------------------------- */
+
+void mop_mesh_set_bone_hierarchy(MopMesh *mesh, const int32_t *parent_indices,
+                                 uint32_t bone_count) {
+  if (!mesh || !parent_indices || bone_count == 0)
+    return;
+  if (bone_count != mesh->bone_count)
+    return; /* must match existing bone_count from set_bone_matrices */
+
+  free(mesh->bone_parents);
+  mesh->bone_parents = malloc(bone_count * sizeof(int32_t));
+  if (!mesh->bone_parents)
+    return;
+  memcpy(mesh->bone_parents, parent_indices, bone_count * sizeof(int32_t));
+}
+
+/* -------------------------------------------------------------------------
+ * Morph targets / blend shapes
+ * ------------------------------------------------------------------------- */
+
+void mop_mesh_set_morph_targets(MopMesh *mesh, MopViewport *viewport,
+                                const float *targets, const float *weights,
+                                uint32_t target_count) {
+  if (!mesh || !viewport || !targets || !weights || target_count == 0)
+    return;
+  if (mesh->vertex_count == 0)
+    return;
+
+  /* Snapshot bind-pose if not already done (for skinned meshes it's already
+   * captured; for morph-only meshes we need it now). */
+  const MopVertexFormat *fmt = mesh->vertex_format;
+  size_t stride = fmt ? fmt->stride : sizeof(MopVertex);
+  if (!mesh->bind_pose_data) {
+    size_t vb_size = (size_t)mesh->vertex_count * stride;
+    const void *raw = viewport->rhi->buffer_read(mesh->vertex_buffer);
+    if (!raw)
+      return;
+    mesh->bind_pose_data = malloc(vb_size);
+    if (!mesh->bind_pose_data)
+      return;
+    memcpy(mesh->bind_pose_data, raw, vb_size);
+  }
+
+  /* Copy morph target deltas */
+  size_t targets_size =
+      (size_t)target_count * mesh->vertex_count * 3 * sizeof(float);
+  free(mesh->morph_targets);
+  mesh->morph_targets = malloc(targets_size);
+  if (!mesh->morph_targets)
+    return;
+  memcpy(mesh->morph_targets, targets, targets_size);
+
+  /* Copy weights */
+  free(mesh->morph_weights);
+  mesh->morph_weights = malloc(target_count * sizeof(float));
+  if (!mesh->morph_weights) {
+    free(mesh->morph_targets);
+    mesh->morph_targets = NULL;
+    return;
+  }
+  memcpy(mesh->morph_weights, weights, target_count * sizeof(float));
+  mesh->morph_target_count = target_count;
+  mesh->morph_dirty = true;
+}
+
+void mop_mesh_set_morph_weights(MopMesh *mesh, const float *weights,
+                                uint32_t target_count) {
+  if (!mesh || !weights || target_count == 0)
+    return;
+  if (target_count != mesh->morph_target_count || !mesh->morph_weights)
+    return;
+  memcpy(mesh->morph_weights, weights, target_count * sizeof(float));
+  mesh->morph_dirty = true;
+}
+
+/* Apply CPU morph target blending for a single mesh.
+ * Reads base positions from bind_pose_data, adds weighted deltas,
+ * and uploads the result to the vertex buffer. */
+static void mop_morph_apply(MopMesh *mesh, MopViewport *viewport) {
+  if (!mesh->morph_dirty || !mesh->bind_pose_data ||
+      mesh->morph_target_count == 0 || !mesh->morph_targets)
+    return;
+  mesh->morph_dirty = false;
+
+  const MopVertexFormat *fmt = mesh->vertex_format;
+  size_t stride = fmt ? fmt->stride : sizeof(MopVertex);
+  size_t pos_off = 0; /* position is always at offset 0 in MopVertex */
+  if (fmt) {
+    const MopVertexAttrib *pos_attr =
+        mop_vertex_format_find(fmt, MOP_ATTRIB_POSITION);
+    if (!pos_attr)
+      return;
+    pos_off = pos_attr->offset;
+  }
+
+  size_t vb_size = (size_t)mesh->vertex_count * stride;
+  uint8_t *deformed = malloc(vb_size);
+  if (!deformed)
+    return;
+  memcpy(deformed, mesh->bind_pose_data, vb_size);
+
+  uint32_t vc = mesh->vertex_count;
+  for (uint32_t t = 0; t < mesh->morph_target_count; t++) {
+    float w = mesh->morph_weights[t];
+    if (w == 0.0f)
+      continue;
+    const float *deltas = mesh->morph_targets + (size_t)t * vc * 3;
+    for (uint32_t v = 0; v < vc; v++) {
+      float *pos = (float *)(deformed + v * stride + pos_off);
+      pos[0] += w * deltas[v * 3 + 0];
+      pos[1] += w * deltas[v * 3 + 1];
+      pos[2] += w * deltas[v * 3 + 2];
+    }
+  }
+
+  viewport->rhi->buffer_update(viewport->device, mesh->vertex_buffer, deformed,
+                               0, vb_size);
+  free(deformed);
+  mesh->aabb_valid = false;
 }
 
 void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform) {
@@ -1238,14 +1716,23 @@ void mop_overlay_builtin_normals(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_bounds(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_selection(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_outline(MopViewport *vp, void *user_data);
+void mop_overlay_builtin_skeleton(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_grid(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_light_indicators(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_camera_objects(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data);
 void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data);
 
-/* Per-frame triangle counter — accumulated across passes */
+/* Per-frame counters — accumulated across passes */
 static uint32_t s_triangle_count;
+static uint32_t s_draw_call_count;
+static uint32_t s_vertex_count;
+static uint32_t s_lod_transitions;
+
+/* Forward declaration for LOD selection (defined after mop_viewport_set_chrome)
+ */
+static uint32_t lod_select(const MopMesh *mesh, float projected_diameter,
+                           float lod_bias);
 
 /* ---- Helper macro: issue a draw call for a mesh ---- */
 /* Chrome meshes (grid = MOP_GRID_ID, >= 0xFFFE0000 for gizmo/indicators)
@@ -1254,16 +1741,32 @@ static uint32_t s_triangle_count;
 #define EMIT_DRAW(vp, mesh_ptr)                                                \
   do {                                                                         \
     struct MopMesh *m_ = (mesh_ptr);                                           \
-    s_triangle_count += m_->index_count / 3;                                   \
+    /* LOD selection (Phase 9C): use active LOD's buffers if available */      \
+    MopRhiBuffer *vb_ = m_->vertex_buffer;                                     \
+    MopRhiBuffer *ib_ = m_->index_buffer;                                      \
+    uint32_t vcnt_ = m_->vertex_count;                                         \
+    uint32_t icnt_ = m_->index_count;                                          \
+    if (m_->active_lod > 0 && m_->active_lod <= m_->lod_level_count) {         \
+      uint32_t li_ = m_->active_lod - 1;                                       \
+      if (m_->lod_levels[li_].vertex_buffer) {                                 \
+        vb_ = m_->lod_levels[li_].vertex_buffer;                               \
+        ib_ = m_->lod_levels[li_].index_buffer;                                \
+        vcnt_ = m_->lod_levels[li_].vertex_count;                              \
+        icnt_ = m_->lod_levels[li_].index_count;                               \
+      }                                                                        \
+    }                                                                          \
+    s_triangle_count += icnt_ / 3;                                             \
+    s_vertex_count += vcnt_;                                                   \
+    s_draw_call_count++;                                                       \
     bool chrome_ = (m_->object_id >= 0xFFFD0000u);                             \
     MopMat4 mvp_ = mop_mat4_multiply(                                          \
         (vp)->projection_matrix,                                               \
         mop_mat4_multiply((vp)->view_matrix, m_->world_transform));            \
     MopRhiDrawCall call_ = {                                                   \
-        .vertex_buffer = m_->vertex_buffer,                                    \
-        .index_buffer = m_->index_buffer,                                      \
-        .vertex_count = m_->vertex_count,                                      \
-        .index_count = m_->index_count,                                        \
+        .vertex_buffer = vb_,                                                  \
+        .index_buffer = ib_,                                                   \
+        .vertex_count = vcnt_,                                                 \
+        .index_count = icnt_,                                                  \
         .object_id = m_->object_id,                                            \
         .model = m_->world_transform,                                          \
         .view = (vp)->view_matrix,                                             \
@@ -1303,6 +1806,8 @@ static uint32_t s_triangle_count;
         .light_count = chrome_ ? 0 : (vp)->light_count,                        \
         .cam_eye = (vp)->cam_eye,                                              \
         .vertex_format = m_->vertex_format,                                    \
+        .aabb_min = m_->aabb_valid ? m_->aabb_local.min : (MopVec3){0, 0, 0},  \
+        .aabb_max = m_->aabb_valid ? m_->aabb_local.max : (MopVec3){0, 0, 0},  \
     };                                                                         \
     (vp)->rhi->draw((vp)->device, (vp)->framebuffer, &call_);                  \
   } while (0)
@@ -1420,6 +1925,13 @@ static void pass_background(MopViewport *vp) {
       return;
     }
   }
+
+  /* GPU backends: skip gradient quad draw — the PBR bindless shader adds
+   * IBL reflections to it, contaminating the background with env map colors.
+   * The clear color already provides the background; the tonemap shader
+   * preserves it via the alpha<0.5 bypass path. */
+  if (vp->backend_type != MOP_BACKEND_CPU)
+    return;
 
   if (!vp->bg_vb || !vp->bg_ib)
     return;
@@ -1543,10 +2055,11 @@ static void pass_shadow(MopViewport *vp) {
   for (size_t p = 0; p < shadow_pixels; p++)
     vp->shadow_fb.depth[p] = 1.0f;
 
-  /* Light direction (the "dir" field points FROM the surface TOWARDS the
-   * light source; we need the light's look direction, which is the opposite) */
+  /* Light direction: the "direction" field is where the light shines.
+   * The shadow camera looks along this direction (eye is positioned
+   * opposite to it, behind the scene). */
   MopVec3 light_dir = mop_vec3_normalize(vp->lights[dir_light_idx].direction);
-  MopVec3 neg_dir = {-light_dir.x, -light_dir.y, -light_dir.z};
+  MopVec3 neg_dir = light_dir;
 
   /* Scene center and radius */
   float center_x = (scene_min[0] + scene_max[0]) * 0.5f;
@@ -1750,6 +2263,9 @@ static void pass_overlays(MopViewport *vp) {
   if (vp->overlay_enabled[MOP_OVERLAY_SELECTION]) {
     mop_overlay_builtin_selection(vp, NULL);
   }
+  if (vp->overlay_enabled[MOP_OVERLAY_SKELETON]) {
+    mop_overlay_builtin_skeleton(vp, NULL);
+  }
   /* NOTE: MOP_OVERLAY_OUTLINE runs as a post-process after frame_end,
    * since it needs the object_id readback buffer (populated by frame_end
    * on GPU backends). See mop_viewport_render(). */
@@ -1809,6 +2325,221 @@ static void pass_instanced(MopViewport *vp) {
 
 #undef EMIT_DRAW
 
+/* =========================================================================
+ * Render graph node callbacks
+ *
+ * Each callback wraps an existing pass or extracted inline block.
+ * Signature: void(MopViewport *vp, void *user_data)
+ * ========================================================================= */
+
+/* Wrapper macro: adapt existing (MopViewport*) pass to graph node signature */
+#define RG_WRAP(name, fn)                                                      \
+  static void name(MopViewport *vp, void *ud) {                                \
+    (void)ud;                                                                  \
+    fn(vp);                                                                    \
+  }
+
+RG_WRAP(rg_background, pass_background)
+RG_WRAP(rg_shadow, pass_shadow)
+RG_WRAP(rg_opaque, pass_scene_opaque)
+RG_WRAP(rg_transparent, pass_scene_transparent)
+RG_WRAP(rg_instanced, pass_instanced)
+RG_WRAP(rg_overlays, pass_overlays)
+RG_WRAP(rg_gizmo, pass_gizmo)
+
+#undef RG_WRAP
+
+/* Hook dispatch node: user_data encodes the pipeline stage */
+static void rg_dispatch_hook(MopViewport *vp, void *ud) {
+  dispatch_hooks(vp, (MopPipelineStage)(uintptr_t)ud);
+}
+
+static void rg_shader_plugins(MopViewport *vp, void *ud) {
+  mop_shader_plugins_dispatch(vp, (MopShaderPluginStage)(uintptr_t)ud);
+}
+
+/* Frame begin: clear + set initial exposure */
+static void rg_frame_begin(MopViewport *vp, void *ud) {
+  (void)ud;
+  vp->rhi->frame_begin(vp->device, vp->framebuffer, vp->clear_color);
+  if (vp->rhi->set_exposure)
+    vp->rhi->set_exposure(vp->device, vp->exposure);
+}
+
+/* IBL texture bindings for GPU + CPU backends */
+static void rg_ibl_setup(MopViewport *vp, void *ud) {
+  (void)ud;
+  if (vp->rhi->set_ibl_textures)
+    vp->rhi->set_ibl_textures(vp->device, vp->env_irradiance,
+                              vp->env_prefiltered, vp->env_brdf_lut);
+
+  if (vp->backend_type == MOP_BACKEND_CPU && vp->env_irradiance_data) {
+    mop_sw_ibl_set(vp->env_irradiance_data, vp->env_irradiance_w,
+                   vp->env_irradiance_h, vp->env_prefiltered_data,
+                   vp->env_prefiltered_w, vp->env_prefiltered_h,
+                   vp->env_prefiltered_levels, vp->env_brdf_lut_data,
+                   256, /* BRDF_LUT_SIZE */
+                   vp->env_rotation, vp->env_intensity);
+  }
+}
+
+/* Frame end: exposure → submit → HDR resolve (CPU) */
+static void rg_frame_end(MopViewport *vp, void *ud) {
+  (void)ud;
+  if (vp->rhi->set_exposure)
+    vp->rhi->set_exposure(vp->device, vp->exposure);
+
+  /* Pass TAA matrices to backend before frame_end */
+  if ((vp->post_effects & MOP_POST_TAA) && vp->rhi->set_taa_params) {
+    MopMat4 vp_jittered =
+        mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+    MopMat4 inv_vp_jittered = mop_mat4_inverse(vp_jittered);
+    MopMat4 prev_vp = mop_mat4_multiply(vp->taa_prev_proj, vp->taa_prev_view);
+    vp->rhi->set_taa_params(vp->device, inv_vp_jittered.d, prev_vp.d,
+                            vp->taa_jitter_x, vp->taa_jitter_y,
+                            !vp->taa_has_history);
+  }
+
+  vp->rhi->frame_end(vp->device, vp->framebuffer);
+
+  if (vp->backend_type == MOP_BACKEND_CPU) {
+    MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)vp->framebuffer;
+    mop_sw_hdr_resolve(sw_fb, vp->exposure);
+  }
+}
+
+/* Post-frame overlays: outline, grid, SDF indicators, draw_overlays */
+static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
+  (void)ud;
+
+  /* Outline (reads object-ID buffer) */
+  if (vp->overlay_enabled[MOP_OVERLAY_OUTLINE])
+    mop_overlay_builtin_outline(vp, NULL);
+
+  /* Grid: GPU shader path or CPU fallback */
+  bool gpu_grid = (vp->backend_type != MOP_BACKEND_CPU);
+  if (vp->show_chrome && !gpu_grid)
+    mop_overlay_builtin_grid(vp, NULL);
+
+  /* Reset overlay command buffer for this frame */
+  vp->overlay_prim_count = 0;
+
+  /* Push-based overlays (gizmo, lights, cameras, axis indicator) */
+  if (vp->show_chrome) {
+    mop_overlay_builtin_light_indicators(vp, NULL);
+
+    for (uint32_t ci = 0; ci < vp->camera_count; ci++) {
+      struct MopCameraObject *cam = &vp->cameras[ci];
+      if (cam->active && cam->icon_mesh)
+        cam->position = cam->icon_mesh->position;
+    }
+    mop_overlay_builtin_camera_objects(vp, NULL);
+    mop_overlay_builtin_gizmo_2d(vp, NULL);
+    mop_overlay_builtin_axis_indicator_2d(vp, NULL);
+  }
+
+  /* Compute GPU grid params if needed */
+  MopGridParams grid_params;
+  MopGridParams *gp = NULL;
+  if (vp->show_chrome && gpu_grid) {
+    MopMat4 VPm = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+
+    float H[9];
+    H[0] = VPm.d[0];
+    H[1] = VPm.d[8];
+    H[2] = VPm.d[12];
+    H[3] = VPm.d[1];
+    H[4] = VPm.d[9];
+    H[5] = VPm.d[13];
+    H[6] = VPm.d[3];
+    H[7] = VPm.d[11];
+    H[8] = VPm.d[15];
+
+    float det = H[0] * (H[4] * H[8] - H[5] * H[7]) -
+                H[1] * (H[3] * H[8] - H[5] * H[6]) +
+                H[2] * (H[3] * H[7] - H[4] * H[6]);
+    if (fabsf(det) > 1e-12f) {
+      float idet = 1.0f / det;
+      grid_params.Hi[0] = (H[4] * H[8] - H[5] * H[7]) * idet;
+      grid_params.Hi[1] = (H[2] * H[7] - H[1] * H[8]) * idet;
+      grid_params.Hi[2] = (H[1] * H[5] - H[2] * H[4]) * idet;
+      grid_params.Hi[3] = (H[5] * H[6] - H[3] * H[8]) * idet;
+      grid_params.Hi[4] = (H[0] * H[8] - H[2] * H[6]) * idet;
+      grid_params.Hi[5] = (H[2] * H[3] - H[0] * H[5]) * idet;
+      grid_params.Hi[6] = (H[3] * H[7] - H[4] * H[6]) * idet;
+      grid_params.Hi[7] = (H[1] * H[6] - H[0] * H[7]) * idet;
+      grid_params.Hi[8] = (H[0] * H[4] - H[1] * H[3]) * idet;
+
+      grid_params.vp_z0 = VPm.d[2];
+      grid_params.vp_z2 = VPm.d[10];
+      grid_params.vp_z3 = VPm.d[14];
+      grid_params.vp_w0 = VPm.d[3];
+      grid_params.vp_w2 = VPm.d[11];
+      grid_params.vp_w3 = VPm.d[15];
+      grid_params.grid_half = 8.0f;
+      grid_params.reverse_z = vp->reverse_z;
+      grid_params.minor_color = vp->theme.grid_minor;
+      grid_params.major_color = vp->theme.grid_major;
+      grid_params.axis_x_color = vp->theme.grid_axis_x;
+      grid_params.axis_z_color = vp->theme.grid_axis_z;
+      grid_params.axis_half_width = vp->theme.grid_line_width_axis * 0.5f;
+      gp = &grid_params;
+    }
+  }
+
+  /* Dispatch accumulated overlay primitives to backend */
+  if ((vp->overlay_prim_count > 0 || gp) && vp->rhi->draw_overlays) {
+    int w = vp->width * vp->ssaa_factor;
+    int h = vp->height * vp->ssaa_factor;
+    vp->rhi->draw_overlays(vp->device, vp->framebuffer, vp->overlay_prims,
+                           vp->overlay_prim_count, gp, w, h);
+  }
+}
+
+/* Submit — finalize and submit the GPU command buffer after overlays */
+static void rg_frame_submit(MopViewport *vp, void *ud) {
+  (void)ud;
+  if (vp->rhi->frame_submit)
+    vp->rhi->frame_submit(vp->device, vp->framebuffer);
+}
+
+/* Cleanup: clear shadow/IBL state, run post-render subsystems */
+static void rg_cleanup(MopViewport *vp, void *ud) {
+  (void)ud;
+  if (vp->backend_type == MOP_BACKEND_CPU) {
+    mop_sw_shadow_clear();
+    mop_sw_ibl_clear();
+  }
+  mop_subsystem_dispatch(&vp->subsystems, MOP_SUBSYS_PHASE_POST_RENDER, vp,
+                         0.0f, vp->last_frame_time);
+}
+
+/* -------------------------------------------------------------------------
+ * Render graph builder — convenience for adding passes with resource decls
+ * ------------------------------------------------------------------------- */
+
+/* Helper: add pass with reads and writes arrays */
+static void rg_add(MopRenderGraph *rg, const char *name, MopRgExecuteFn fn,
+                   void *ud, const MopRgResourceId *reads, uint32_t rc,
+                   const MopRgResourceId *writes, uint32_t wc) {
+  MopRgPass p = {.name = name,
+                 .execute = fn,
+                 .user_data = ud,
+                 .read_count = rc,
+                 .write_count = wc};
+  for (uint32_t i = 0; i < rc && i < MOP_RG_MAX_PASS_RESOURCES; i++)
+    p.reads[i] = reads[i];
+  for (uint32_t i = 0; i < wc && i < MOP_RG_MAX_PASS_RESOURCES; i++)
+    p.writes[i] = writes[i];
+  mop_rg_add_pass(rg, &p);
+}
+
+/* Shorthand: pass with no resource declarations */
+static void rg_add_simple(MopRenderGraph *rg, const char *name,
+                          MopRgExecuteFn fn, void *ud) {
+  rg_add(rg, name, fn, ud, NULL, 0, NULL, 0);
+}
+
 /* -------------------------------------------------------------------------
  * Main render entry point
  * ------------------------------------------------------------------------- */
@@ -1841,7 +2572,7 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
    * still rasterized (writes to object_id buffer for click detection). */
   if (viewport->show_chrome) {
     mop_light_update_indicators(viewport);
-    for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+    for (uint32_t i = 0; i < viewport->light_count; i++) {
       if (viewport->light_indicators[i]) {
         viewport->light_indicators[i]->opacity = 0.0f;
         viewport->light_indicators[i]->blend_mode = MOP_BLEND_ALPHA;
@@ -1858,6 +2589,9 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
   /* --- Transform phase (TRS + hierarchical world transforms) --- */
   double t_transform_start = mop_profile_now_ms();
   s_triangle_count = 0;
+  s_draw_call_count = 0;
+  s_vertex_count = 0;
+  s_lod_transitions = 0;
 
   /* Compute local transforms for all active meshes */
   for (uint32_t i = 0; i < viewport->mesh_count; i++) {
@@ -1900,6 +2634,48 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
       break;
   }
 
+  /* LOD selection (Phase 9C) — compute projected diameter and select LOD */
+  {
+    float half_h = (float)viewport->height * 0.5f;
+    MopMat4 vp_mat =
+        mop_mat4_multiply(viewport->projection_matrix, viewport->view_matrix);
+    for (uint32_t i = 0; i < viewport->mesh_count; i++) {
+      struct MopMesh *mesh = &viewport->meshes[i];
+      if (!mesh->active || mesh->lod_level_count == 0)
+        continue;
+
+      /* Compute projected diameter from AABB */
+      float radius = 1.0f;
+      if (mesh->aabb_valid) {
+        MopVec3 ext = {mesh->aabb_local.max.x - mesh->aabb_local.min.x,
+                       mesh->aabb_local.max.y - mesh->aabb_local.min.y,
+                       mesh->aabb_local.max.z - mesh->aabb_local.min.z};
+        radius = 0.5f * sqrtf(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+      }
+
+      /* World-space center */
+      MopVec3 center = {mesh->world_transform.d[12],
+                        mesh->world_transform.d[13],
+                        mesh->world_transform.d[14]};
+
+      /* Project to clip space — only need w for perspective divide */
+      float cw = vp_mat.d[3] * center.x + vp_mat.d[7] * center.y +
+                 vp_mat.d[11] * center.z + vp_mat.d[15];
+
+      float projected_diameter = 0.0f;
+      if (cw > 0.001f)
+        projected_diameter = (radius / cw) * half_h * 2.0f;
+      else
+        projected_diameter = 1e6f; /* very close — use highest detail */
+
+      mesh->prev_lod = mesh->active_lod;
+      mesh->active_lod =
+          lod_select(mesh, projected_diameter, viewport->lod_bias);
+      if (mesh->active_lod != mesh->prev_lod)
+        s_lod_transitions++;
+    }
+  }
+
   double t_transform_end = mop_profile_now_ms();
 
   /* --- Simulation update (water, particles, etc. via subsystem dispatch) ---
@@ -1909,187 +2685,130 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
   mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_SIMULATE,
                          viewport, 0.0f, viewport->last_frame_time);
 
-  /* --- Clear phase --- */
-  double t_clear_start = mop_profile_now_ms();
-  viewport->rhi->frame_begin(viewport->device, viewport->framebuffer,
-                             viewport->clear_color);
-  double t_clear_end = mop_profile_now_ms();
-
-  /* Set HDR exposure on the backend before any draws (UBOs read it) */
-  if (viewport->rhi->set_exposure)
-    viewport->rhi->set_exposure(viewport->device, viewport->exposure);
-
-  /* --- POST_CLEAR hooks --- */
-  dispatch_hooks(viewport, MOP_STAGE_POST_CLEAR);
-
-  /* --- Background --- */
-  if (viewport->show_chrome)
-    pass_background(viewport);
-
-  /* --- PRE_SCENE hooks --- */
-  dispatch_hooks(viewport, MOP_STAGE_PRE_SCENE);
-
-  /* --- Shadow map pass (CPU backend only) --- */
-  if (viewport->backend_type == MOP_BACKEND_CPU)
-    pass_shadow(viewport);
-
-  /* --- Set IBL state for rendering --- */
-  /* Update GPU IBL texture bindings for all backends */
-  if (viewport->rhi->set_ibl_textures) {
-    viewport->rhi->set_ibl_textures(viewport->device, viewport->env_irradiance,
-                                    viewport->env_prefiltered,
-                                    viewport->env_brdf_lut);
+  /* --- Apply CPU morph blending + skinning for dirty meshes --- */
+  for (uint32_t i = 0; i < viewport->mesh_count; i++) {
+    MopMesh *m = &viewport->meshes[i];
+    if (!m->active)
+      continue;
+    /* Morph blending runs first (modifies bind-pose → vertex buffer),
+     * then skinning transforms the result further if applicable. */
+    if (m->morph_dirty)
+      mop_morph_apply(m, viewport);
+    if (m->skin_dirty)
+      mop_skin_apply(m, viewport);
   }
 
-  if (viewport->backend_type == MOP_BACKEND_CPU &&
-      viewport->env_irradiance_data) {
-    mop_sw_ibl_set(viewport->env_irradiance_data, viewport->env_irradiance_w,
-                   viewport->env_irradiance_h, viewport->env_prefiltered_data,
-                   viewport->env_prefiltered_w, viewport->env_prefiltered_h,
-                   viewport->env_prefiltered_levels,
-                   viewport->env_brdf_lut_data, 256, /* BRDF_LUT_SIZE */
-                   viewport->env_rotation, viewport->env_intensity);
+  /* === TAA: apply sub-pixel jitter to projection matrix === */
+  MopMat4 unjittered_proj = viewport->projection_matrix;
+  bool taa_enabled = (viewport->post_effects & MOP_POST_TAA) != 0;
+  if (taa_enabled) {
+    /* Compute Halton(2,3) jitter in [-0.5, +0.5] pixels */
+    uint32_t fi = (viewport->taa_frame_index % 16) + 1; /* 1-based, 16 phases */
+    viewport->taa_jitter_x = mop_halton(fi, 2) - 0.5f;
+    viewport->taa_jitter_y = mop_halton(fi, 3) - 0.5f;
+
+    /* Apply jitter as sub-pixel translation in clip space:
+     * proj[2][0] += jitter_x * 2 / render_width
+     * proj[2][1] += jitter_y * 2 / render_height
+     * Column-major: d[col*4+row], so col=2,row=0 → d[8], col=2,row=1 → d[9] */
+    int rw = viewport->width * viewport->ssaa_factor;
+    int rh = viewport->height * viewport->ssaa_factor;
+    viewport->projection_matrix.d[8] +=
+        viewport->taa_jitter_x * 2.0f / (float)rw;
+    viewport->projection_matrix.d[9] +=
+        viewport->taa_jitter_y * 2.0f / (float)rh;
   }
 
-  /* --- Rasterize phase --- */
+  /* === Build render graph for this frame === */
   double t_rasterize_start = mop_profile_now_ms();
+  MopRenderGraph rg;
+  mop_rg_clear(&rg);
 
-  pass_scene_opaque(viewport);
+  /* clang-format off */
+  static const MopRgResourceId w_clear[] = {MOP_RG_RES_COLOR_HDR, MOP_RG_RES_DEPTH, MOP_RG_RES_PICK};
+  static const MopRgResourceId w_color[] = {MOP_RG_RES_COLOR_HDR};
+  static const MopRgResourceId w_shadow[] = {MOP_RG_RES_SHADOW_MAP};
+  static const MopRgResourceId w_scene[] = {MOP_RG_RES_COLOR_HDR, MOP_RG_RES_DEPTH, MOP_RG_RES_PICK};
+  static const MopRgResourceId r_shadow[] = {MOP_RG_RES_SHADOW_MAP};
+  static const MopRgResourceId r_depth[] = {MOP_RG_RES_DEPTH};
+  static const MopRgResourceId r_hdr[] = {MOP_RG_RES_COLOR_HDR};
+  static const MopRgResourceId w_ldr[] = {MOP_RG_RES_LDR_COLOR};
+  static const MopRgResourceId rw_overlay[] = {MOP_RG_RES_LDR_COLOR, MOP_RG_RES_OVERLAY_BUF};
+  /* clang-format on */
 
-  /* --- POST_OPAQUE hooks --- */
-  dispatch_hooks(viewport, MOP_STAGE_POST_OPAQUE);
+  rg_add(&rg, "frame_begin", rg_frame_begin, NULL, NULL, 0, w_clear, 3);
 
-  pass_scene_transparent(viewport);
-  pass_instanced(viewport);
+  rg_add_simple(&rg, "hook:post_clear", rg_dispatch_hook,
+                (void *)(uintptr_t)MOP_STAGE_POST_CLEAR);
 
-  /* --- POST_SCENE hooks --- */
-  dispatch_hooks(viewport, MOP_STAGE_POST_SCENE);
-
-  pass_overlays(viewport);
   if (viewport->show_chrome)
-    pass_gizmo(viewport);
+    rg_add(&rg, "background", rg_background, NULL, NULL, 0, w_color, 1);
 
-  /* --- POST_OVERLAY hooks --- */
-  dispatch_hooks(viewport, MOP_STAGE_POST_OVERLAY);
+  rg_add_simple(&rg, "hook:pre_scene", rg_dispatch_hook,
+                (void *)(uintptr_t)MOP_STAGE_PRE_SCENE);
 
-  /* Geometry HUD skipped — 2D overlay replaces it (pass_hud removed) */
+  if (viewport->backend_type == MOP_BACKEND_CPU)
+    rg_add(&rg, "shadow", rg_shadow, NULL, NULL, 0, w_shadow, 1);
 
-  /* Set HDR exposure on the backend before frame_end (GPU tonemap uses it) */
-  if (viewport->rhi->set_exposure)
-    viewport->rhi->set_exposure(viewport->device, viewport->exposure);
+  rg_add_simple(&rg, "ibl_setup", rg_ibl_setup, NULL);
 
-  viewport->rhi->frame_end(viewport->device, viewport->framebuffer);
+  rg_add(&rg, "opaque", rg_opaque, NULL, r_shadow, 1, w_scene, 3);
 
-  /* HDR → LDR resolve (ACES tonemap + exposure) — converts float HDR
-   * accumulation buffer to uint8 color buffer before overlays/postprocess. */
-  if (viewport->backend_type == MOP_BACKEND_CPU) {
-    MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)viewport->framebuffer;
-    mop_sw_hdr_resolve(sw_fb, viewport->exposure);
+  rg_add_simple(&rg, "hook:post_opaque", rg_dispatch_hook,
+                (void *)(uintptr_t)MOP_STAGE_POST_OPAQUE);
+
+  rg_add(&rg, "plugins:post_opaque", rg_shader_plugins,
+         (void *)(uintptr_t)MOP_SHADER_PLUGIN_POST_OPAQUE, r_depth, 1, w_scene,
+         3);
+
+  rg_add(&rg, "transparent", rg_transparent, NULL, r_depth, 1, w_scene, 3);
+
+  rg_add(&rg, "instanced", rg_instanced, NULL, r_depth, 1, w_scene, 3);
+
+  rg_add_simple(&rg, "hook:post_scene", rg_dispatch_hook,
+                (void *)(uintptr_t)MOP_STAGE_POST_SCENE);
+
+  rg_add(&rg, "plugins:post_scene", rg_shader_plugins,
+         (void *)(uintptr_t)MOP_SHADER_PLUGIN_POST_SCENE, r_depth, 1, w_scene,
+         3);
+
+  rg_add(&rg, "overlays", rg_overlays, NULL, NULL, 0, w_color, 1);
+
+  if (viewport->show_chrome)
+    rg_add(&rg, "gizmo", rg_gizmo, NULL, r_depth, 1, w_scene, 3);
+
+  rg_add(&rg, "plugins:overlay", rg_shader_plugins,
+         (void *)(uintptr_t)MOP_SHADER_PLUGIN_OVERLAY, r_depth, 1, w_color, 1);
+
+  rg_add_simple(&rg, "hook:post_overlay", rg_dispatch_hook,
+                (void *)(uintptr_t)MOP_STAGE_POST_OVERLAY);
+
+  rg_add(&rg, "frame_end", rg_frame_end, NULL, r_hdr, 1, w_ldr, 1);
+
+  rg_add(&rg, "plugins:post_process", rg_shader_plugins,
+         (void *)(uintptr_t)MOP_SHADER_PLUGIN_POST_PROCESS, r_hdr, 1, w_ldr, 1);
+
+  rg_add(&rg, "post_overlays", rg_post_frame_overlays, NULL, rw_overlay, 2,
+         rw_overlay, 2);
+
+  rg_add_simple(&rg, "frame_submit", rg_frame_submit, NULL);
+
+  rg_add_simple(&rg, "cleanup", rg_cleanup, NULL);
+
+  /* === Compile + Execute === */
+  mop_rg_compile(&rg);
+  mop_rg_execute_mt(&rg, viewport, viewport->thread_pool);
+
+  /* === TAA: save current matrices for next frame, restore unjittered proj ===
+   */
+  if (taa_enabled) {
+    viewport->taa_prev_view = viewport->view_matrix;
+    viewport->taa_prev_proj = unjittered_proj;
+    viewport->projection_matrix =
+        unjittered_proj; /* restore for picking etc. */
+    viewport->taa_frame_index++;
+    viewport->taa_has_history = true;
   }
-
-  /* Outline writes directly to readback buffer — must run BEFORE
-   * draw_overlays so the GPU pass renders gizmos on top. */
-  if (viewport->overlay_enabled[MOP_OVERLAY_OUTLINE]) {
-    mop_overlay_builtin_outline(viewport, NULL);
-  }
-
-  /* Grid: GPU shader path or CPU fallback */
-  bool gpu_grid = (viewport->backend_type != MOP_BACKEND_CPU);
-  if (viewport->show_chrome && !gpu_grid) {
-    mop_overlay_builtin_grid(viewport, NULL);
-  }
-
-  /* Reset overlay command buffer for this frame */
-  viewport->overlay_prim_count = 0;
-
-  /* Push-based overlays (gizmo, lights, cameras, axis indicator) go into the
-   * command buffer and are dispatched via draw_overlays. */
-  if (viewport->show_chrome) {
-    mop_overlay_builtin_light_indicators(viewport, NULL);
-
-    /* Sync camera object positions from icon mesh (gizmo drag updates mesh) */
-    for (uint32_t ci = 0; ci < MOP_MAX_CAMERAS; ci++) {
-      struct MopCameraObject *cam = &viewport->cameras[ci];
-      if (cam->active && cam->icon_mesh)
-        cam->position = cam->icon_mesh->position;
-    }
-    mop_overlay_builtin_camera_objects(viewport, NULL);
-    mop_overlay_builtin_gizmo_2d(viewport, NULL);
-    mop_overlay_builtin_axis_indicator_2d(viewport, NULL);
-  }
-
-  /* Compute GPU grid params if needed */
-  MopGridParams grid_params;
-  MopGridParams *gp = NULL;
-  if (viewport->show_chrome && gpu_grid) {
-    MopMat4 VPm =
-        mop_mat4_multiply(viewport->projection_matrix, viewport->view_matrix);
-
-    /* Homography: NDC → Y=0 world XZ (skip Y column of VP) */
-    float H[9];
-    H[0] = VPm.d[0];
-    H[1] = VPm.d[8];
-    H[2] = VPm.d[12];
-    H[3] = VPm.d[1];
-    H[4] = VPm.d[9];
-    H[5] = VPm.d[13];
-    H[6] = VPm.d[3];
-    H[7] = VPm.d[11];
-    H[8] = VPm.d[15];
-
-    float det = H[0] * (H[4] * H[8] - H[5] * H[7]) -
-                H[1] * (H[3] * H[8] - H[5] * H[6]) +
-                H[2] * (H[3] * H[7] - H[4] * H[6]);
-    if (fabsf(det) > 1e-12f) {
-      float idet = 1.0f / det;
-      grid_params.Hi[0] = (H[4] * H[8] - H[5] * H[7]) * idet;
-      grid_params.Hi[1] = (H[2] * H[7] - H[1] * H[8]) * idet;
-      grid_params.Hi[2] = (H[1] * H[5] - H[2] * H[4]) * idet;
-      grid_params.Hi[3] = (H[5] * H[6] - H[3] * H[8]) * idet;
-      grid_params.Hi[4] = (H[0] * H[8] - H[2] * H[6]) * idet;
-      grid_params.Hi[5] = (H[2] * H[3] - H[0] * H[5]) * idet;
-      grid_params.Hi[6] = (H[3] * H[7] - H[4] * H[6]) * idet;
-      grid_params.Hi[7] = (H[1] * H[6] - H[0] * H[7]) * idet;
-      grid_params.Hi[8] = (H[0] * H[4] - H[1] * H[3]) * idet;
-
-      grid_params.vp_z0 = VPm.d[2];
-      grid_params.vp_z2 = VPm.d[10];
-      grid_params.vp_z3 = VPm.d[14];
-      grid_params.vp_w0 = VPm.d[3];
-      grid_params.vp_w2 = VPm.d[11];
-      grid_params.vp_w3 = VPm.d[15];
-      grid_params.grid_half = 8.0f;
-      grid_params.reverse_z = viewport->reverse_z;
-      grid_params.minor_color = viewport->theme.grid_minor;
-      grid_params.major_color = viewport->theme.grid_major;
-      grid_params.axis_x_color = viewport->theme.grid_axis_x;
-      grid_params.axis_z_color = viewport->theme.grid_axis_z;
-      grid_params.axis_half_width = viewport->theme.grid_line_width_axis * 0.5f;
-      gp = &grid_params;
-    }
-  }
-
-  /* Dispatch accumulated overlay primitives to the GPU/CPU backend.
-   * Uploads readback→LDR first (so outline/grid are in the base image),
-   * renders GPU grid + SDF gizmos on top, then copies LDR→readback. */
-  if ((viewport->overlay_prim_count > 0 || gp) &&
-      viewport->rhi->draw_overlays) {
-    int w = viewport->width * viewport->ssaa_factor;
-    int h = viewport->height * viewport->ssaa_factor;
-    viewport->rhi->draw_overlays(viewport->device, viewport->framebuffer,
-                                 viewport->overlay_prims,
-                                 viewport->overlay_prim_count, gp, w, h);
-  }
-
-  /* Clear shadow + IBL state */
-  if (viewport->backend_type == MOP_BACKEND_CPU) {
-    mop_sw_shadow_clear();
-    mop_sw_ibl_clear();
-  }
-
-  /* Post-render subsystems (postprocess effects, etc.) */
-  mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_POST_RENDER,
-                         viewport, 0.0f, viewport->last_frame_time);
 
   double t_rasterize_end = mop_profile_now_ms();
 
@@ -2103,11 +2822,18 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
   /* Store profiling stats */
   viewport->last_stats = (MopFrameStats){
       .frame_time_ms = t_frame_end - t_frame_start,
-      .clear_ms = t_clear_end - t_clear_start,
+      .clear_ms = 0.0, /* absorbed into graph execution */
       .transform_ms = t_transform_end - t_transform_start,
       .rasterize_ms = t_rasterize_end - t_rasterize_start,
       .triangle_count = s_triangle_count,
-      .pixel_count = (uint32_t)(viewport->width * viewport->height)};
+      .pixel_count = (uint32_t)(viewport->width * viewport->height),
+      .draw_call_count = s_draw_call_count,
+      .vertex_count = s_vertex_count,
+      .lod_transitions = s_lod_transitions,
+      .gpu_frame_ms = viewport->rhi->frame_gpu_time_ms
+                          ? viewport->rhi->frame_gpu_time_ms(viewport->device)
+                          : 0.0,
+  };
 
   viewport->last_render_result = MOP_RENDER_OK;
   viewport->last_render_error[0] = '\0';
@@ -2314,7 +3040,7 @@ static uint32_t pick_light_screen(const MopViewport *vp, float mx, float my) {
   MopMat4 vpm = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
   (void)vpm;
 
-  for (uint32_t i = 0; i < MOP_MAX_LIGHTS; i++) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
     if (!vp->lights[i].active)
       continue;
 
@@ -2360,7 +3086,7 @@ static uint32_t pick_camera_screen(const MopViewport *vp, float mx, float my) {
   float best_dist = threshold;
   uint32_t best_id = 0;
 
-  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+  for (uint32_t i = 0; i < vp->camera_count; i++) {
     const struct MopCameraObject *cam = &vp->cameras[i];
     if (!cam->active)
       continue;
@@ -2665,6 +3391,86 @@ void mop_viewport_set_chrome(MopViewport *viewport, bool visible) {
   /* Hide/show the grid mesh */
   if (viewport->grid)
     mop_mesh_set_opacity(viewport->grid, visible ? 1.0f : 0.0f);
+}
+
+/* =========================================================================
+ * Debug visualization (Phase 9B)
+ * ========================================================================= */
+
+void mop_viewport_set_debug_viz(MopViewport *viewport, MopDebugViz mode) {
+  if (viewport)
+    viewport->debug_viz = mode;
+}
+
+MopDebugViz mop_viewport_get_debug_viz(const MopViewport *viewport) {
+  return viewport ? viewport->debug_viz : MOP_DEBUG_VIZ_NONE;
+}
+
+/* =========================================================================
+ * LOD system (Phase 9C)
+ * ========================================================================= */
+
+void mop_viewport_set_lod_bias(MopViewport *viewport, float bias) {
+  if (viewport)
+    viewport->lod_bias = bias;
+}
+
+float mop_viewport_get_lod_bias(const MopViewport *viewport) {
+  return viewport ? viewport->lod_bias : 0.0f;
+}
+
+int32_t mop_mesh_add_lod(MopMesh *mesh, MopViewport *viewport,
+                         const MopMeshDesc *desc, float screen_threshold) {
+  if (!mesh || !viewport || !desc)
+    return -1;
+  if (mesh->lod_level_count >= MOP_MAX_LOD_LEVELS - 1)
+    return -1;
+
+  const MopRhiBackend *rhi = viewport->rhi;
+  MopRhiDevice *dev = viewport->device;
+
+  /* Create vertex buffer */
+  MopRhiBufferDesc vb_desc = {.data = desc->vertices,
+                              .size = desc->vertex_count * sizeof(MopVertex)};
+  MopRhiBuffer *vb = rhi->buffer_create(dev, &vb_desc);
+  if (!vb)
+    return -1;
+
+  /* Create index buffer */
+  MopRhiBuffer *ib = NULL;
+  if (desc->indices && desc->index_count > 0) {
+    MopRhiBufferDesc ib_desc = {.data = desc->indices,
+                                .size = desc->index_count * sizeof(uint32_t)};
+    ib = rhi->buffer_create(dev, &ib_desc);
+    if (!ib) {
+      rhi->buffer_destroy(dev, vb);
+      return -1;
+    }
+  }
+
+  uint32_t idx = mesh->lod_level_count++;
+  mesh->lod_levels[idx].vertex_buffer = vb;
+  mesh->lod_levels[idx].index_buffer = ib;
+  mesh->lod_levels[idx].vertex_count = desc->vertex_count;
+  mesh->lod_levels[idx].index_count = desc->index_count;
+  mesh->lod_levels[idx].screen_threshold = screen_threshold;
+
+  return (int32_t)(idx + 1); /* LOD level 1..7 */
+}
+
+/* Select LOD level based on screen-space projected size.
+ * Returns the LOD level index (0 = highest detail). */
+static uint32_t lod_select(const MopMesh *mesh, float projected_diameter,
+                           float lod_bias) {
+  if (mesh->lod_level_count == 0)
+    return 0;
+
+  float effective = projected_diameter - lod_bias;
+  for (uint32_t i = 0; i < mesh->lod_level_count; i++) {
+    if (effective < mesh->lod_levels[i].screen_threshold)
+      return i + 1; /* lower detail LOD */
+  }
+  return 0; /* highest detail */
 }
 
 int mop_viewport_pick_axis_indicator(MopViewport *vp, float mx, float my) {

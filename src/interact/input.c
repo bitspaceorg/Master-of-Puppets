@@ -13,6 +13,7 @@
 #include <mop/interact/camera.h>
 #include <mop/mop.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -28,7 +29,7 @@
  * ------------------------------------------------------------------------- */
 
 static void push_event(MopViewport *vp, MopEvent ev) {
-  int next = (vp->event_tail + 1) % MOP_MAX_EVENTS;
+  int next = (vp->event_tail + 1) % (int)vp->event_capacity;
   if (next == vp->event_head) {
     MOP_WARN("event queue full, dropping event");
     return; /* queue full — drop newest event */
@@ -60,7 +61,7 @@ static bool is_light_indicator(uint32_t id) {
 
 /* Find a camera object by its object_id.  Returns NULL if not found. */
 static MopCameraObject *find_camera_by_id(MopViewport *vp, uint32_t id) {
-  for (uint32_t i = 0; i < MOP_MAX_CAMERAS; i++) {
+  for (uint32_t i = 0; i < vp->camera_count; i++) {
     if (vp->cameras[i].active && vp->cameras[i].object_id == id)
       return &vp->cameras[i];
   }
@@ -97,7 +98,7 @@ static void select_object(MopViewport *vp, uint32_t object_id, bool additive) {
   if (is_light_indicator(object_id)) {
     /* Light indicator selected — show gizmo at light position */
     uint32_t li = light_index_from_id(object_id);
-    if (li < MOP_MAX_LIGHTS && vp->lights[li].active) {
+    if (li < vp->light_count && vp->lights[li].active) {
       MopVec3 pos = vp->lights[li].position;
       if (vp->lights[li].type == MOP_LIGHT_DIRECTIONAL) {
         MopVec3 dir = mop_vec3_normalize(vp->lights[li].direction);
@@ -188,7 +189,9 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
     if (vp->interact_state == MOP_INTERACT_GIZMO_DRAG &&
         vp->selected_count > 0) {
       /* Collect non-light-indicator meshes that were moved */
-      MopMesh *moved[MOP_MAX_SELECTED];
+      MopMesh **moved = malloc(vp->selected_count * sizeof(MopMesh *));
+      if (!moved)
+        break;
       uint32_t moved_count = 0;
       for (uint32_t si = 0; si < vp->selected_count; si++) {
         if (is_light_indicator(vp->selected_ids[si]))
@@ -202,6 +205,7 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
       } else if (moved_count > 1) {
         mop_viewport_push_undo_batch(vp, moved, moved_count);
       }
+      free(moved);
     }
 
     if (vp->interact_state == MOP_INTERACT_CLICK_PENDING) {
@@ -271,7 +275,7 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
       if (is_light_indicator(vp->selected_id)) {
         /* Dragging a light indicator — update the light */
         uint32_t li = light_index_from_id(vp->selected_id);
-        if (li >= MOP_MAX_LIGHTS || !vp->lights[li].active)
+        if (li >= vp->light_count || !vp->lights[li].active)
           break;
 
         MopGizmoDelta d =
@@ -496,7 +500,7 @@ bool mop_viewport_poll_event(MopViewport *vp, MopEvent *out) {
     return false;
 
   *out = vp->events[vp->event_head];
-  vp->event_head = (vp->event_head + 1) % MOP_MAX_EVENTS;
+  vp->event_head = (vp->event_head + 1) % (int)vp->event_capacity;
   return true;
 }
 

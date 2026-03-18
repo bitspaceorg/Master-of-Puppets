@@ -30,7 +30,10 @@ compile_shader() {
     local spv="$TMPDIR/mop_$$_$(basename "$src").spv"
 
     echo "  Compiling $src -> $array_name"
-    glslc -O "$src" -o "$spv"
+    if ! glslc -O "$src" -o "$spv"; then
+        echo "  WARNING: failed to compile $src (skipping)"
+        return 1
+    fi
 
     echo "static const uint32_t ${array_name}[] = {" >>"$OUT_FILE"
 
@@ -85,6 +88,27 @@ compile_shader "$SCRIPT_DIR/mop_bloom_blur.frag" "mop_bloom_blur_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_bloom_upsample.frag" "mop_bloom_upsample_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_ssao.frag" "mop_ssao_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_ssao_blur.frag" "mop_ssao_blur_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_gtao.frag" "mop_gtao_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_gtao_blur.frag" "mop_gtao_blur_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_solid_bindless.vert" "mop_solid_bindless_vert_spv"
+compile_shader "$SCRIPT_DIR/mop_solid_bindless.frag" "mop_solid_bindless_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_wireframe_bindless.frag" "mop_wireframe_bindless_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_cull.comp" "mop_cull_comp_spv"
+compile_shader "$SCRIPT_DIR/mop_hiz_downsample.comp" "mop_hiz_downsample_comp_spv"
+compile_shader "$SCRIPT_DIR/mop_taa.frag" "mop_taa_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_ssr.frag" "mop_ssr_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_oit_accum.frag" "mop_oit_accum_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_oit_composite.frag" "mop_oit_composite_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_decal.vert" "mop_decal_vert_spv"
+compile_shader "$SCRIPT_DIR/mop_decal.frag" "mop_decal_frag_spv"
+compile_shader "$SCRIPT_DIR/mop_volumetric.frag" "mop_volumetric_frag_spv"
+
+# Mesh shading (Phase 10) — requires VK_EXT_mesh_shader / GLSL 450 + GL_EXT_mesh_shader
+# glslc uses file extensions to determine shader stage: .task and .mesh
+# These may fail on toolchains without mesh shader support — skip gracefully.
+HAS_MESH=1
+compile_shader "$SCRIPT_DIR/mop_meshlet.task" "mop_meshlet_task_spv" || HAS_MESH=0
+compile_shader "$SCRIPT_DIR/mop_meshlet.mesh" "mop_meshlet_mesh_spv" || HAS_MESH=0
 
 echo "" >>"$OUT_FILE"
 echo "/* Feature flags: define these to enable shader-dependent pipelines */" >>"$OUT_FILE"
@@ -95,6 +119,18 @@ echo "#define MOP_VK_HAS_SKYBOX_SHADERS 1" >>"$OUT_FILE"
 echo "#define MOP_VK_HAS_OVERLAY_SHADERS 1" >>"$OUT_FILE"
 echo "#define MOP_VK_HAS_BLOOM_SHADERS 1" >>"$OUT_FILE"
 echo "#define MOP_VK_HAS_SSAO_SHADERS 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_BINDLESS_SHADERS 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_CULL_SHADER 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_TAA_SHADER 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_SSR_SHADER 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_OIT_SHADERS 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_GTAO_SHADERS 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_DECAL_SHADERS 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_VOLUMETRIC_SHADER 1" >>"$OUT_FILE"
+echo "#define MOP_VK_HAS_HIZ_SHADER 1" >>"$OUT_FILE"
+if [ "$HAS_MESH" = "1" ]; then
+    echo "#define MOP_VK_HAS_MESH_SHADERS 1" >>"$OUT_FILE"
+fi
 echo "" >>"$OUT_FILE"
 
 echo "#endif /* MOP_VK_SHADERS_H */" >>"$OUT_FILE"
