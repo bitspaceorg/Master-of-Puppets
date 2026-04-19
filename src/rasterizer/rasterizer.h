@@ -34,10 +34,20 @@ typedef struct MopSwFramebuffer {
   float *depth;          /* float,  size = width * height     */
   uint32_t *object_id;   /* uint32, size = width * height     */
   uint8_t *fxaa_scratch; /* RGBA8 scratch for FXAA (persistent) */
+  bool
+      color_external; /* true => `color` is host-owned, don't free on destroy */
 } MopSwFramebuffer;
 
 /* Allocate framebuffer storage.  Returns false on allocation failure. */
 bool mop_sw_framebuffer_alloc(MopSwFramebuffer *fb, int width, int height);
+
+/* Allocate framebuffer storage wrapping a host-owned color buffer.
+ * The host retains ownership of `external_color` — it must remain valid
+ * for the framebuffer's lifetime and have size width*height*4.
+ * Depth, object_id, HDR, and FXAA scratch are still engine-allocated.
+ * Returns false on allocation failure. */
+bool mop_sw_framebuffer_alloc_wrapping(MopSwFramebuffer *fb, int width,
+                                       int height, uint8_t *external_color);
 
 /* Free framebuffer storage. */
 void mop_sw_framebuffer_free(MopSwFramebuffer *fb);

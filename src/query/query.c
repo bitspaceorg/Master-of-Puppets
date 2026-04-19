@@ -26,7 +26,7 @@ uint32_t mop_viewport_mesh_count(const MopViewport *vp) {
     return 0;
   uint32_t count = 0;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (is_scene_mesh(&vp->meshes[i]))
+    if (is_scene_mesh(vp->meshes[i]))
       count++;
   }
   return count;
@@ -37,9 +37,9 @@ MopMesh *mop_viewport_mesh_at(const MopViewport *vp, uint32_t index) {
     return NULL;
   uint32_t active_idx = 0;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (is_scene_mesh(&vp->meshes[i])) {
+    if (is_scene_mesh(vp->meshes[i])) {
       if (active_idx == index)
-        return &vp->meshes[i];
+        return vp->meshes[i];
       active_idx++;
     }
   }
@@ -50,9 +50,9 @@ MopMesh *mop_viewport_mesh_by_id(const MopViewport *vp, uint32_t object_id) {
   if (!vp || object_id == 0)
     return NULL;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (vp->meshes[i].active && vp->meshes[i].object_id == object_id) {
-      return &vp->meshes[i];
-    }
+    MopMesh *m = vp->meshes[i];
+    if (m->active && m->object_id == object_id)
+      return m;
   }
   return NULL;
 }

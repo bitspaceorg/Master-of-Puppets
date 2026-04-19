@@ -109,7 +109,9 @@ struct MopMesh {
 
 ## Scene Management
 
-Meshes are stored in a flat array of `MOP_MAX_MESHES` (4096) entries. Adding a mesh scans for an inactive slot or appends. Removing a mesh marks it inactive and destroys its RHI buffers. The viewport destroy function walks the entire array.
+Meshes are stored in a **pointer-stable pool**: `vp->meshes` is an array of `MopMesh*`, each struct heap-allocated once per `add_mesh`. Growing the pointer array via `realloc` does not invalidate any `MopMesh*` handle a host may be holding. Add / remove are O(1) via a free-list of released slot indices. Instanced meshes, lights, and camera objects use the same scheme. No upper bound on mesh count.
+
+Each `MopMesh` carries a `slot_index` (for O(1) removal) and a `viewport` back-pointer (so setters that only take a mesh pointer — `mop_mesh_set_position` etc. — can auto-acquire the scene lock). `MopLight` and `MopCameraObject` follow the same pattern.
 
 ## Rendering Orchestration
 
@@ -131,3 +133,78 @@ Meshes are stored in a flat array of `MOP_MAX_MESHES` (4096) entries. Adding a m
 | `0x00000001` – `0xFFFDFFFF` | Scene meshes                                  |
 | `0xFFFE0000` – `0xFFFEFFFF` | Light indicators (`0xFFFE0000 + light_index`) |
 | `0xFFFF0000` – `0xFFFFFFFF` | Gizmo handles                                 |
+
+## Thread Safety
+
+The viewport maintains an internal **recursive** `pthread_mutex_t` (the "scene mutex"). Every public mutation and reader in the MOP API acquires it automatically via `MOP_VP_LOCK` / `MOP_VP_UNLOCK` helpers. Recursive semantics mean nested internal calls don't deadlock, and hosts can safely call MOP APIs from inside their own `mop_viewport_scene_lock` / `_unlock` blocks.
+
+```c
+/* Host explicit batch lock — used when you want multiple mutations
+ * to appear atomic relative to the render thread. */
+void mop_viewport_scene_lock(MopViewport *vp);
+void mop_viewport_scene_unlock(MopViewport *vp);
+```
+
+`mop_viewport_render` holds the lock for the entire frame, serializing the render pass against concurrent host mutations. Uncontended lock/unlock cost is ~20 ns, so single-threaded hosts pay a trivial overhead.
+
+Coverage today: every lifecycle op (`add_mesh`, `remove_mesh`, `add_light`, `add_camera`, etc.), every hot setter (`mop_mesh_set_*`, `mop_light_set_*`, `mop_camera_object_set_*`), all config setters (`set_camera`, `set_post_effects`, `set_environment`, etc.), undo/redo, selection, input dispatch, texture pipeline. The interactive `mop_mesh_edit_*` ops are not yet auto-locked — if you call them from a worker thread, bracket with `scene_lock`.
+
+`tests/test_scene_threading.c` exercises concurrent add/remove/mutate against an active render thread. The library is clean under `make SANITIZE=tsan test`.
+
+## Render-to-Texture (RTT)
+
+Two paths for getting rendered pixels into a host-owned texture:
+
+1. **Blit-to-texture** — render into MOP's internal framebuffer, then copy out:
+
+    ```c
+    MopRenderResult mop_viewport_render(MopViewport *vp);
+    bool mop_viewport_present_to_texture(MopViewport *vp, MopTexture *target);
+    /* or fused: */
+    MopRenderResult mop_viewport_render_to(MopViewport *vp, MopTexture *target);
+    ```
+
+    Present handles SSAA downsampling on the way out. Target may be presentation-sized (downsampled from internal) or internal-sized (1:1). CPU uses a box-filter; Vulkan uses `vkCmdBlitImage` with `VK_FILTER_LINEAR`.
+
+2. **Wrap-host-target** — MOP renders directly into the host's pixel buffer (zero-copy on CPU):
+
+    ```c
+    MopTexture *tex = mop_tex_create(vp, &(MopTextureDesc){...});
+    MopViewport *vp = mop_viewport_create(&(MopViewportDesc){
+        .width = W, .height = H, .render_target = tex, ...
+    });
+    ```
+
+    CPU backend aliases the texture's buffer as the framebuffer color (via `mop_sw_framebuffer_alloc_wrapping`). Vulkan / OpenGL return NULL from the wrap path and fall back transparently — deep wrapping of host `VkImage`/`GLuint` is in `docs/TODO.md`.
+
+## Environment (HDRI / Procedural Sky)
+
+```c
+mop_viewport_set_environment(vp, &(MopEnvironmentDesc){
+    .type = MOP_ENV_HDRI,
+    .hdr_path = "sunset.exr",
+    .intensity = 1.0f,
+});
+mop_viewport_set_environment_background(vp, true);  /* show as skybox */
+```
+
+Supports `.hdr` and `.exr`. Precomputes diffuse irradiance + prefiltered specular + BRDF LUT for split-sum PBR IBL. Auto-exposure runs on the input HDR so scene brightness maps to ~0.18 middle gray after ACES.
+
+## GPU-Driven Rendering (scaffolding)
+
+```c
+void mop_viewport_set_gpu_driven_rendering(MopViewport *vp, bool enabled);
+```
+
+Hooks into Vulkan's indirect-draw infrastructure (compute cull + Hi-Z + async compute are already built). Flipping this flag is safe today but currently a no-op on the draw path — per-pipeline-bucket `vkCmdDrawIndexedIndirectCount` dispatch is the next-round activation work (see `docs/TODO.md`).
+
+## Vertex Format Presets
+
+```c
+MopVertexFormat mop_vertex_format_standard(void);      /* pos + normal + color + uv */
+MopVertexFormat mop_vertex_format_posonly(void);       /* pos only */
+MopVertexFormat mop_vertex_format_pos_normal(void);    /* pos + normal */
+MopVertexFormat mop_vertex_format_pos_normal_uv(void); /* pos + normal + uv */
+```
+
+`MopMeshDesc` has an optional `vertex_format` field — when non-NULL, the mesh stores raw vertex bytes in the caller's layout and the engine copies them unchanged. The legacy `mop_viewport_add_mesh_ex` still exists as an alias.

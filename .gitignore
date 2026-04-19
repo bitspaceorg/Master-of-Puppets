@@ -2,6 +2,7 @@ build/
 *.ppm
 .DS_Store
 examples/build/
+examples/frames/
 __pycache__/
 .direnv
 .pre-commit-config.yaml

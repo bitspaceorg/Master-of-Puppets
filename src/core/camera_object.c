@@ -26,6 +26,7 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
   if (desc->object_id == 0)
     return NULL;
 
+  MOP_VP_LOCK(vp);
   /* Find first inactive slot */
   for (uint32_t i = 0; i < vp->camera_count; i++) {
     if (!vp->cameras[i].active) {
@@ -41,10 +42,12 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
       cam->object_id = desc->object_id;
       cam->active = true;
       cam->frustum_visible = true;
+      cam->viewport = vp;
       if (desc->name) {
         strncpy(cam->name, desc->name, sizeof(cam->name) - 1);
         cam->name[sizeof(cam->name) - 1] = '\0';
       }
+      MOP_VP_UNLOCK(vp);
       return cam;
     }
   }
@@ -53,8 +56,10 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
   if (vp->camera_count >= vp->camera_capacity) {
     if (!mop_dyn_grow((void **)&vp->cameras, &vp->camera_capacity,
                       sizeof(struct MopCameraObject),
-                      MOP_INITIAL_CAMERA_CAPACITY))
+                      MOP_INITIAL_CAMERA_CAPACITY)) {
+      MOP_VP_UNLOCK(vp);
       return NULL;
+    }
     /* Reset active_camera pointer — realloc may have moved the array */
     vp->active_camera = NULL;
   }
@@ -71,6 +76,7 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
   cam->object_id = desc->object_id;
   cam->active = true;
   cam->frustum_visible = true;
+  cam->viewport = vp;
 
   if (desc->name) {
     strncpy(cam->name, desc->name, sizeof(cam->name) - 1);
@@ -82,6 +88,7 @@ MopCameraObject *mop_viewport_add_camera(MopViewport *vp,
   cam->frustum_mesh = NULL;
   cam->icon_mesh = NULL;
 
+  MOP_VP_UNLOCK(vp);
   return cam;
 }
 
@@ -89,6 +96,7 @@ void mop_viewport_remove_camera(MopViewport *vp, MopCameraObject *cam) {
   if (!vp || !cam || !cam->active)
     return;
 
+  MOP_VP_LOCK(vp);
   /* If this was the active camera, reset to orbit */
   if (vp->active_camera == cam)
     vp->active_camera = NULL;
@@ -106,6 +114,7 @@ void mop_viewport_remove_camera(MopViewport *vp, MopCameraObject *cam) {
   cam->active = false;
   if (vp->camera_count > 0)
     vp->camera_count--;
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -115,43 +124,57 @@ void mop_viewport_remove_camera(MopViewport *vp, MopCameraObject *cam) {
 void mop_camera_object_set_position(MopCameraObject *cam, MopVec3 pos) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->position = pos;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 void mop_camera_object_set_target(MopCameraObject *cam, MopVec3 target) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->target = target;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 void mop_camera_object_set_up(MopCameraObject *cam, MopVec3 up) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->up = up;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 void mop_camera_object_set_fov(MopCameraObject *cam, float fov_degrees) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->fov_degrees = fov_degrees;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 void mop_camera_object_set_near(MopCameraObject *cam, float near_plane) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->near_plane = near_plane;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 void mop_camera_object_set_far(MopCameraObject *cam, float far_plane) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->far_plane = far_plane;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 void mop_camera_object_set_aspect(MopCameraObject *cam, float aspect_ratio) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->aspect_ratio = aspect_ratio;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -195,7 +218,9 @@ const char *mop_camera_object_get_name(const MopCameraObject *cam) {
 void mop_camera_object_set_frustum_visible(MopCameraObject *cam, bool visible) {
   if (!cam || !cam->active)
     return;
+  MOP_VP_LOCK(cam->viewport);
   cam->frustum_visible = visible;
+  MOP_VP_UNLOCK(cam->viewport);
 }
 
 bool mop_camera_object_get_frustum_visible(const MopCameraObject *cam) {
@@ -211,7 +236,9 @@ bool mop_camera_object_get_frustum_visible(const MopCameraObject *cam) {
 void mop_viewport_set_active_camera(MopViewport *vp, MopCameraObject *cam) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   vp->active_camera = cam;
+  MOP_VP_UNLOCK(vp);
 }
 
 MopCameraObject *mop_viewport_get_active_camera(const MopViewport *vp) {

@@ -78,6 +78,16 @@ typedef struct MopVertexFormat {
  * stride = sizeof(MopVertex) = 48 bytes */
 MopVertexFormat mop_vertex_format_standard(void);
 
+/* Minimal preset: POSITION (float3) only. Stride = 12 bytes. */
+MopVertexFormat mop_vertex_format_posonly(void);
+
+/* Preset: POSITION + NORMAL (both float3). Stride = 24 bytes. */
+MopVertexFormat mop_vertex_format_pos_normal(void);
+
+/* Preset: POSITION + NORMAL + TEXCOORD0 (float3/float3/float2).
+ * Stride = 32 bytes. Common for untextured-color-free meshes. */
+MopVertexFormat mop_vertex_format_pos_normal_uv(void);
+
 /* Find an attribute by semantic.  Returns NULL if not present. */
 const MopVertexAttrib *mop_vertex_format_find(const MopVertexFormat *fmt,
                                               MopAttribSemantic sem);

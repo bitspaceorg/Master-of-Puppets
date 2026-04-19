@@ -8,9 +8,7 @@
  *   <mop/interact/interact.h> — input, camera, gizmo, undo
  *   <mop/query/query.h>       — scene queries, camera export, spatial,
  * snapshots <mop/render/render.h>     — backend selection, picking,
- * post-processing <mop/subsystem/subsystem.h> — particles, water
- *   <mop/loader/loader.h>     — OBJ and binary mesh loading
- *   <mop/config/config.h>     — Lua configuration
+ * post-processing <mop/loader/loader.h>     — OBJ and binary mesh loading
  *   <mop/util/util.h>         — logging, profiling
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -21,14 +19,12 @@
 
 #include <mop/types.h>
 
-#include <mop/config/config.h>
 #include <mop/core/core.h>
 #include <mop/export/export.h>
 #include <mop/interact/interact.h>
 #include <mop/loader/loader.h>
 #include <mop/query/query.h>
 #include <mop/render/render.h>
-#include <mop/subsystem/subsystem.h>
 #include <mop/util/util.h>
 
 #endif /* MOP_H */

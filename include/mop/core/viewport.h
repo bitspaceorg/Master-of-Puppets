@@ -27,6 +27,7 @@ typedef enum MopRenderResult {
  * ------------------------------------------------------------------------- */
 
 typedef struct MopViewport MopViewport;
+typedef struct MopTexture MopTexture;
 
 /* -------------------------------------------------------------------------
  * Viewport descriptor — passed to mop_viewport_create
@@ -40,6 +41,27 @@ typedef struct MopViewportDesc {
   int height;
   MopBackendType backend;
   bool reverse_z; /* Use reversed-Z depth buffer for improved precision */
+
+  /* Supersampling factor for the internal framebuffer.  The internal
+   * framebuffer has dimensions (width * ssaa_factor, height * ssaa_factor)
+   * and is downsampled on `mop_viewport_read_color`.  Higher values
+   * produce smoother edges at the cost of fill rate and memory.
+   *
+   * Values:  0 = default (2x), 1 = no supersampling (1:1),
+   *          2 = 2x, 4 = 4x.
+   *
+   * For DCC / game-engine integration where the host owns the output
+   * texture and wants 1:1 pixel correspondence, set this to 1. */
+  int ssaa_factor;
+
+  /* Optional host-owned render target. When non-NULL, the viewport's
+   * color framebuffer wraps this texture directly — the rasterizer
+   * writes into the host's pixel buffer (zero-copy on CPU backend).
+   * Requires ssaa_factor = 1 (the host target determines the render
+   * resolution). Supported by the CPU backend today; Vulkan and GL
+   * return NULL from create and fall back to internal framebuffer.
+   * Texture dimensions must match desc->width × desc->height. */
+  MopTexture *render_target;
 } MopViewportDesc;
 
 /* -------------------------------------------------------------------------
@@ -145,8 +167,7 @@ MopVec3 mop_viewport_get_camera_target(const MopViewport *viewport);
 /* -------------------------------------------------------------------------
  * Time control
  *
- * Set the current simulation time for deterministic updates of water
- * surfaces and particle emitters.
+ * Set the current simulation time for deterministic animation updates.
  * ------------------------------------------------------------------------- */
 
 void mop_viewport_set_time(MopViewport *viewport, float t);
@@ -160,5 +181,68 @@ void mop_viewport_set_time(MopViewport *viewport, float t);
  * ------------------------------------------------------------------------- */
 
 void mop_viewport_set_chrome(MopViewport *viewport, bool visible);
+
+/* -------------------------------------------------------------------------
+ * Thread-safe scene mutation
+ *
+ * mop_viewport_render acquires an internal scene mutex for the duration
+ * of a frame. Hosts mutating scene state (add/remove meshes, set transforms,
+ * update geometry, swap materials) from a thread other than the one that
+ * drives rendering MUST bracket their mutations with scene_lock / _unlock
+ * to stay serialized with the render.
+ *
+ * Single-threaded hosts can ignore these calls.
+ *
+ * The mutex is non-recursive: don't call render from inside a scene_lock,
+ * don't lock twice from the same thread without unlocking.
+ * ------------------------------------------------------------------------- */
+
+void mop_viewport_scene_lock(MopViewport *viewport);
+void mop_viewport_scene_unlock(MopViewport *viewport);
+
+/* -------------------------------------------------------------------------
+ * Present to host-owned texture (RTT / render-to-texture)
+ *
+ * Copies the rendered LDR color buffer into a host-owned MopTexture.
+ * The texture must be RGBA8. Valid target dimensions:
+ *   - Presentation size (width × height) — RTT downsamples from the
+ *     internal SSAA framebuffer, giving the host anti-aliased pixels.
+ *   - Internal size (width*ssaa_factor × height*ssaa_factor) — raw
+ *     1:1 copy, host does its own downsample.
+ * Any other size currently returns false (CPU backend requires an
+ * integer-factor relationship; Vulkan path is lenient but behavior is
+ * backend-specific for non-integer ratios).
+ *
+ * Call AFTER mop_viewport_render completes.
+ *
+ * Returns true on success; false on size mismatch, missing backend
+ * support, or NULL arguments.
+ *
+ * Use case: DCC hosts (Blender, Houdini) and game engines that want to
+ * composite MOP's output into their own render pipeline without going
+ * through mop_viewport_read_color's CPU readback path.
+ * ------------------------------------------------------------------------- */
+
+bool mop_viewport_present_to_texture(MopViewport *viewport, MopTexture *target);
+
+/* Fused render + present — renders a frame and blits the result into a
+ * host-owned texture in one call. Common DCC/game-engine embed pattern.
+ * Returns the render result; a blit failure does not demote the render
+ * result (callers can check the target themselves). */
+MopRenderResult mop_viewport_render_to(MopViewport *viewport,
+                                       MopTexture *target);
+
+/* Enable/disable GPU-driven rendering on GPU backends.
+ *
+ * When on, the backend populates a per-frame indirect-draw buffer and
+ * runs GPU culling against it; the main render path is expected to emit
+ * a single vkCmdDrawIndexedIndirectCount per pipeline bucket instead of
+ * per-mesh draws. Significant performance win at high mesh counts.
+ *
+ * SCAFFOLDING: today the flag only controls warm-up tracking inside the
+ * Vulkan backend — the render path still issues per-mesh draws. Real
+ * activation requires uber-shader + pipeline bucketing; see docs/TODO.md.
+ * Toggling this today is safe but a no-op. */
+void mop_viewport_set_gpu_driven_rendering(MopViewport *viewport, bool enabled);
 
 #endif /* MOP_CORE_VIEWPORT_H */

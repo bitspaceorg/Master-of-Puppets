@@ -8,11 +8,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <math.h>
+#include <mop/core/material.h>
+#include <mop/core/scene.h>
+#include <mop/core/texture_pipeline.h>
 #include <mop/loader/gltf.h>
 #include <mop/util/log.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* stb_image for decoding embedded image data */
+#include "stb_image.h"
 
 /* -------------------------------------------------------------------------
  * GLB binary container constants
@@ -653,13 +660,15 @@ static const char *parse_meshes(const char *p, GltfParseCtx *ctx) {
             if (data) {
               uint32_t n =
                   count < prim->vertex_count ? count : prim->vertex_count;
-              prim->tangents = (float *)malloc(n * 4 * sizeof(float));
-              for (uint32_t vi = 0; vi < n; vi++) {
-                const float *fp = (const float *)(data + vi * stride);
-                prim->tangents[vi * 4 + 0] = fp[0];
-                prim->tangents[vi * 4 + 1] = fp[1];
-                prim->tangents[vi * 4 + 2] = fp[2];
-                prim->tangents[vi * 4 + 3] = fp[3];
+              prim->tangents = (float *)malloc((size_t)n * 4 * sizeof(float));
+              if (prim->tangents) {
+                for (uint32_t vi = 0; vi < n; vi++) {
+                  const float *fp = (const float *)(data + vi * stride);
+                  prim->tangents[vi * 4 + 0] = fp[0];
+                  prim->tangents[vi * 4 + 1] = fp[1];
+                  prim->tangents[vi * 4 + 2] = fp[2];
+                  prim->tangents[vi * 4 + 3] = fp[3];
+                }
               }
             }
           }
@@ -670,19 +679,22 @@ static const char *parse_meshes(const char *p, GltfParseCtx *ctx) {
             const uint8_t *data =
                 resolve_accessor(ctx, (uint32_t)idx_acc, &count, &stride);
             if (data && count > 0) {
-              prim->index_count = count;
-              prim->indices = (uint32_t *)malloc(count * sizeof(uint32_t));
-              const GltfAccessor *acc = &ctx->accessors[idx_acc];
-              for (uint32_t ii = 0; ii < count; ii++) {
-                const uint8_t *ep = data + ii * stride;
-                if (acc->component_type == 5123) /* UNSIGNED_SHORT */
-                  prim->indices[ii] = *(const uint16_t *)ep;
-                else if (acc->component_type == 5125) /* UNSIGNED_INT */
-                  prim->indices[ii] = *(const uint32_t *)ep;
-                else if (acc->component_type == 5121) /* UNSIGNED_BYTE */
-                  prim->indices[ii] = ep[0];
-                else
-                  prim->indices[ii] = 0;
+              prim->indices =
+                  (uint32_t *)malloc((size_t)count * sizeof(uint32_t));
+              if (prim->indices) {
+                prim->index_count = count;
+                const GltfAccessor *acc = &ctx->accessors[idx_acc];
+                for (uint32_t ii = 0; ii < count; ii++) {
+                  const uint8_t *ep = data + ii * stride;
+                  if (acc->component_type == 5123) /* UNSIGNED_SHORT */
+                    prim->indices[ii] = *(const uint16_t *)ep;
+                  else if (acc->component_type == 5125) /* UNSIGNED_INT */
+                    prim->indices[ii] = *(const uint32_t *)ep;
+                  else if (acc->component_type == 5121) /* UNSIGNED_BYTE */
+                    prim->indices[ii] = ep[0];
+                  else
+                    prim->indices[ii] = 0;
+                }
               }
             }
           }
@@ -695,17 +707,19 @@ static const char *parse_meshes(const char *p, GltfParseCtx *ctx) {
             if (data) {
               uint32_t n =
                   count < prim->vertex_count ? count : prim->vertex_count;
-              prim->joints = (uint8_t *)malloc(n * 4);
-              const GltfAccessor *acc = &ctx->accessors[joint_acc];
-              for (uint32_t vi = 0; vi < n; vi++) {
-                const uint8_t *ep = data + vi * stride;
-                if (acc->component_type == 5121) { /* UNSIGNED_BYTE */
-                  memcpy(&prim->joints[vi * 4], ep, 4);
-                } else if (acc->component_type == 5123) { /* UNSIGNED_SHORT */
-                  const uint16_t *sp = (const uint16_t *)ep;
-                  for (int j = 0; j < 4; j++)
-                    prim->joints[vi * 4 + j] =
-                        (uint8_t)(sp[j] < 256 ? sp[j] : 255);
+              prim->joints = (uint8_t *)malloc((size_t)n * 4);
+              if (prim->joints) {
+                const GltfAccessor *acc = &ctx->accessors[joint_acc];
+                for (uint32_t vi = 0; vi < n; vi++) {
+                  const uint8_t *ep = data + vi * stride;
+                  if (acc->component_type == 5121) { /* UNSIGNED_BYTE */
+                    memcpy(&prim->joints[vi * 4], ep, 4);
+                  } else if (acc->component_type == 5123) { /* UNSIGNED_SHORT */
+                    const uint16_t *sp = (const uint16_t *)ep;
+                    for (int j = 0; j < 4; j++)
+                      prim->joints[vi * 4 + j] =
+                          (uint8_t)(sp[j] < 256 ? sp[j] : 255);
+                  }
                 }
               }
             }
@@ -719,10 +733,12 @@ static const char *parse_meshes(const char *p, GltfParseCtx *ctx) {
             if (data) {
               uint32_t n =
                   count < prim->vertex_count ? count : prim->vertex_count;
-              prim->weights = (float *)malloc(n * 4 * sizeof(float));
-              for (uint32_t vi = 0; vi < n; vi++) {
-                const float *fp = (const float *)(data + vi * stride);
-                memcpy(&prim->weights[vi * 4], fp, 4 * sizeof(float));
+              prim->weights = (float *)malloc((size_t)n * 4 * sizeof(float));
+              if (prim->weights) {
+                for (uint32_t vi = 0; vi < n; vi++) {
+                  const float *fp = (const float *)(data + vi * stride);
+                  memcpy(&prim->weights[vi * 4], fp, 4 * sizeof(float));
+                }
               }
             }
           }
@@ -1281,10 +1297,12 @@ static const char *parse_skins(const char *p, GltfParseCtx *ctx) {
           resolve_accessor(ctx, (uint32_t)ibm_acc, &count, &stride);
       if (data && count >= skin->joint_count) {
         skin->inverse_bind_matrices =
-            (float *)malloc(skin->joint_count * 16 * sizeof(float));
-        for (uint32_t j = 0; j < skin->joint_count; j++) {
-          memcpy(&skin->inverse_bind_matrices[j * 16], data + j * stride,
-                 16 * sizeof(float));
+            (float *)malloc((size_t)skin->joint_count * 16 * sizeof(float));
+        if (skin->inverse_bind_matrices) {
+          for (uint32_t j = 0; j < skin->joint_count; j++) {
+            memcpy(&skin->inverse_bind_matrices[j * 16], data + j * stride,
+                   16 * sizeof(float));
+          }
         }
       }
     }
@@ -1525,17 +1543,280 @@ void mop_gltf_free(MopGltfScene *scene) {
 }
 
 /* -------------------------------------------------------------------------
- * Public API: mop_gltf_import (stub — requires viewport)
+ * Quaternion to euler (ZYX intrinsic = XYZ extrinsic)
  *
- * Full implementation would create MOP meshes, textures, materials.
- * For now returns 0 (no meshes created) to satisfy the API contract.
+ * glTF stores rotations as quaternions (x,y,z,w).
+ * MOP uses euler angles in radians (Rz * Ry * Rx order).
+ * ------------------------------------------------------------------------- */
+
+static MopVec3 quat_to_euler(const float q[4]) {
+  float x = q[0], y = q[1], z = q[2], w = q[3];
+  MopVec3 e;
+
+  /* Roll (X) */
+  float sinr = 2.0f * (w * x + y * z);
+  float cosr = 1.0f - 2.0f * (x * x + y * y);
+  e.x = atan2f(sinr, cosr);
+
+  /* Pitch (Y) — clamp to avoid NaN from asinf */
+  float sinp = 2.0f * (w * y - z * x);
+  if (sinp >= 1.0f)
+    e.y = (float)(M_PI / 2.0);
+  else if (sinp <= -1.0f)
+    e.y = (float)(-M_PI / 2.0);
+  else
+    e.y = asinf(sinp);
+
+  /* Yaw (Z) */
+  float siny = 2.0f * (w * z + x * y);
+  float cosy = 1.0f - 2.0f * (y * y + z * z);
+  e.z = atan2f(siny, cosy);
+
+  return e;
+}
+
+/* -------------------------------------------------------------------------
+ * Load a glTF image into a MopTexture via the texture pipeline
+ * ------------------------------------------------------------------------- */
+
+static MopTexture *load_gltf_image(const MopGltfImage *img,
+                                   MopViewport *viewport) {
+  if (!img)
+    return NULL;
+
+  /* Try embedded data first (GLB or data URI) */
+  if (img->data && img->data_size > 0) {
+    int w, h, channels;
+    uint8_t *pixels = stbi_load_from_memory(img->data, (int)img->data_size, &w,
+                                            &h, &channels, 4);
+    if (!pixels) {
+      MOP_WARN("gltf_import: failed to decode image '%s'", img->name);
+      return NULL;
+    }
+    MopTextureDesc desc = {
+        .width = w,
+        .height = h,
+        .format = MOP_TEX_FORMAT_RGBA8,
+        .data = pixels,
+        .data_size = (uint32_t)((size_t)w * (size_t)h * 4),
+        .srgb = true,
+    };
+    MopTexture *tex = mop_tex_create(viewport, &desc);
+    stbi_image_free(pixels);
+    return tex;
+  }
+
+  /* Try external file path */
+  if (img->uri[0])
+    return mop_tex_load_async(viewport, img->uri);
+
+  return NULL;
+}
+
+/* -------------------------------------------------------------------------
+ * Convert a MopGltfMaterial to a MopMaterial
+ * ------------------------------------------------------------------------- */
+
+static MopMaterial gltf_material_to_mop(const MopGltfMaterial *gmat,
+                                        const MopGltfScene *scene,
+                                        MopViewport *viewport) {
+  MopMaterial mat = mop_material_default();
+  mat.base_color = (MopColor){
+      .r = gmat->base_color[0],
+      .g = gmat->base_color[1],
+      .b = gmat->base_color[2],
+      .a = gmat->base_color[3],
+  };
+  mat.metallic = gmat->metallic;
+  mat.roughness = gmat->roughness;
+  mat.emissive = (MopVec3){
+      .x = gmat->emissive[0],
+      .y = gmat->emissive[1],
+      .z = gmat->emissive[2],
+  };
+
+  /* Load texture maps */
+  if (gmat->base_color_tex.image_index >= 0 &&
+      (uint32_t)gmat->base_color_tex.image_index < scene->image_count) {
+    mat.albedo_map = load_gltf_image(
+        &scene->images[gmat->base_color_tex.image_index], viewport);
+  }
+  if (gmat->normal_tex.image_index >= 0 &&
+      (uint32_t)gmat->normal_tex.image_index < scene->image_count) {
+    mat.normal_map =
+        load_gltf_image(&scene->images[gmat->normal_tex.image_index], viewport);
+  }
+  if (gmat->mr_tex.image_index >= 0 &&
+      (uint32_t)gmat->mr_tex.image_index < scene->image_count) {
+    mat.metallic_roughness_map =
+        load_gltf_image(&scene->images[gmat->mr_tex.image_index], viewport);
+  }
+  if (gmat->occlusion_tex.image_index >= 0 &&
+      (uint32_t)gmat->occlusion_tex.image_index < scene->image_count) {
+    mat.ao_map = load_gltf_image(
+        &scene->images[gmat->occlusion_tex.image_index], viewport);
+  }
+
+  return mat;
+}
+
+/* -------------------------------------------------------------------------
+ * Public API: mop_gltf_import
+ *
+ * Creates MOP meshes, textures, and materials from a parsed glTF scene.
+ * Walks the node tree to establish parent-child relationships and TRS.
+ * Returns the number of mesh primitives created.
  * ------------------------------------------------------------------------- */
 
 uint32_t mop_gltf_import(const MopGltfScene *scene, MopViewport *viewport,
                          uint32_t base_object_id) {
   if (!scene || !viewport)
     return 0;
-  (void)base_object_id;
-  /* TODO: Phase 8C full import — create MOP meshes from glTF primitives */
-  return 0;
+
+  uint32_t meshes_created = 0;
+  uint32_t next_id = base_object_id;
+
+  /* Pre-convert materials */
+  MopMaterial *materials = NULL;
+  if (scene->material_count > 0) {
+    materials = calloc(scene->material_count, sizeof(MopMaterial));
+    if (materials) {
+      for (uint32_t i = 0; i < scene->material_count; i++)
+        materials[i] =
+            gltf_material_to_mop(&scene->materials[i], scene, viewport);
+    }
+  }
+
+  /* Map from (glTF mesh index, primitive index) to MopMesh*.
+   * We flatten all primitives across all glTF meshes into a single array
+   * so nodes can reference them by glTF mesh index. */
+  typedef struct {
+    uint32_t gltf_mesh_idx;
+    uint32_t prim_idx;
+    MopMesh *mop_mesh;
+  } PrimEntry;
+
+  /* Count total primitives */
+  uint32_t total_prims = 0;
+  for (uint32_t i = 0; i < scene->mesh_count; i++)
+    total_prims += scene->meshes[i].primitive_count;
+
+  PrimEntry *prim_map = NULL;
+  if (total_prims > 0)
+    prim_map = calloc(total_prims, sizeof(PrimEntry));
+
+  /* Create all mesh primitives */
+  uint32_t prim_write = 0;
+  for (uint32_t mi = 0; mi < scene->mesh_count; mi++) {
+    const MopGltfMesh *gmesh = &scene->meshes[mi];
+    for (uint32_t pi = 0; pi < gmesh->primitive_count; pi++) {
+      const MopGltfPrimitive *prim = &gmesh->primitives[pi];
+      if (!prim->vertices || prim->vertex_count == 0)
+        continue;
+
+      MopMeshDesc desc = {
+          .vertices = prim->vertices,
+          .vertex_count = prim->vertex_count,
+          .indices = prim->indices,
+          .index_count = prim->index_count,
+          .object_id = next_id++,
+      };
+
+      MopMesh *mesh = mop_viewport_add_mesh(viewport, &desc);
+      if (!mesh)
+        continue;
+
+      /* Apply material */
+      if (prim->material_index >= 0 && materials &&
+          (uint32_t)prim->material_index < scene->material_count) {
+        mop_mesh_set_material(mesh, &materials[prim->material_index]);
+
+        /* Set albedo texture directly on mesh for the rasterizer */
+        if (materials[prim->material_index].albedo_map)
+          mop_mesh_set_texture(mesh,
+                               materials[prim->material_index].albedo_map);
+      }
+
+      /* Record in prim_map */
+      if (prim_map && prim_write < total_prims) {
+        prim_map[prim_write].gltf_mesh_idx = mi;
+        prim_map[prim_write].prim_idx = pi;
+        prim_map[prim_write].mop_mesh = mesh;
+        prim_write++;
+      }
+
+      meshes_created++;
+    }
+  }
+
+  /* Apply node transforms and hierarchy */
+  /* First pass: map glTF node → first MopMesh for that node's mesh */
+  MopMesh **node_meshes = NULL;
+  if (scene->node_count > 0) {
+    node_meshes = calloc(scene->node_count, sizeof(MopMesh *));
+    if (node_meshes) {
+      for (uint32_t ni = 0; ni < scene->node_count; ni++) {
+        const MopGltfNode *node = &scene->nodes[ni];
+        if (node->mesh_index < 0)
+          continue;
+
+        /* Find the first primitive of this mesh in prim_map */
+        for (uint32_t p = 0; p < prim_write; p++) {
+          if (prim_map[p].gltf_mesh_idx == (uint32_t)node->mesh_index) {
+            node_meshes[ni] = prim_map[p].mop_mesh;
+            break;
+          }
+        }
+      }
+
+      /* Apply TRS to each node's mesh */
+      for (uint32_t ni = 0; ni < scene->node_count; ni++) {
+        MopMesh *mesh = node_meshes[ni];
+        if (!mesh)
+          continue;
+
+        const MopGltfNode *node = &scene->nodes[ni];
+
+        if (node->has_matrix) {
+          /* Direct matrix — copy as column-major MopMat4 */
+          MopMat4 m;
+          memcpy(m.d, node->matrix, sizeof(float) * 16);
+          mop_mesh_set_transform(mesh, &m);
+        } else {
+          /* TRS decomposition */
+          MopVec3 pos = {node->translation[0], node->translation[1],
+                         node->translation[2]};
+          MopVec3 rot = quat_to_euler(node->rotation);
+          MopVec3 scl = {node->scale[0], node->scale[1], node->scale[2]};
+          mop_mesh_set_position(mesh, pos);
+          mop_mesh_set_rotation(mesh, rot);
+          mop_mesh_set_scale(mesh, scl);
+        }
+      }
+
+      /* Apply parent-child hierarchy */
+      for (uint32_t ni = 0; ni < scene->node_count; ni++) {
+        const MopGltfNode *node = &scene->nodes[ni];
+        MopMesh *child_mesh = node_meshes[ni];
+        if (!child_mesh || node->parent_index < 0)
+          continue;
+        if ((uint32_t)node->parent_index >= scene->node_count)
+          continue;
+
+        MopMesh *parent_mesh = node_meshes[node->parent_index];
+        if (parent_mesh)
+          mop_mesh_set_parent(child_mesh, parent_mesh, viewport);
+      }
+    }
+  }
+
+  free(node_meshes);
+  free(prim_map);
+  free(materials);
+
+  if (meshes_created > 0)
+    MOP_INFO("gltf_import: created %u meshes from %u glTF nodes",
+             meshes_created, scene->node_count);
+
+  return meshes_created;
 }

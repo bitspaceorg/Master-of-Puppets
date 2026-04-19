@@ -18,7 +18,9 @@
 void mop_mesh_set_edit_mode(MopMesh *mesh, MopEditMode mode) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->edit_mode = mode;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 MopEditMode mop_mesh_get_edit_mode(const MopMesh *mesh) {
@@ -40,12 +42,15 @@ const MopSelection *mop_viewport_get_selection(const MopViewport *vp) {
 void mop_viewport_select_element(MopViewport *vp, uint32_t element_index) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   MopSelection *sel = &vp->selection;
 
   /* Check if already selected */
   for (uint32_t i = 0; i < sel->element_count; i++) {
-    if (sel->elements[i] == element_index)
+    if (sel->elements[i] == element_index) {
+      MOP_VP_UNLOCK(vp);
       return;
+    }
   }
 
   /* Add if not at max */
@@ -53,11 +58,13 @@ void mop_viewport_select_element(MopViewport *vp, uint32_t element_index) {
     sel->elements[sel->element_count] = element_index;
     sel->element_count++;
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_deselect_element(MopViewport *vp, uint32_t element_index) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   MopSelection *sel = &vp->selection;
 
   for (uint32_t i = 0; i < sel->element_count; i++) {
@@ -65,20 +72,24 @@ void mop_viewport_deselect_element(MopViewport *vp, uint32_t element_index) {
       /* Swap with last and shrink */
       sel->elements[i] = sel->elements[sel->element_count - 1];
       sel->element_count--;
-      return;
+      break;
     }
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_clear_selection(MopViewport *vp) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   vp->selection.element_count = 0;
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_toggle_element(MopViewport *vp, uint32_t element_index) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   MopSelection *sel = &vp->selection;
 
   /* Check if present */
@@ -87,6 +98,7 @@ void mop_viewport_toggle_element(MopViewport *vp, uint32_t element_index) {
       /* Remove: swap with last */
       sel->elements[i] = sel->elements[sel->element_count - 1];
       sel->element_count--;
+      MOP_VP_UNLOCK(vp);
       return;
     }
   }
@@ -96,6 +108,7 @@ void mop_viewport_toggle_element(MopViewport *vp, uint32_t element_index) {
     sel->elements[sel->element_count] = element_index;
     sel->element_count++;
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -106,6 +119,7 @@ void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive) {
   if (!vp || id == 0)
     return;
 
+  MOP_VP_LOCK(vp);
   if (!additive) {
     /* Clear existing selection, then add */
     vp->selected_count = 0;
@@ -120,6 +134,7 @@ void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive) {
         vp->selected_count--;
         vp->selected_id = vp->selected_count > 0 ? vp->selected_ids[0] : 0;
       }
+      MOP_VP_UNLOCK(vp);
       return;
     }
   }
@@ -132,19 +147,22 @@ void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive) {
 
   /* Update backward-compat single-select field */
   vp->selected_id = vp->selected_ids[0];
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_deselect_object(MopViewport *vp, uint32_t id) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   for (uint32_t i = 0; i < vp->selected_count; i++) {
     if (vp->selected_ids[i] == id) {
       vp->selected_ids[i] = vp->selected_ids[vp->selected_count - 1];
       vp->selected_count--;
       vp->selected_id = vp->selected_count > 0 ? vp->selected_ids[0] : 0;
-      return;
+      break;
     }
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 bool mop_viewport_is_object_selected(const MopViewport *vp, uint32_t id) {

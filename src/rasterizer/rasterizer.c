@@ -81,8 +81,22 @@ fail_color:
   return false;
 }
 
-void mop_sw_framebuffer_free(MopSwFramebuffer *fb) {
+bool mop_sw_framebuffer_alloc_wrapping(MopSwFramebuffer *fb, int width,
+                                       int height, uint8_t *external_color) {
+  if (!external_color)
+    return false;
+  /* Allocate everything normally, then swap color for the host pointer. */
+  if (!mop_sw_framebuffer_alloc(fb, width, height))
+    return false;
   free(fb->color);
+  fb->color = external_color;
+  fb->color_external = true;
+  return true;
+}
+
+void mop_sw_framebuffer_free(MopSwFramebuffer *fb) {
+  if (!fb->color_external)
+    free(fb->color);
   free(fb->color_hdr);
   free(fb->depth);
   free(fb->object_id);
@@ -92,6 +106,7 @@ void mop_sw_framebuffer_free(MopSwFramebuffer *fb) {
   fb->depth = NULL;
   fb->object_id = NULL;
   fb->fxaa_scratch = NULL;
+  fb->color_external = false;
   fb->width = 0;
   fb->height = 0;
 }

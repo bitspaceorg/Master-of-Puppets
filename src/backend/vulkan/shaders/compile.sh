@@ -95,6 +95,8 @@ compile_shader "$SCRIPT_DIR/mop_solid_bindless.frag" "mop_solid_bindless_frag_sp
 compile_shader "$SCRIPT_DIR/mop_wireframe_bindless.frag" "mop_wireframe_bindless_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_cull.comp" "mop_cull_comp_spv"
 compile_shader "$SCRIPT_DIR/mop_hiz_downsample.comp" "mop_hiz_downsample_comp_spv"
+HAS_SKIN=1
+compile_shader "$SCRIPT_DIR/mop_skin.comp" "mop_skin_comp_spv" || HAS_SKIN=0
 compile_shader "$SCRIPT_DIR/mop_taa.frag" "mop_taa_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_ssr.frag" "mop_ssr_frag_spv"
 compile_shader "$SCRIPT_DIR/mop_oit_accum.frag" "mop_oit_accum_frag_spv"
@@ -130,6 +132,9 @@ echo "#define MOP_VK_HAS_VOLUMETRIC_SHADER 1" >>"$OUT_FILE"
 echo "#define MOP_VK_HAS_HIZ_SHADER 1" >>"$OUT_FILE"
 if [ "$HAS_MESH" = "1" ]; then
     echo "#define MOP_VK_HAS_MESH_SHADERS 1" >>"$OUT_FILE"
+fi
+if [ "$HAS_SKIN" = "1" ]; then
+    echo "#define MOP_VK_HAS_SKIN_SHADER 1" >>"$OUT_FILE"
 fi
 echo "" >>"$OUT_FILE"
 

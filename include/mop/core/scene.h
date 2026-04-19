@@ -40,6 +40,13 @@ typedef struct MopMeshDesc {
   const uint32_t *indices;
   uint32_t index_count;
   uint32_t object_id;
+
+  /* Optional flexible vertex format. When NULL (default), `vertices` is
+   * interpreted as a standard MopVertex array. When non-NULL, `vertices`
+   * is reinterpreted as raw bytes with the given layout — equivalent to
+   * the old `MopMeshDescEx` path. Lets hosts pass custom attribute sets
+   * through the primary API without switching descriptors. */
+  const MopVertexFormat *vertex_format;
 } MopMeshDesc;
 
 /* -------------------------------------------------------------------------

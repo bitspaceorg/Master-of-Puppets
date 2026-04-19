@@ -8,9 +8,10 @@
 #ifndef MOP_VIEWPORT_INTERNAL_H
 #define MOP_VIEWPORT_INTERNAL_H
 
-#include "core/subsystem.h"
 #include "rasterizer/rasterizer.h"
 #include "rhi/rhi.h"
+
+#include <pthread.h>
 
 #include <mop/core/camera_object.h>
 #include <mop/core/display.h>
@@ -18,6 +19,7 @@
 #include <mop/core/light.h>
 #include <mop/core/overlay.h>
 #include <mop/core/pipeline.h>
+#include <mop/core/texture_pipeline.h>
 #include <mop/core/theme.h>
 #include <mop/interact/selection.h>
 #include <mop/mop.h>
@@ -30,6 +32,16 @@
 
 struct MopTexture {
   MopRhiTexture *rhi_texture;
+
+  /* Texture pipeline fields */
+  uint64_t content_hash; /* FNV-1a hash of pixel data (0 = not computed) */
+  MopTexStreamState stream_state; /* streaming state */
+  char path[256];           /* source file path (empty = created from data) */
+  uint32_t last_used_frame; /* frame counter for cache eviction */
+  int width;
+  int height;
+  int mip_levels;
+  bool srgb;
 };
 
 /* -------------------------------------------------------------------------
@@ -123,6 +135,16 @@ struct MopMesh {
   uint32_t lod_level_count; /* number of extra LOD levels (0 = no LOD) */
   uint32_t active_lod;      /* currently selected LOD (0 = highest detail) */
   uint32_t prev_lod;        /* previous frame's LOD (for transition detect) */
+
+  /* Slot index in viewport->meshes[] — used for O(1) free-list removal.
+   * The mesh pool stores pointers, so pointer arithmetic can't recover
+   * the index; the mesh carries it. */
+  uint32_t slot_index;
+
+  /* Back-pointer to the owning viewport. Lets setters that take only a
+   * MopMesh* (e.g. mop_mesh_set_position) auto-acquire the scene lock
+   * without the host plumbing a viewport handle through every call. */
+  struct MopViewport *viewport;
 };
 
 /* -------------------------------------------------------------------------
@@ -152,6 +174,12 @@ struct MopInstancedMesh {
   /* Material (optional) */
   MopMaterial material;
   bool has_material;
+
+  /* Slot index in viewport->instanced_meshes[] — for O(1) removal. */
+  uint32_t slot_index;
+
+  /* Back-pointer to owning viewport (auto-lock in setters). */
+  struct MopViewport *viewport;
 };
 
 /* -------------------------------------------------------------------------
@@ -165,7 +193,6 @@ struct MopInstancedMesh {
 #define MOP_INITIAL_OVERLAY_CAPACITY 16
 #define MOP_INITIAL_HOOK_CAPACITY 64
 #define MOP_INITIAL_UNDO_CAPACITY 256
-#define MOP_INITIAL_SUBSYSTEM_CAPACITY 32
 #define MOP_INITIAL_SELECTED_ELEMENTS_CAPACITY 4096
 
 /* -------------------------------------------------------------------------
@@ -214,49 +241,9 @@ struct MopCameraObject {
 
   /* Camera icon mesh (small box at camera position) */
   MopMesh *icon_mesh;
-};
 
-/* -------------------------------------------------------------------------
- * Water surface representation (Phase 8D/8E)
- *
- * Defined here so that both water.c and viewport.c can access the struct
- * (water.c creates/updates, viewport.c destroys during cleanup).
- * ------------------------------------------------------------------------- */
-
-struct MopWaterSurface {
-  MopSubsystem base; /* must be first — enables (MopSubsystem*)ws cast */
-
-  /* Owning viewport */
-  MopViewport *viewport;
-
-  /* Grid parameters */
-  float extent;
-  int resolution;
-
-  /* Wave parameters */
-  float wave_speed;
-  float wave_amplitude;
-  float wave_frequency;
-
-  /* Appearance */
-  MopColor color;
-  float opacity;
-
-  /* Current simulation time */
-  float time;
-
-  /* Dynamic vertex/index data */
-  MopVertex *vertices;
-  uint32_t *indices;
-  uint32_t vertex_count;
-  uint32_t index_count;
-
-  /* RHI buffers */
-  MopRhiBuffer *vertex_buffer;
-  MopRhiBuffer *index_buffer;
-
-  /* Mesh registered in the viewport for rendering */
-  MopMesh *mesh;
+  /* Viewport back-pointer for auto-lock on setters. */
+  struct MopViewport *viewport;
 };
 
 /* -------------------------------------------------------------------------
@@ -386,15 +373,27 @@ struct MopViewport {
   MopMat4 view_matrix;
   MopMat4 projection_matrix;
 
-  /* Scene — dynamic mesh array (Phase 5B) */
-  struct MopMesh *meshes;
+  /* Scene — pointer-stable mesh pool.
+   * `meshes` is an array of MopMesh* so that growing the pool (via realloc
+   * of the pointer array) does not invalidate any MopMesh* that a host may
+   * be holding. Individual MopMesh structs are heap-allocated once per
+   * add_mesh and recycled via the free-list (never actually freed until
+   * viewport destroy). `mesh_count` is the high-water mark of slots used
+   * and bounds iteration; inactive slots in [0, mesh_count) are skipped. */
+  struct MopMesh **meshes;
   uint32_t mesh_capacity;
   uint32_t mesh_count;
+  uint32_t *mesh_free_list; /* stack of free slot indices for O(1) add */
+  uint32_t mesh_free_count;
+  uint32_t mesh_free_capacity;
 
-  /* Instanced meshes (Phase 6B) */
-  struct MopInstancedMesh *instanced_meshes;
+  /* Instanced meshes — same pointer-stable scheme as meshes. */
+  struct MopInstancedMesh **instanced_meshes;
   uint32_t instanced_capacity;
   uint32_t instanced_count;
+  uint32_t *instanced_free_list;
+  uint32_t instanced_free_count;
+  uint32_t instanced_free_capacity;
 
   /* Owned subsystems */
   MopGizmo *gizmo;
@@ -446,16 +445,6 @@ struct MopViewport {
   int undo_head;
   int undo_count;
   int redo_count;
-
-  /* Particle emitters (Phase 8B/8E) */
-  MopParticleEmitter **emitters;
-  uint32_t emitter_count;
-  uint32_t emitter_capacity;
-
-  /* Water surfaces (Phase 8D/8E) */
-  MopWaterSurface **water_surfaces;
-  uint32_t water_count;
-  uint32_t water_capacity;
 
   /* Time tracking for simulation */
   float last_frame_time;
@@ -545,10 +534,6 @@ struct MopViewport {
   MopOverlayPrim *overlay_prims;
   uint32_t overlay_prim_count;
 
-  /* Subsystem registry — generic dispatch for water, particles, postprocess,
-   * etc. */
-  MopSubsystemRegistry subsystems;
-
   /* Pre-allocated transparent sort arrays (reused across frames) */
   uint32_t *trans_sort_idx;
   float *trans_sort_dist;
@@ -580,16 +565,56 @@ struct MopViewport {
    * Created in viewport_create, destroyed in viewport_destroy.
    * NULL if thread creation fails (falls back to single-threaded). */
   struct MopThreadPool *thread_pool;
+
+  /* Scene mutex — serializes render vs. host mutation.
+   *
+   * RECURSIVE: every public mutation / reader function in the MOP API
+   * acquires this internally, and the render path holds it for the
+   * whole frame. Recursive semantics let internal paths call each other
+   * without deadlock, and let hosts safely call MOP APIs from inside
+   * their own scene_lock blocks.
+   *
+   * Single-threaded hosts pay only the uncontended fast path (~20 ns). */
+  pthread_mutex_t scene_mutex;
+
+  /* Texture cache — path-keyed dedup cache for mop_tex_load_async */
+  struct MopTexCacheEntry {
+    char path[256];
+    MopTexture *texture;
+  } *tex_cache;
+  uint32_t tex_cache_count;
+  uint32_t tex_cache_capacity;
+  uint32_t tex_cache_hits; /* cumulative hit count for stats */
+  uint32_t frame_counter;  /* monotonic frame counter for cache eviction */
 };
+
+/* -------------------------------------------------------------------------
+ * Internal scene lock helpers
+ *
+ * Every public mutation / reader in the MOP API wraps its body with
+ * MOP_VP_LOCK(vp) / MOP_VP_UNLOCK(vp). The mutex is recursive so nested
+ * internal calls are safe. NULL viewport is tolerated (no-op) so callers
+ * that perform their own argument validation don't need a pre-check.
+ * ------------------------------------------------------------------------- */
+
+static inline void mop_vp_lock(MopViewport *vp) {
+  if (vp)
+    pthread_mutex_lock(&vp->scene_mutex);
+}
+
+static inline void mop_vp_unlock(MopViewport *vp) {
+  if (vp)
+    pthread_mutex_unlock(&vp->scene_mutex);
+}
+
+#define MOP_VP_LOCK(vp) mop_vp_lock(vp)
+#define MOP_VP_UNLOCK(vp) mop_vp_unlock(vp)
 
 /* -------------------------------------------------------------------------
  * Internal subsystem functions
  * ------------------------------------------------------------------------- */
 
-/* Register the postprocess subsystem (called from viewport_create) */
-void mop_postprocess_register(MopViewport *vp);
-
-/* Apply post-processing effects to the framebuffer (also called via vtable) */
+/* Apply post-processing effects to the framebuffer */
 void mop_postprocess_apply(MopSwFramebuffer *fb, uint32_t effects,
                            const MopFogParams *fog);
 
@@ -612,6 +637,9 @@ void mop_gizmo_set_handles_opacity(MopGizmo *gizmo, float opacity);
 /* -------------------------------------------------------------------------
  * Overlay command buffer push helpers
  * ------------------------------------------------------------------------- */
+
+/* Texture cache cleanup — called from mop_viewport_destroy */
+void mop_tex_cache_destroy_all(MopViewport *vp);
 
 /* Shader plugin internals */
 void mop_shader_plugins_destroy_all(MopViewport *vp);

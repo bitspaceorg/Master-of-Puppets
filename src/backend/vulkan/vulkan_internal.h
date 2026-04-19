@@ -361,8 +361,15 @@ struct MopRhiDevice {
 
   /* When true, use vkCmdDrawIndexedIndirectCount for bindless draws
    * instead of per-draw vkCmdDrawIndexed.  Requires gpu_culling_enabled
-   * and at least one prior frame of cull data. */
+   * and at least one prior frame of cull data.
+   *
+   * `indirect_draw_requested` is host-facing (toggle via RHI set_gpu_
+   * driven_rendering). `indirect_draw_enabled` is the effective state
+   * after warm-up. Today both are no-ops on the main render path —
+   * the real switchover requires pipeline bucketing + uber-shader
+   * (see docs/TODO.md). */
   bool indirect_draw_enabled;
+  bool indirect_draw_requested;
   uint32_t indirect_draw_frame_count; /* frames since cull data available */
 
   /* Hi-Z occlusion culling (Phase 2C) */
@@ -420,6 +427,7 @@ struct MopRhiDevice {
 
   /* HDR tonemapping */
   VkRenderPass tonemap_render_pass;
+  VkRenderPass tonemap_render_pass_taa; /* finalLayout = SHADER_READ_ONLY */
   VkPipeline tonemap_pipeline;
   VkPipelineLayout tonemap_pipeline_layout;
   VkDescriptorSetLayout tonemap_desc_layout;
@@ -433,6 +441,15 @@ struct MopRhiDevice {
   VkDescriptorSetLayout skybox_desc_layout;
   VkShaderModule skybox_frag;
   bool skybox_enabled;
+
+  /* GPU linear-blend skinning (compute). Scaffolding — pipeline created
+   * when mop_skin.comp is compiled into vulkan_shaders.h by compile.sh.
+   * Real wiring into mop_skin_apply() is pending; see docs/TODO.md. */
+  VkPipeline skin_pipeline;
+  VkPipelineLayout skin_pipeline_layout;
+  VkDescriptorSetLayout skin_desc_layout;
+  VkShaderModule skin_comp;
+  bool skin_enabled;
 
   /* IBL descriptor bindings (binding 3 = irradiance, 4 = prefiltered,
    * 5 = BRDF LUT) — textures stored on viewport, views cached here */
@@ -987,6 +1004,10 @@ VkPipeline mop_vk_create_postprocess_pipeline(struct MopRhiDevice *dev);
 
 /* Create the HDR tonemap render pass (single R8G8B8A8_SRGB attachment). */
 VkResult mop_vk_create_tonemap_render_pass(VkDevice device, VkRenderPass *out);
+
+/* Variant with finalLayout = SHADER_READ_ONLY_OPTIMAL for TAA consumption. */
+VkResult mop_vk_create_tonemap_render_pass_taa(VkDevice device,
+                                               VkRenderPass *out);
 
 /* Create the HDR tonemap pipeline (fullscreen triangle + ACES). */
 VkPipeline mop_vk_create_tonemap_pipeline(struct MopRhiDevice *dev);

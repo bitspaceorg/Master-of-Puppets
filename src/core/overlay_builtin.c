@@ -107,7 +107,7 @@ void mop_overlay_builtin_wireframe(MopViewport *vp, void *user_data) {
   float wf_opacity = vp->display.wireframe_opacity;
 
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *m = &vp->meshes[i];
+    struct MopMesh *m = vp->meshes[i];
     if (!m->active)
       continue;
     if (m->object_id == 0)
@@ -166,7 +166,7 @@ void mop_overlay_builtin_normals(MopViewport *vp, void *user_data) {
   float length = vp->display.normal_display_length;
 
   for (uint32_t mi = 0; mi < vp->mesh_count; mi++) {
-    struct MopMesh *m = &vp->meshes[mi];
+    struct MopMesh *m = vp->meshes[mi];
     if (!m->active)
       continue;
     if (m->object_id == 0)
@@ -273,7 +273,7 @@ void mop_overlay_builtin_bounds(MopViewport *vp, void *user_data) {
     return;
 
   for (uint32_t mi = 0; mi < vp->mesh_count; mi++) {
-    struct MopMesh *m = &vp->meshes[mi];
+    struct MopMesh *m = vp->meshes[mi];
     if (!m->active)
       continue;
     if (m->object_id == 0)
@@ -394,7 +394,7 @@ void mop_overlay_builtin_skeleton(MopViewport *vp, void *user_data) {
     return;
 
   for (uint32_t mi = 0; mi < vp->mesh_count; mi++) {
-    struct MopMesh *m = &vp->meshes[mi];
+    struct MopMesh *m = vp->meshes[mi];
     if (!m->active || m->bone_count == 0 || !m->bone_matrices ||
         !m->bone_parents)
       continue;
@@ -558,7 +558,7 @@ void mop_overlay_builtin_selection(MopViewport *vp, void *user_data) {
     return;
 
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *m = &vp->meshes[i];
+    struct MopMesh *m = vp->meshes[i];
     if (!m->active)
       continue;
     if (!is_id_selected(vp, m->object_id))
@@ -620,7 +620,7 @@ static struct MopMesh *find_edit_mesh(MopViewport *vp) {
   if (oid == 0)
     return NULL;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *m = &vp->meshes[i];
+    struct MopMesh *m = vp->meshes[i];
     if (m->active && m->object_id == oid)
       return m;
   }

@@ -139,6 +139,37 @@ cpu_framebuffer_create(MopRhiDevice *device,
   return fb;
 }
 
+/* Wrap a host-owned RGBA8 texture as the color attachment. Zero-copy:
+ * the rasterizer writes directly into the host's pixel buffer. */
+static MopRhiFramebuffer *
+cpu_framebuffer_create_from_texture(MopRhiDevice *device, MopRhiTexture *color,
+                                    int width, int height) {
+  (void)device;
+  if (!color || !color->data || width <= 0 || height <= 0)
+    return NULL;
+  if (color->width != width || color->height != height) {
+    MOP_WARN("cpu_framebuffer_create_from_texture: size mismatch "
+             "(tex %dx%d, fb %dx%d)",
+             color->width, color->height, width, height);
+    return NULL;
+  }
+  if (color->is_hdr) {
+    MOP_WARN("cpu_framebuffer_create_from_texture: HDR target not supported");
+    return NULL;
+  }
+
+  MopRhiFramebuffer *fb = calloc(1, sizeof(MopRhiFramebuffer));
+  if (!fb)
+    return NULL;
+
+  if (!mop_sw_framebuffer_alloc_wrapping(&fb->fb, width, height, color->data)) {
+    free(fb);
+    return NULL;
+  }
+  fb->readback = fb->fb.color;
+  return fb;
+}
+
 static void cpu_framebuffer_destroy(MopRhiDevice *device,
                                     MopRhiFramebuffer *fb) {
   (void)device;
@@ -704,6 +735,73 @@ static const float *cpu_framebuffer_read_depth(MopRhiDevice *device,
 }
 
 /* -------------------------------------------------------------------------
+ * Render-to-texture — blit framebuffer color into a host-owned texture
+ * ------------------------------------------------------------------------- */
+
+static bool cpu_framebuffer_copy_to_texture(MopRhiDevice *device,
+                                            MopRhiFramebuffer *fb,
+                                            MopRhiTexture *target) {
+  (void)device;
+  if (!fb || !target || !fb->fb.color || !target->data)
+    return false;
+  int fbw = fb->fb.width, fbh = fb->fb.height;
+  int tw = target->width, th = target->height;
+
+  /* Same size: direct memcpy. */
+  if (tw == fbw && th == fbh) {
+    memcpy(target->data, fb->fb.color, (size_t)fbw * (size_t)fbh * 4);
+    return true;
+  }
+  /* Integer-factor downsample (SSAA → presentation): average sf×sf blocks.
+   * This is the same box filter used by mop_viewport_read_color. */
+  if (tw > 0 && th > 0 && fbw > 0 && fbh > 0 && fbw % tw == 0 &&
+      fbh % th == 0 && (fbw / tw) == (fbh / th)) {
+    int sf = fbw / tw;
+    const uint8_t *src = fb->fb.color;
+    uint8_t *dst = target->data;
+    for (int y = 0; y < th; y++) {
+      for (int x = 0; x < tw; x++) {
+        uint32_t r = 0, g = 0, b = 0, a = 0;
+        for (int dy = 0; dy < sf; dy++) {
+          int sy = y * sf + dy;
+          for (int dx = 0; dx < sf; dx++) {
+            int sx = x * sf + dx;
+            size_t off = ((size_t)sy * (size_t)fbw + (size_t)sx) * 4;
+            r += src[off + 0];
+            g += src[off + 1];
+            b += src[off + 2];
+            a += src[off + 3];
+          }
+        }
+        int n = sf * sf;
+        size_t doff = ((size_t)y * (size_t)tw + (size_t)x) * 4;
+        dst[doff + 0] = (uint8_t)(r / n);
+        dst[doff + 1] = (uint8_t)(g / n);
+        dst[doff + 2] = (uint8_t)(b / n);
+        dst[doff + 3] = (uint8_t)(a / n);
+      }
+    }
+    return true;
+  }
+  MOP_WARN("cpu_framebuffer_copy_to_texture: unsupported size combo "
+           "(fb %dx%d, tex %dx%d)",
+           fbw, fbh, tw, th);
+  return false;
+}
+
+static bool cpu_texture_read_rgba8(MopRhiDevice *device, MopRhiTexture *texture,
+                                   uint8_t *out_buf, size_t buf_size) {
+  (void)device;
+  if (!texture || !texture->data || !out_buf)
+    return false;
+  size_t needed = (size_t)texture->width * (size_t)texture->height * 4;
+  if (buf_size < needed)
+    return false;
+  memcpy(out_buf, texture->data, needed);
+  return true;
+}
+
+/* -------------------------------------------------------------------------
  * Texture management
  * ------------------------------------------------------------------------- */
 
@@ -746,6 +844,221 @@ static MopRhiTexture *cpu_texture_create_hdr(MopRhiDevice *device, int width,
   tex->width = width;
   tex->height = height;
   tex->is_hdr = true;
+  return tex;
+}
+
+/* -------------------------------------------------------------------------
+ * Software BC texture decompression (CPU fallback for compressed formats)
+ * ------------------------------------------------------------------------- */
+
+/* Decode RGB565 to R8G8B8 */
+static void bc_decode_rgb565(uint16_t c, uint8_t out[3]) {
+  out[0] = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
+  out[1] = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
+  out[2] = (uint8_t)((c & 0x1F) * 255 / 31);
+}
+
+/* Decode a BC1 (DXT1) 4x4 block (8 bytes) into 16 RGBA pixels */
+static void bc1_decode_block(const uint8_t *src, uint8_t *dst, int dst_stride) {
+  uint16_t c0 = (uint16_t)(src[0] | (src[1] << 8));
+  uint16_t c1 = (uint16_t)(src[2] | (src[3] << 8));
+  uint32_t lut =
+      (uint32_t)(src[4] | (src[5] << 8) | (src[6] << 16) | (src[7] << 24));
+
+  uint8_t color[4][4]; /* [index][RGBA] */
+  bc_decode_rgb565(c0, color[0]);
+  color[0][3] = 255;
+  bc_decode_rgb565(c1, color[1]);
+  color[1][3] = 255;
+
+  if (c0 > c1) {
+    for (int i = 0; i < 3; i++) {
+      color[2][i] = (uint8_t)((2 * color[0][i] + color[1][i] + 1) / 3);
+      color[3][i] = (uint8_t)((color[0][i] + 2 * color[1][i] + 1) / 3);
+    }
+    color[2][3] = 255;
+    color[3][3] = 255;
+  } else {
+    for (int i = 0; i < 3; i++)
+      color[2][i] = (uint8_t)((color[0][i] + color[1][i]) / 2);
+    color[2][3] = 255;
+    color[3][0] = 0;
+    color[3][1] = 0;
+    color[3][2] = 0;
+    color[3][3] = 0; /* transparent black */
+  }
+
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      int idx = (y * 4 + x) * 2;
+      int ci = (lut >> idx) & 3;
+      uint8_t *p = dst + y * dst_stride + x * 4;
+      p[0] = color[ci][0];
+      p[1] = color[ci][1];
+      p[2] = color[ci][2];
+      p[3] = color[ci][3];
+    }
+  }
+}
+
+/* Decode a BC4 channel block (8 bytes) into 16 uint8 values */
+static void bc4_decode_block(const uint8_t *src, uint8_t *dst, int dst_stride,
+                             int channel_offset) {
+  uint8_t a0 = src[0];
+  uint8_t a1 = src[1];
+
+  /* 48-bit index table (6 bytes, 3 bits per texel) */
+  uint64_t bits = 0;
+  for (int i = 0; i < 6; i++)
+    bits |= (uint64_t)src[2 + i] << (i * 8);
+
+  uint8_t palette[8];
+  palette[0] = a0;
+  palette[1] = a1;
+  if (a0 > a1) {
+    for (int i = 1; i <= 6; i++)
+      palette[1 + i] = (uint8_t)(((7 - i) * a0 + i * a1 + 3) / 7);
+  } else {
+    for (int i = 1; i <= 4; i++)
+      palette[1 + i] = (uint8_t)(((5 - i) * a0 + i * a1 + 2) / 5);
+    palette[6] = 0;
+    palette[7] = 255;
+  }
+
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      int texel = y * 4 + x;
+      int ai = (int)((bits >> (texel * 3)) & 7);
+      dst[y * dst_stride + x * 4 + channel_offset] = palette[ai];
+    }
+  }
+}
+
+/* Decode a BC3 (DXT5) 4x4 block (16 bytes) into 16 RGBA pixels */
+static void bc3_decode_block(const uint8_t *src, uint8_t *dst, int dst_stride) {
+  /* First 8 bytes: alpha (BC4 format) */
+  /* Last 8 bytes: color (BC1/DXT1 format) */
+  bc1_decode_block(src + 8, dst, dst_stride);
+  bc4_decode_block(src, dst, dst_stride, 3); /* alpha channel */
+}
+
+/* Decode a BC5 4x4 block (16 bytes) into 16 RGBA pixels (R,G channels) */
+static void bc5_decode_block(const uint8_t *src, uint8_t *dst, int dst_stride) {
+  /* Initialize output to (0, 0, 0, 255) */
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      uint8_t *p = dst + y * dst_stride + x * 4;
+      p[0] = 0;
+      p[1] = 0;
+      p[2] = 0;
+      p[3] = 255;
+    }
+  }
+  bc4_decode_block(src, dst, dst_stride, 0);     /* red channel */
+  bc4_decode_block(src + 8, dst, dst_stride, 1); /* green channel */
+}
+
+/* Decompress a full BC-compressed image to RGBA8 */
+static uint8_t *bc_decompress_to_rgba8(const uint8_t *data, int width,
+                                       int height, int format) {
+  int bw = (width + 3) / 4;
+  int bh = (height + 3) / 4;
+  size_t block_size = (format == 1) ? 8 : 16; /* BC1=8, BC3/BC5/BC7=16 */
+  size_t out_size = (size_t)width * (size_t)height * 4;
+  uint8_t *out = calloc(1, out_size);
+  if (!out)
+    return NULL;
+
+  for (int by = 0; by < bh; by++) {
+    for (int bx = 0; bx < bw; bx++) {
+      size_t block_idx = (size_t)by * (size_t)bw + (size_t)bx;
+      const uint8_t *block = data + block_idx * block_size;
+
+      /* Decode into a temporary 4x4 RGBA buffer */
+      uint8_t tmp[4 * 4 * 4]; /* 16 pixels * 4 channels */
+      int tmp_stride = 4 * 4;
+
+      switch (format) {
+      case 1: /* BC1 */
+        bc1_decode_block(block, tmp, tmp_stride);
+        break;
+      case 2: /* BC3 */
+        bc3_decode_block(block, tmp, tmp_stride);
+        break;
+      case 3: /* BC5 */
+        bc5_decode_block(block, tmp, tmp_stride);
+        break;
+      default:
+        /* BC7 — too complex for software decode, fill magenta */
+        for (int i = 0; i < 16; i++) {
+          tmp[i * 4 + 0] = 255;
+          tmp[i * 4 + 1] = 0;
+          tmp[i * 4 + 2] = 255;
+          tmp[i * 4 + 3] = 255;
+        }
+        break;
+      }
+
+      /* Copy decoded 4x4 block to output image (clamped to image bounds) */
+      int px = bx * 4;
+      int py = by * 4;
+      for (int ty = 0; ty < 4 && (py + ty) < height; ty++) {
+        for (int tx = 0; tx < 4 && (px + tx) < width; tx++) {
+          uint8_t *src_px = tmp + ty * tmp_stride + tx * 4;
+          uint8_t *dst_px = out + ((py + ty) * width + (px + tx)) * 4;
+          dst_px[0] = src_px[0];
+          dst_px[1] = src_px[1];
+          dst_px[2] = src_px[2];
+          dst_px[3] = src_px[3];
+        }
+      }
+    }
+  }
+
+  return out;
+}
+
+static MopRhiTexture *cpu_texture_create_ex(MopRhiDevice *device, int width,
+                                            int height, int format,
+                                            int mip_levels, const uint8_t *data,
+                                            size_t data_size) {
+  (void)mip_levels;
+  (void)data_size;
+
+  /* RGBA8: delegate to the standard path */
+  if (format == 0)
+    return cpu_texture_create(device, width, height, data);
+
+  if (!data || width <= 0 || height <= 0) {
+    MOP_WARN("cpu_texture_create_ex: invalid parameters");
+    return NULL;
+  }
+
+  /* BC7 is too complex for software decode */
+  if (format == 4) {
+    MOP_WARN("cpu_texture_create_ex: BC7 software decode not supported, "
+             "returning NULL");
+    return NULL;
+  }
+
+  /* Validate format range */
+  if (format < 1 || format > 4) {
+    MOP_WARN("cpu_texture_create_ex: unknown format %d", format);
+    return NULL;
+  }
+
+  /* Decompress to RGBA8 */
+  uint8_t *rgba = bc_decompress_to_rgba8(data, width, height, format);
+  if (!rgba) {
+    MOP_WARN("cpu_texture_create_ex: BC%d decompression failed (OOM)",
+             format == 1   ? 1
+             : format == 2 ? 3
+                           : 5);
+    return NULL;
+  }
+
+  MopRhiTexture *tex = cpu_texture_create(device, width, height, rgba);
+  free(rgba);
   return tex;
 }
 
@@ -987,6 +1300,7 @@ static const MopRhiBackend CPU_BACKEND = {
     .buffer_create = cpu_buffer_create,
     .buffer_destroy = cpu_buffer_destroy,
     .framebuffer_create = cpu_framebuffer_create,
+    .framebuffer_create_from_texture = cpu_framebuffer_create_from_texture,
     .framebuffer_destroy = cpu_framebuffer_destroy,
     .framebuffer_resize = cpu_framebuffer_resize,
     .frame_begin = cpu_frame_begin,
@@ -1000,6 +1314,7 @@ static const MopRhiBackend CPU_BACKEND = {
     .framebuffer_read_depth = cpu_framebuffer_read_depth,
     .texture_create = cpu_texture_create,
     .texture_create_hdr = cpu_texture_create_hdr,
+    .texture_create_ex = cpu_texture_create_ex,
     .texture_destroy = cpu_texture_destroy,
     .draw_instanced = cpu_draw_instanced,
     .buffer_update = cpu_buffer_update,
@@ -1019,6 +1334,10 @@ static const MopRhiBackend CPU_BACKEND = {
     .draw_overlays = cpu_draw_overlays,
     .shader_create = NULL,  /* shaders are GPU-only */
     .shader_destroy = NULL, /* shaders are GPU-only */
+    .framebuffer_copy_to_texture = cpu_framebuffer_copy_to_texture,
+    .texture_read_rgba8 = cpu_texture_read_rgba8,
+    .set_gpu_driven_rendering =
+        NULL, /* CPU backend doesn't use indirect draw */
 };
 
 const MopRhiBackend *mop_rhi_backend_cpu(void) { return &CPU_BACKEND; }

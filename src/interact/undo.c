@@ -21,11 +21,14 @@
  * ------------------------------------------------------------------------- */
 
 static bool find_mesh_index(MopViewport *vp, MopMesh *mesh, uint32_t *out) {
-  for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (&vp->meshes[i] == mesh) {
-      *out = i;
-      return true;
-    }
+  if (!vp || !mesh)
+    return false;
+  /* Mesh carries its own slot index — O(1) lookup. Validate it's still
+   * live at that slot in case of a stale handle. */
+  uint32_t idx = mesh->slot_index;
+  if (idx < vp->mesh_count && vp->meshes[idx] == mesh) {
+    *out = idx;
+    return true;
   }
   return false;
 }
@@ -79,9 +82,12 @@ void mop_viewport_push_undo(MopViewport *vp, MopMesh *mesh) {
   if (!vp || !mesh)
     return;
 
+  MOP_VP_LOCK(vp);
   uint32_t idx;
-  if (!find_mesh_index(vp, mesh, &idx))
+  if (!find_mesh_index(vp, mesh, &idx)) {
+    MOP_VP_UNLOCK(vp);
     return;
+  }
 
   int slot = alloc_slot(vp);
   vp->undo_entries[slot] = (MopUndoEntry){
@@ -91,6 +97,7 @@ void mop_viewport_push_undo(MopViewport *vp, MopMesh *mesh) {
               .rot = mesh->rotation,
               .scale = mesh->scale_val},
   };
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -101,15 +108,19 @@ void mop_viewport_push_undo_material(MopViewport *vp, MopMesh *mesh) {
   if (!vp || !mesh)
     return;
 
+  MOP_VP_LOCK(vp);
   uint32_t idx;
-  if (!find_mesh_index(vp, mesh, &idx))
+  if (!find_mesh_index(vp, mesh, &idx)) {
+    MOP_VP_UNLOCK(vp);
     return;
+  }
 
   int slot = alloc_slot(vp);
   vp->undo_entries[slot] = (MopUndoEntry){
       .type = MOP_UNDO_MATERIAL,
       .mat = {.mesh_index = idx, .material = mesh->material},
   };
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -125,6 +136,7 @@ void mop_viewport_push_undo_batch(MopViewport *vp, MopMesh **meshes,
   if (!sub)
     return;
 
+  MOP_VP_LOCK(vp);
   uint32_t valid = 0;
   for (uint32_t i = 0; i < count; i++) {
     uint32_t idx;
@@ -141,6 +153,7 @@ void mop_viewport_push_undo_batch(MopViewport *vp, MopMesh **meshes,
 
   if (valid == 0) {
     free(sub);
+    MOP_VP_UNLOCK(vp);
     return;
   }
 
@@ -149,6 +162,7 @@ void mop_viewport_push_undo_batch(MopViewport *vp, MopMesh **meshes,
       .type = MOP_UNDO_BATCH,
       .batch = {.count = valid, .entries = sub},
   };
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -158,7 +172,7 @@ void mop_viewport_push_undo_batch(MopViewport *vp, MopMesh **meshes,
 static void swap_trs(MopViewport *vp, MopUndoEntry *entry) {
   if (entry->trs.mesh_index >= vp->mesh_count)
     return;
-  MopMesh *mesh = &vp->meshes[entry->trs.mesh_index];
+  MopMesh *mesh = vp->meshes[entry->trs.mesh_index];
   if (!mesh->active)
     return;
 
@@ -183,7 +197,7 @@ static void swap_trs(MopViewport *vp, MopUndoEntry *entry) {
 static void swap_material(MopViewport *vp, MopUndoEntry *entry) {
   if (entry->mat.mesh_index >= vp->mesh_count)
     return;
-  MopMesh *mesh = &vp->meshes[entry->mat.mesh_index];
+  MopMesh *mesh = vp->meshes[entry->mat.mesh_index];
   if (!mesh->active)
     return;
 
@@ -216,8 +230,13 @@ static void apply_entry(MopViewport *vp, MopUndoEntry *entry) {
  * ------------------------------------------------------------------------- */
 
 void mop_viewport_undo(MopViewport *vp) {
-  if (!vp || vp->undo_count == 0)
+  if (!vp)
     return;
+  MOP_VP_LOCK(vp);
+  if (vp->undo_count == 0) {
+    MOP_VP_UNLOCK(vp);
+    return;
+  }
 
   int cap = (int)vp->undo_capacity;
   vp->undo_count--;
@@ -226,6 +245,7 @@ void mop_viewport_undo(MopViewport *vp) {
   apply_entry(vp, &vp->undo_entries[slot]);
 
   vp->redo_count++;
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -233,8 +253,13 @@ void mop_viewport_undo(MopViewport *vp) {
  * ------------------------------------------------------------------------- */
 
 void mop_viewport_redo(MopViewport *vp) {
-  if (!vp || vp->redo_count == 0)
+  if (!vp)
     return;
+  MOP_VP_LOCK(vp);
+  if (vp->redo_count == 0) {
+    MOP_VP_UNLOCK(vp);
+    return;
+  }
 
   int cap = (int)vp->undo_capacity;
   int slot = (vp->undo_head + vp->undo_count) % cap;
@@ -243,4 +268,5 @@ void mop_viewport_redo(MopViewport *vp) {
 
   vp->undo_count++;
   vp->redo_count--;
+  MOP_VP_UNLOCK(vp);
 }

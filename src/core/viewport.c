@@ -12,6 +12,7 @@
 
 #include <math.h>
 #include <mop/util/log.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -120,6 +121,116 @@ static MopMat4 compute_projection(MopCameraMode mode, float fov_radians,
 #define MOP_INITIAL_MESH_CAPACITY 64
 #define MOP_GRID_ID                                                            \
   0xFFFD0001u /* chrome range — outline overlay ignores this */
+
+/* -------------------------------------------------------------------------
+ * Mesh pool helpers
+ *
+ * Scene pools (meshes, instanced meshes) use a pointer-stable scheme:
+ *   viewport->meshes is an array of MopMesh*.  Growing it via realloc
+ *   does not invalidate individual MopMesh pointers because those
+ *   structs live in their own heap allocation.
+ *
+ * Removal is O(1) via a free-list stack of released slot indices.
+ * ------------------------------------------------------------------------- */
+
+/* Reserve a slot in the mesh pool, returning its index. Allocates a new
+ * MopMesh struct and installs it in the slot.  Returns UINT32_MAX on OOM. */
+static uint32_t mop_mesh_pool_acquire(MopViewport *vp) {
+  /* Prefer a recycled slot (O(1)). */
+  if (vp->mesh_free_count > 0) {
+    uint32_t slot = vp->mesh_free_list[--vp->mesh_free_count];
+    /* The MopMesh in this slot was previously zeroed by remove_mesh. */
+    vp->meshes[slot]->slot_index = slot;
+    vp->meshes[slot]->viewport = vp;
+    return slot;
+  }
+  /* Grow the pointer array if needed. */
+  if (vp->mesh_count >= vp->mesh_capacity) {
+    if (vp->mesh_capacity > UINT32_MAX / 2)
+      return UINT32_MAX;
+    uint32_t new_cap = vp->mesh_capacity * 2;
+    struct MopMesh **new_arr =
+        realloc(vp->meshes, (size_t)new_cap * sizeof(struct MopMesh *));
+    if (!new_arr)
+      return UINT32_MAX;
+    memset(new_arr + vp->mesh_capacity, 0,
+           (size_t)(new_cap - vp->mesh_capacity) * sizeof(struct MopMesh *));
+    vp->meshes = new_arr;
+    vp->mesh_capacity = new_cap;
+  }
+  /* Allocate a new MopMesh for the slot. */
+  struct MopMesh *mesh = calloc(1, sizeof(struct MopMesh));
+  if (!mesh)
+    return UINT32_MAX;
+  uint32_t slot = vp->mesh_count++;
+  mesh->slot_index = slot;
+  mesh->viewport = vp;
+  vp->meshes[slot] = mesh;
+  return slot;
+}
+
+/* Push a slot index onto the free-list stack. Grows the free-list storage
+ * on demand. Silent on OOM (the slot just won't be recycled — leak is
+ * one slot pointer, not the MopMesh struct). */
+static void mop_mesh_pool_release(MopViewport *vp, uint32_t slot) {
+  if (vp->mesh_free_count >= vp->mesh_free_capacity) {
+    uint32_t new_cap = vp->mesh_free_capacity ? vp->mesh_free_capacity * 2 : 16;
+    uint32_t *new_arr =
+        realloc(vp->mesh_free_list, (size_t)new_cap * sizeof(uint32_t));
+    if (!new_arr)
+      return;
+    vp->mesh_free_list = new_arr;
+    vp->mesh_free_capacity = new_cap;
+  }
+  vp->mesh_free_list[vp->mesh_free_count++] = slot;
+}
+
+/* Same pair for instanced meshes. */
+static uint32_t mop_instanced_pool_acquire(MopViewport *vp) {
+  if (vp->instanced_free_count > 0) {
+    uint32_t slot = vp->instanced_free_list[--vp->instanced_free_count];
+    vp->instanced_meshes[slot]->slot_index = slot;
+    vp->instanced_meshes[slot]->viewport = vp;
+    return slot;
+  }
+  if (vp->instanced_count >= vp->instanced_capacity) {
+    if (vp->instanced_capacity > UINT32_MAX / 2)
+      return UINT32_MAX;
+    uint32_t new_cap = vp->instanced_capacity * 2;
+    struct MopInstancedMesh **new_arr =
+        realloc(vp->instanced_meshes,
+                (size_t)new_cap * sizeof(struct MopInstancedMesh *));
+    if (!new_arr)
+      return UINT32_MAX;
+    memset(new_arr + vp->instanced_capacity, 0,
+           (size_t)(new_cap - vp->instanced_capacity) *
+               sizeof(struct MopInstancedMesh *));
+    vp->instanced_meshes = new_arr;
+    vp->instanced_capacity = new_cap;
+  }
+  struct MopInstancedMesh *im = calloc(1, sizeof(struct MopInstancedMesh));
+  if (!im)
+    return UINT32_MAX;
+  uint32_t slot = vp->instanced_count++;
+  im->slot_index = slot;
+  im->viewport = vp;
+  vp->instanced_meshes[slot] = im;
+  return slot;
+}
+
+static void mop_instanced_pool_release(MopViewport *vp, uint32_t slot) {
+  if (vp->instanced_free_count >= vp->instanced_free_capacity) {
+    uint32_t new_cap =
+        vp->instanced_free_capacity ? vp->instanced_free_capacity * 2 : 16;
+    uint32_t *new_arr =
+        realloc(vp->instanced_free_list, (size_t)new_cap * sizeof(uint32_t));
+    if (!new_arr)
+      return;
+    vp->instanced_free_list = new_arr;
+    vp->instanced_free_capacity = new_cap;
+  }
+  vp->instanced_free_list[vp->instanced_free_count++] = slot;
+}
 
 /* -------------------------------------------------------------------------
  * Ground grid generation
@@ -436,10 +547,30 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
     return NULL;
   }
 
-  const int ssaa = 2; /* 2x supersampling for smooth edges */
-  MopRhiFramebufferDesc fb_desc = {.width = desc->width * ssaa,
-                                   .height = desc->height * ssaa};
-  MopRhiFramebuffer *fb = rhi->framebuffer_create(device, &fb_desc);
+  /* SSAA factor: caller-specified, defaulting to 2x. Forced to 1 when a
+   * host render target is provided (target dimensions are authoritative). */
+  int ssaa = desc->ssaa_factor > 0 ? desc->ssaa_factor : 2;
+  if (ssaa > 4)
+    ssaa = 4;
+  if (desc->render_target)
+    ssaa = 1;
+
+  MopRhiFramebuffer *fb = NULL;
+  if (desc->render_target && rhi->framebuffer_create_from_texture) {
+    /* Wrap host texture as the color attachment (zero-copy on CPU). */
+    fb = rhi->framebuffer_create_from_texture(
+        device, desc->render_target->rhi_texture, desc->width, desc->height);
+    if (!fb) {
+      MOP_WARN("backend '%s' does not support host render target — "
+               "falling back to internal framebuffer",
+               rhi->name);
+    }
+  }
+  if (!fb) {
+    MopRhiFramebufferDesc fb_desc = {.width = desc->width * ssaa,
+                                     .height = desc->height * ssaa};
+    fb = rhi->framebuffer_create(device, &fb_desc);
+  }
   if (!fb) {
     rhi->device_destroy(device);
     return NULL;
@@ -452,8 +583,11 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
     return NULL;
   }
 
-  /* Dynamic mesh array (Phase 5B) */
-  vp->meshes = calloc(MOP_INITIAL_MESH_CAPACITY, sizeof(struct MopMesh));
+  /* Pointer-stable mesh pool: array of MopMesh* pointers.
+   * Growing the pointer array via realloc is safe for any MopMesh*
+   * handle the host is holding — the mesh structs themselves are never
+   * moved once allocated. */
+  vp->meshes = calloc(MOP_INITIAL_MESH_CAPACITY, sizeof(struct MopMesh *));
   if (!vp->meshes) {
     rhi->framebuffer_destroy(device, fb);
     rhi->device_destroy(device);
@@ -462,9 +596,9 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   }
   vp->mesh_capacity = MOP_INITIAL_MESH_CAPACITY;
 
-  /* Instanced mesh array (Phase 6B) */
+  /* Instanced mesh pool — same pointer-stable scheme. */
   vp->instanced_meshes =
-      calloc(MOP_INITIAL_INSTANCED_CAPACITY, sizeof(struct MopInstancedMesh));
+      calloc(MOP_INITIAL_INSTANCED_CAPACITY, sizeof(struct MopInstancedMesh *));
   if (!vp->instanced_meshes) {
     free(vp->meshes);
     rhi->framebuffer_destroy(device, fb);
@@ -623,9 +757,6 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
   vp->reverse_z =
       (vp->backend_type == MOP_BACKEND_VULKAN) ? true : desc->reverse_z;
 
-  /* Register built-in subsystems */
-  mop_postprocess_register(vp);
-
   /* Interaction state */
   vp->selected_id = 0;
   vp->selected_count = 0;
@@ -647,6 +778,16 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
       num_threads = (int)(n - 1 > 15 ? 15 : n - 1);
 #endif
     vp->thread_pool = mop_threadpool_create(num_threads);
+  }
+
+  /* Recursive so internal API paths can re-acquire without deadlock and
+   * hosts can safely call MOP mutations inside a scene_lock block. */
+  {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&vp->scene_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
   }
 
   return vp;
@@ -681,32 +822,6 @@ void mop_viewport_destroy(MopViewport *viewport) {
   /* Destroy shader plugins (before device teardown) */
   mop_shader_plugins_destroy_all(viewport);
 
-  /* Destroy all registered subsystems (water, particles, postprocess, etc.)
-   * Must happen before meshes since subsystems may own internal meshes. */
-  mop_subsystem_destroy_all(&viewport->subsystems, viewport);
-
-  /* Free the legacy tracking arrays (kept for backward-compat API) */
-  free(viewport->water_surfaces);
-  viewport->water_surfaces = NULL;
-  viewport->water_count = 0;
-
-  free(viewport->emitters);
-  viewport->emitters = NULL;
-  viewport->emitter_count = 0;
-
-  /* Destroy all active instanced meshes (Phase 6B) */
-  for (uint32_t i = 0; i < viewport->instanced_count; i++) {
-    struct MopInstancedMesh *im = &viewport->instanced_meshes[i];
-    if (im->active) {
-      if (im->vertex_buffer)
-        viewport->rhi->buffer_destroy(viewport->device, im->vertex_buffer);
-      if (im->index_buffer)
-        viewport->rhi->buffer_destroy(viewport->device, im->index_buffer);
-      free(im->transforms);
-      im->active = false;
-    }
-  }
-
   /* Destroy environment map resources */
   if (viewport->env_texture)
     viewport->rhi->texture_destroy(viewport->device, viewport->env_texture);
@@ -735,20 +850,48 @@ void mop_viewport_destroy(MopViewport *viewport) {
       viewport->rhi->buffer_destroy(viewport->device, viewport->axis_ind_ib[i]);
   }
 
-  /* Destroy all active mesh buffers */
+  /* Destroy all meshes that were ever allocated (slots up to high-water).
+   * Active meshes get their RHI buffers released; every slot gets its
+   * MopMesh struct freed (mesh pool is heap-allocated per slot). */
   for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    struct MopMesh *mesh = &viewport->meshes[i];
+    struct MopMesh *mesh = viewport->meshes[i];
+    if (!mesh)
+      continue;
     if (mesh->active) {
-      if (mesh->vertex_buffer) {
+      if (mesh->vertex_buffer)
         viewport->rhi->buffer_destroy(viewport->device, mesh->vertex_buffer);
-      }
-      if (mesh->index_buffer) {
+      if (mesh->index_buffer)
         viewport->rhi->buffer_destroy(viewport->device, mesh->index_buffer);
-      }
       free(mesh->vertex_format);
-      mesh->vertex_format = NULL;
-      mesh->active = false;
+      free(mesh->bind_pose_data);
+      free(mesh->bone_matrices);
+      free(mesh->bone_parents);
+      free(mesh->morph_targets);
+      free(mesh->morph_weights);
+      free(mesh->tangents);
+      for (uint32_t li = 0; li < mesh->lod_level_count; li++) {
+        if (mesh->lod_levels[li].vertex_buffer)
+          viewport->rhi->buffer_destroy(viewport->device,
+                                        mesh->lod_levels[li].vertex_buffer);
+        if (mesh->lod_levels[li].index_buffer)
+          viewport->rhi->buffer_destroy(viewport->device,
+                                        mesh->lod_levels[li].index_buffer);
+      }
     }
+    free(mesh);
+  }
+  for (uint32_t i = 0; i < viewport->instanced_count; i++) {
+    struct MopInstancedMesh *im = viewport->instanced_meshes[i];
+    if (!im)
+      continue;
+    if (im->active) {
+      if (im->vertex_buffer)
+        viewport->rhi->buffer_destroy(viewport->device, im->vertex_buffer);
+      if (im->index_buffer)
+        viewport->rhi->buffer_destroy(viewport->device, im->index_buffer);
+      free(im->transforms);
+    }
+    free(im);
   }
 
   if (viewport->framebuffer) {
@@ -764,7 +907,9 @@ void mop_viewport_destroy(MopViewport *viewport) {
   free(viewport->trans_sort_dist);
   mop_sw_framebuffer_free(&viewport->shadow_fb);
   free(viewport->instanced_meshes);
+  free(viewport->instanced_free_list);
   free(viewport->meshes);
+  free(viewport->mesh_free_list);
 
   /* Free dynamic arrays */
   free(viewport->lights);
@@ -785,10 +930,44 @@ void mop_viewport_destroy(MopViewport *viewport) {
   free(viewport->undo_entries);
   free(viewport->selection.elements);
 
+  /* Destroy texture cache */
+  mop_tex_cache_destroy_all(viewport);
+
   /* Destroy thread pool (Phase 1B) */
   mop_threadpool_destroy(viewport->thread_pool);
 
+  pthread_mutex_destroy(&viewport->scene_mutex);
+
   free(viewport);
+}
+
+/* -------------------------------------------------------------------------
+ * Thread-safe scene mutation
+ *
+ * The render path acquires viewport->scene_mutex for the duration of the
+ * frame. Hosts wishing to mutate scene state from a thread different
+ * from the one calling mop_viewport_render should wrap mutations with
+ * mop_viewport_scene_lock / _unlock. Example (DCC tool worker):
+ *
+ *   mop_viewport_scene_lock(vp);
+ *   mop_mesh_set_transform(mesh, m);
+ *   mop_mesh_update_geometry(mesh, vp, verts, n, idx, m);
+ *   mop_viewport_scene_unlock(vp);
+ *
+ * Single-threaded hosts can ignore these calls; the render-path's own
+ * acquisition is a no-op when nobody else contends.
+ *
+ * The mutex is non-recursive. Do not call render from within a lock.
+ * ------------------------------------------------------------------------- */
+
+void mop_viewport_scene_lock(MopViewport *viewport) {
+  if (viewport)
+    pthread_mutex_lock(&viewport->scene_mutex);
+}
+
+void mop_viewport_scene_unlock(MopViewport *viewport) {
+  if (viewport)
+    pthread_mutex_unlock(&viewport->scene_mutex);
 }
 
 /* -------------------------------------------------------------------------
@@ -799,6 +978,7 @@ void mop_viewport_resize(MopViewport *viewport, int width, int height) {
   if (!viewport || width <= 0 || height <= 0) {
     return;
   }
+  MOP_VP_LOCK(viewport);
   viewport->width = width;
   viewport->height = height;
 
@@ -807,10 +987,13 @@ void mop_viewport_resize(MopViewport *viewport, int width, int height) {
   viewport->rhi->framebuffer_resize(viewport->device, viewport->framebuffer,
                                     width * sf, height * sf);
 
-  /* Reallocate the downsample buffer for the new presentation size */
-  free(viewport->ssaa_color_buf);
-  viewport->ssaa_color_buf =
-      calloc((size_t)width * height * 4, sizeof(uint8_t));
+  /* Reallocate the downsample buffer for the new presentation size.
+   * Allocate the replacement first so we don't drop the old buffer on OOM. */
+  uint8_t *new_ssaa = calloc((size_t)width * height * 4, sizeof(uint8_t));
+  if (new_ssaa) {
+    free(viewport->ssaa_color_buf);
+    viewport->ssaa_color_buf = new_ssaa;
+  }
 
   /* Invalidate TAA history — resolution changed */
   viewport->taa_has_history = false;
@@ -820,42 +1003,53 @@ void mop_viewport_resize(MopViewport *viewport, int width, int height) {
   viewport->projection_matrix = compute_projection(
       viewport->cam_mode, viewport->cam_fov_radians, viewport->cam_ortho_size,
       aspect, viewport->cam_near, viewport->cam_far, viewport->reverse_z);
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_clear_color(MopViewport *viewport, MopColor color) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->clear_color = color;
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_render_mode(MopViewport *viewport, MopRenderMode mode) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->render_mode = mode;
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_light_dir(MopViewport *viewport, MopVec3 dir) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->light_dir = dir;
   /* Sync with multi-light system */
   viewport->lights[0].direction = dir;
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_ambient(MopViewport *viewport, float ambient) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->ambient = (ambient < 0.0f)   ? 0.0f
                       : (ambient > 1.0f) ? 1.0f
                                          : ambient;
   /* Sync with multi-light system: intensity = 1 - ambient */
   viewport->lights[0].intensity = 1.0f - viewport->ambient;
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_shading(MopViewport *viewport, MopShadingMode mode) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->shading_mode = mode;
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
@@ -864,6 +1058,7 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
   if (!viewport)
     return;
 
+  MOP_VP_LOCK(viewport);
   viewport->cam_eye = eye;
   viewport->cam_target = target;
   viewport->cam_up = up;
@@ -891,6 +1086,7 @@ void mop_viewport_set_camera(MopViewport *viewport, MopVec3 eye, MopVec3 target,
     viewport->camera.near_plane = near_plane;
     viewport->camera.far_plane = far_plane;
   }
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
@@ -900,6 +1096,7 @@ void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
   if (!viewport)
     return;
 
+  MOP_VP_LOCK(viewport);
   viewport->cam_eye = eye;
   viewport->cam_target = target;
   viewport->cam_up = up;
@@ -916,6 +1113,7 @@ void mop_viewport_set_camera_orbit(MopViewport *viewport, MopVec3 eye,
   /* Skip orbit parameter reconstruction — the orbit camera already holds
    * the authoritative pitch/yaw/distance values and asinf() would clamp
    * pitch to [-π/2, π/2], preventing full vertical orbit. */
+  MOP_VP_UNLOCK(viewport);
 }
 
 MopBackendType mop_viewport_get_backend(MopViewport *viewport) {
@@ -933,6 +1131,7 @@ float mop_viewport_gpu_frame_time_ms(MopViewport *viewport) {
 void mop_viewport_set_camera_mode(MopViewport *viewport, MopCameraMode mode) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->cam_mode = mode;
   viewport->camera.mode = mode;
 
@@ -949,6 +1148,7 @@ void mop_viewport_set_camera_mode(MopViewport *viewport, MopCameraMode mode) {
   viewport->projection_matrix = compute_projection(
       viewport->cam_mode, viewport->cam_fov_radians, viewport->cam_ortho_size,
       aspect, viewport->cam_near, viewport->cam_far, viewport->reverse_z);
+  MOP_VP_UNLOCK(viewport);
 }
 
 MopCameraMode mop_viewport_get_camera_mode(const MopViewport *viewport) {
@@ -982,54 +1182,51 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc) {
     MOP_ERROR("mesh has zero vertices or indices");
     return NULL;
   }
+  /* Flexible format path — reinterpret the vertex pointer as raw bytes
+   * with the given layout and route through the _ex implementation. */
+  if (desc->vertex_format) {
+    MopMeshDescEx ex = {
+        .vertex_data = desc->vertices,
+        .vertex_count = desc->vertex_count,
+        .indices = desc->indices,
+        .index_count = desc->index_count,
+        .object_id = desc->object_id,
+        .vertex_format = desc->vertex_format,
+    };
+    return mop_viewport_add_mesh_ex(viewport, &ex);
+  }
+  MOP_VP_LOCK(viewport);
   if (desc->index_count % 3 != 0) {
     MOP_ERROR("index count %u is not a multiple of 3", desc->index_count);
+    MOP_VP_UNLOCK(viewport);
     return NULL;
   }
-  /* Find a free slot (reuse inactive entries) */
-  uint32_t slot = viewport->mesh_count;
-  for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    if (!viewport->meshes[i].active) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot == viewport->mesh_count) {
-    /* Need a new slot — grow if at capacity */
-    if (viewport->mesh_count >= viewport->mesh_capacity) {
-      if (viewport->mesh_capacity > UINT32_MAX / 2) {
-        MOP_ERROR("mesh array capacity overflow");
-        return NULL;
-      }
-      uint32_t new_cap = viewport->mesh_capacity * 2;
-      struct MopMesh *new_arr =
-          realloc(viewport->meshes, new_cap * sizeof(struct MopMesh));
-      if (!new_arr) {
-        MOP_ERROR("mesh realloc failed (capacity %u)", new_cap);
-        return NULL;
-      }
-      /* Zero-init the newly allocated portion */
-      memset(new_arr + viewport->mesh_capacity, 0,
-             (new_cap - viewport->mesh_capacity) * sizeof(struct MopMesh));
-      viewport->meshes = new_arr;
-      viewport->mesh_capacity = new_cap;
-    }
-    viewport->mesh_count++;
+  uint32_t slot = mop_mesh_pool_acquire(viewport);
+  if (slot == UINT32_MAX) {
+    MOP_ERROR("mesh pool exhausted (OOM)");
+    MOP_VP_UNLOCK(viewport);
+    return NULL;
   }
 
   /* Create RHI buffers */
   MopRhiBufferDesc vb_desc = {.data = desc->vertices,
-                              .size = desc->vertex_count * sizeof(MopVertex)};
+                              .size = (size_t)desc->vertex_count *
+                                      sizeof(MopVertex)};
   MopRhiBuffer *vb = viewport->rhi->buffer_create(viewport->device, &vb_desc);
   if (!vb) {
+    mop_mesh_pool_release(viewport, slot);
+    MOP_VP_UNLOCK(viewport);
     return NULL;
   }
 
   MopRhiBufferDesc ib_desc = {.data = desc->indices,
-                              .size = desc->index_count * sizeof(uint32_t)};
+                              .size =
+                                  (size_t)desc->index_count * sizeof(uint32_t)};
   MopRhiBuffer *ib = viewport->rhi->buffer_create(viewport->device, &ib_desc);
   if (!ib) {
     viewport->rhi->buffer_destroy(viewport->device, vb);
+    mop_mesh_pool_release(viewport, slot);
+    MOP_VP_UNLOCK(viewport);
     return NULL;
   }
 
@@ -1045,7 +1242,7 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc) {
   avg.g *= inv;
   avg.b *= inv;
 
-  struct MopMesh *mesh = &viewport->meshes[slot];
+  struct MopMesh *mesh = viewport->meshes[slot];
   mesh->vertex_buffer = vb;
   mesh->index_buffer = ib;
   mesh->vertex_count = desc->vertex_count;
@@ -1069,6 +1266,7 @@ MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc) {
   mesh->vertex_capacity = desc->vertex_count;
   mesh->index_capacity = desc->index_count;
 
+  MOP_VP_UNLOCK(viewport);
   return mesh;
 }
 
@@ -1088,47 +1286,32 @@ MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport,
     return NULL;
   }
 
-  /* Find a free slot */
-  uint32_t slot = viewport->mesh_count;
-  for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    if (!viewport->meshes[i].active) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot == viewport->mesh_count) {
-    if (viewport->mesh_count >= viewport->mesh_capacity) {
-      if (viewport->mesh_capacity > UINT32_MAX / 2) {
-        MOP_ERROR("mesh array capacity overflow");
-        return NULL;
-      }
-      uint32_t new_cap = viewport->mesh_capacity * 2;
-      struct MopMesh *new_arr =
-          realloc(viewport->meshes, new_cap * sizeof(struct MopMesh));
-      if (!new_arr) {
-        MOP_ERROR("mesh realloc failed (capacity %u)", new_cap);
-        return NULL;
-      }
-      memset(new_arr + viewport->mesh_capacity, 0,
-             (new_cap - viewport->mesh_capacity) * sizeof(struct MopMesh));
-      viewport->meshes = new_arr;
-      viewport->mesh_capacity = new_cap;
-    }
-    viewport->mesh_count++;
+  MOP_VP_LOCK(viewport);
+  uint32_t slot = mop_mesh_pool_acquire(viewport);
+  if (slot == UINT32_MAX) {
+    MOP_ERROR("mesh pool exhausted (OOM)");
+    MOP_VP_UNLOCK(viewport);
+    return NULL;
   }
 
   /* Create RHI buffers — raw bytes */
   size_t vb_size = (size_t)desc->vertex_count * desc->vertex_format->stride;
   MopRhiBufferDesc vb_desc = {.data = desc->vertex_data, .size = vb_size};
   MopRhiBuffer *vb = viewport->rhi->buffer_create(viewport->device, &vb_desc);
-  if (!vb)
+  if (!vb) {
+    mop_mesh_pool_release(viewport, slot);
+    MOP_VP_UNLOCK(viewport);
     return NULL;
+  }
 
   MopRhiBufferDesc ib_desc = {.data = desc->indices,
-                              .size = desc->index_count * sizeof(uint32_t)};
+                              .size =
+                                  (size_t)desc->index_count * sizeof(uint32_t)};
   MopRhiBuffer *ib = viewport->rhi->buffer_create(viewport->device, &ib_desc);
   if (!ib) {
     viewport->rhi->buffer_destroy(viewport->device, vb);
+    mop_mesh_pool_release(viewport, slot);
+    MOP_VP_UNLOCK(viewport);
     return NULL;
   }
 
@@ -1156,11 +1339,13 @@ MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport,
   if (!fmt_copy) {
     viewport->rhi->buffer_destroy(viewport->device, ib);
     viewport->rhi->buffer_destroy(viewport->device, vb);
+    mop_mesh_pool_release(viewport, slot);
+    MOP_VP_UNLOCK(viewport);
     return NULL;
   }
   *fmt_copy = *desc->vertex_format;
 
-  struct MopMesh *mesh = &viewport->meshes[slot];
+  struct MopMesh *mesh = viewport->meshes[slot];
   mesh->vertex_buffer = vb;
   mesh->index_buffer = ib;
   mesh->vertex_count = desc->vertex_count;
@@ -1185,6 +1370,7 @@ MopMesh *mop_viewport_add_mesh_ex(MopViewport *viewport,
   mesh->index_capacity = desc->index_count;
   mesh->vertex_format = fmt_copy;
 
+  MOP_VP_UNLOCK(viewport);
   return mesh;
 }
 
@@ -1192,6 +1378,7 @@ void mop_viewport_remove_mesh(MopViewport *viewport, MopMesh *mesh) {
   if (!viewport || !mesh)
     return;
 
+  MOP_VP_LOCK(viewport);
   if (mesh->vertex_buffer) {
     viewport->rhi->buffer_destroy(viewport->device, mesh->vertex_buffer);
     mesh->vertex_buffer = NULL;
@@ -1227,7 +1414,14 @@ void mop_viewport_remove_mesh(MopViewport *viewport, MopMesh *mesh) {
   mesh->lod_level_count = 0;
   mesh->active_lod = 0;
 
+  /* Clear tangents (normal mapping) */
+  free(mesh->tangents);
+  mesh->tangents = NULL;
+  mesh->tangent_count = 0;
+
   mesh->active = false;
+  mop_mesh_pool_release(viewport, mesh->slot_index);
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
@@ -1235,10 +1429,14 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
                               const uint32_t *indices, uint32_t index_count) {
   if (!mesh || !viewport || !vertices || !indices)
     return;
-  if (vertex_count == 0 || index_count == 0)
+  MOP_VP_LOCK(viewport);
+  if (vertex_count == 0 || index_count == 0) {
+    MOP_VP_UNLOCK(viewport);
     return;
+  }
   if (vertex_count > 16 * 1024 * 1024) { /* 16M vertex limit */
     MOP_ERROR("vertex count exceeds maximum (%u)", vertex_count);
+    MOP_VP_UNLOCK(viewport);
     return;
   }
 
@@ -1255,8 +1453,10 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
       new_cap = new_cap ? new_cap * 2 : 64;
 
     void *tmp = calloc(new_cap, sizeof(MopVertex));
-    if (!tmp)
+    if (!tmp) {
+      MOP_VP_UNLOCK(viewport);
       return;
+    }
     memcpy(tmp, vertices, vertex_count * sizeof(MopVertex));
     MopRhiBufferDesc vb_desc = {.data = tmp,
                                 .size = new_cap * sizeof(MopVertex)};
@@ -1265,6 +1465,7 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
     free(tmp);
     if (!mesh->vertex_buffer) {
       mesh->active = false;
+      MOP_VP_UNLOCK(viewport);
       return;
     }
     mesh->vertex_capacity = new_cap;
@@ -1283,8 +1484,10 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
       new_cap = new_cap ? new_cap * 2 : 64;
 
     void *tmp = calloc(new_cap, sizeof(uint32_t));
-    if (!tmp)
+    if (!tmp) {
+      MOP_VP_UNLOCK(viewport);
       return;
+    }
     memcpy(tmp, indices, index_count * sizeof(uint32_t));
     MopRhiBufferDesc ib_desc = {.data = tmp,
                                 .size = new_cap * sizeof(uint32_t)};
@@ -1293,11 +1496,13 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
     free(tmp);
     if (!mesh->index_buffer) {
       mesh->active = false;
+      MOP_VP_UNLOCK(viewport);
       return;
     }
     mesh->index_capacity = new_cap;
   }
   mesh->index_count = index_count;
+  MOP_VP_UNLOCK(viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -1309,41 +1514,52 @@ void mop_mesh_set_bone_matrices(MopMesh *mesh, MopViewport *viewport,
   if (!mesh || !viewport || !matrices || bone_count == 0)
     return;
 
+  MOP_VP_LOCK(viewport);
   /* Vertex format must include joints + weights */
   const MopVertexFormat *fmt = mesh->vertex_format;
-  if (!fmt)
+  if (!fmt) {
+    MOP_VP_UNLOCK(viewport);
     return; /* standard MopVertex has no joints/weights */
+  }
   const MopVertexAttrib *joints_attr =
       mop_vertex_format_find(fmt, MOP_ATTRIB_JOINTS);
   const MopVertexAttrib *weights_attr =
       mop_vertex_format_find(fmt, MOP_ATTRIB_WEIGHTS);
-  if (!joints_attr || !weights_attr)
+  if (!joints_attr || !weights_attr) {
+    MOP_VP_UNLOCK(viewport);
     return;
+  }
 
   /* On first call, snapshot the bind-pose vertex data */
   if (!mesh->bind_pose_data) {
     size_t vb_size = (size_t)mesh->vertex_count * fmt->stride;
     const void *raw = viewport->rhi->buffer_read(mesh->vertex_buffer);
-    if (!raw)
+    if (!raw) {
+      MOP_VP_UNLOCK(viewport);
       return;
+    }
     mesh->bind_pose_data = malloc(vb_size);
-    if (!mesh->bind_pose_data)
+    if (!mesh->bind_pose_data) {
+      MOP_VP_UNLOCK(viewport);
       return;
+    }
     memcpy(mesh->bind_pose_data, raw, vb_size);
   }
 
   /* Copy bone matrices */
   if (bone_count != mesh->bone_count) {
     free(mesh->bone_matrices);
-    mesh->bone_matrices = malloc(bone_count * sizeof(MopMat4));
+    mesh->bone_matrices = malloc((size_t)bone_count * sizeof(MopMat4));
     if (!mesh->bone_matrices) {
       mesh->bone_count = 0;
+      MOP_VP_UNLOCK(viewport);
       return;
     }
     mesh->bone_count = bone_count;
   }
-  memcpy(mesh->bone_matrices, matrices, bone_count * sizeof(MopMat4));
+  memcpy(mesh->bone_matrices, matrices, (size_t)bone_count * sizeof(MopMat4));
   mesh->skin_dirty = true;
+  MOP_VP_UNLOCK(viewport);
 }
 
 /* Apply CPU skinning for a single mesh.
@@ -1472,10 +1688,11 @@ void mop_mesh_set_bone_hierarchy(MopMesh *mesh, const int32_t *parent_indices,
     return; /* must match existing bone_count from set_bone_matrices */
 
   free(mesh->bone_parents);
-  mesh->bone_parents = malloc(bone_count * sizeof(int32_t));
+  mesh->bone_parents = malloc((size_t)bone_count * sizeof(int32_t));
   if (!mesh->bone_parents)
     return;
-  memcpy(mesh->bone_parents, parent_indices, bone_count * sizeof(int32_t));
+  memcpy(mesh->bone_parents, parent_indices,
+         (size_t)bone_count * sizeof(int32_t));
 }
 
 /* -------------------------------------------------------------------------
@@ -1516,13 +1733,13 @@ void mop_mesh_set_morph_targets(MopMesh *mesh, MopViewport *viewport,
 
   /* Copy weights */
   free(mesh->morph_weights);
-  mesh->morph_weights = malloc(target_count * sizeof(float));
+  mesh->morph_weights = malloc((size_t)target_count * sizeof(float));
   if (!mesh->morph_weights) {
     free(mesh->morph_targets);
     mesh->morph_targets = NULL;
     return;
   }
-  memcpy(mesh->morph_weights, weights, target_count * sizeof(float));
+  memcpy(mesh->morph_weights, weights, (size_t)target_count * sizeof(float));
   mesh->morph_target_count = target_count;
   mesh->morph_dirty = true;
 }
@@ -1586,20 +1803,26 @@ static void mop_morph_apply(MopMesh *mesh, MopViewport *viewport) {
 void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform) {
   if (!mesh || !transform)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->transform = *transform;
   mesh->use_trs = false; /* explicit matrix overrides TRS */
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 void mop_mesh_set_opacity(MopMesh *mesh, float opacity) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->opacity = (opacity < 0.0f) ? 0.0f : (opacity > 1.0f) ? 1.0f : opacity;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 void mop_mesh_set_blend_mode(MopMesh *mesh, MopBlendMode mode) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->blend_mode = mode;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -1635,7 +1858,9 @@ void mop_viewport_destroy_texture(MopViewport *viewport, MopTexture *texture) {
 void mop_mesh_set_texture(MopMesh *mesh, MopTexture *texture) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->texture = texture;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -1643,21 +1868,22 @@ void mop_mesh_set_texture(MopMesh *mesh, MopTexture *texture) {
  * ------------------------------------------------------------------------- */
 
 MopMaterial mop_material_default(void) {
-  MopMaterial m;
+  MopMaterial m = {0}; /* zero-init all fields (critical: texture
+                          pointers must default to NULL or EMIT_DRAW
+                          dereferences garbage) */
   m.base_color = (MopColor){1.0f, 1.0f, 1.0f, 1.0f};
   m.metallic = 0.0f;
   m.roughness = 0.5f;
-  m.emissive = (MopVec3){0.0f, 0.0f, 0.0f};
-  m.albedo_map = NULL;
-  m.normal_map = NULL;
   return m;
 }
 
 void mop_mesh_set_material(MopMesh *mesh, const MopMaterial *material) {
   if (!mesh || !material)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->material = *material;
   mesh->has_material = true;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -1667,40 +1893,63 @@ void mop_mesh_set_material(MopMesh *mesh, const MopMaterial *material) {
 void mop_mesh_set_position(MopMesh *mesh, MopVec3 position) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->position = position;
   mesh->use_trs = true;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 void mop_mesh_set_rotation(MopMesh *mesh, MopVec3 rotation) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->rotation = rotation;
   mesh->use_trs = true;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 void mop_mesh_set_scale(MopMesh *mesh, MopVec3 scale) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->scale_val = scale;
   mesh->use_trs = true;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 MopVec3 mop_mesh_get_position(const MopMesh *mesh) {
-  return mesh ? mesh->position : (MopVec3){0, 0, 0};
+  if (!mesh)
+    return (MopVec3){0, 0, 0};
+  MOP_VP_LOCK(mesh->viewport);
+  MopVec3 v = mesh->position;
+  MOP_VP_UNLOCK(mesh->viewport);
+  return v;
 }
 
 MopVec3 mop_mesh_get_rotation(const MopMesh *mesh) {
-  return mesh ? mesh->rotation : (MopVec3){0, 0, 0};
+  if (!mesh)
+    return (MopVec3){0, 0, 0};
+  MOP_VP_LOCK(mesh->viewport);
+  MopVec3 v = mesh->rotation;
+  MOP_VP_UNLOCK(mesh->viewport);
+  return v;
 }
 
 MopVec3 mop_mesh_get_scale(const MopMesh *mesh) {
-  return mesh ? mesh->scale_val : (MopVec3){1, 1, 1};
+  if (!mesh)
+    return (MopVec3){1, 1, 1};
+  MOP_VP_LOCK(mesh->viewport);
+  MopVec3 v = mesh->scale_val;
+  MOP_VP_UNLOCK(mesh->viewport);
+  return v;
 }
 
 void mop_mesh_set_shading(MopMesh *mesh, MopShadingMode mode) {
   if (!mesh)
     return;
+  MOP_VP_LOCK(mesh->viewport);
   mesh->shading_mode_override = (int)mode;
+  MOP_VP_UNLOCK(mesh->viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -1913,7 +2162,9 @@ static void pass_background(MopViewport *vp) {
       pass_background_hdri_cpu(vp);
       return;
     }
-    /* GPU skybox: draw env map as background */
+    /* GPU skybox: draw env map as background. Write HDR values directly —
+     * the tonemap pass handles exposure downstream. Pre-multiplying by
+     * vp->exposure here would apply exposure twice and darken the sky. */
     if (vp->rhi->draw_skybox && vp->env_texture) {
       MopMat4 vp_mat =
           mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
@@ -1921,10 +2172,16 @@ static void pass_background(MopViewport *vp) {
       float cam_pos[3] = {vp->cam_eye.x, vp->cam_eye.y, vp->cam_eye.z};
       vp->rhi->draw_skybox(vp->device, vp->framebuffer, vp->env_texture,
                            inv_vp.d, cam_pos, vp->env_rotation,
-                           vp->env_intensity * vp->exposure);
+                           vp->env_intensity);
       return;
     }
   }
+
+  /* Editor gradient quad — only drawn when chrome is visible. Embedded
+   * hosts that hide chrome see the clear color behind the scene unless
+   * they supply an HDRI / procedural sky above. */
+  if (!vp->show_chrome)
+    return;
 
   /* GPU backends: skip gradient quad draw — the PBR bindless shader adds
    * IBL reflections to it, contaminating the background with env map colors.
@@ -1991,7 +2248,7 @@ static void pass_shadow(MopViewport *vp) {
   bool has_meshes = false;
 
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *mesh = &vp->meshes[i];
+    struct MopMesh *mesh = vp->meshes[i];
     if (!mesh->active || mesh->object_id >= 0xFFFD0000u)
       continue;
     if (mesh->blend_mode != MOP_BLEND_OPAQUE)
@@ -2097,7 +2354,7 @@ static void pass_shadow(MopViewport *vp) {
 
   /* Render each opaque mesh into the shadow depth buffer */
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *mesh = &vp->meshes[i];
+    struct MopMesh *mesh = vp->meshes[i];
     if (!mesh->active || mesh->object_id >= 0xFFFD0000u)
       continue;
     if (mesh->blend_mode != MOP_BLEND_OPAQUE)
@@ -2130,7 +2387,7 @@ static void pass_shadow(MopViewport *vp) {
 static void pass_scene_opaque(MopViewport *vp) {
   MopFrustum frustum = mop_viewport_get_frustum(vp);
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *mesh = &vp->meshes[i];
+    struct MopMesh *mesh = vp->meshes[i];
     if (!mesh->active)
       continue;
     if (mesh->object_id == MOP_GRID_ID)
@@ -2152,7 +2409,7 @@ static void pass_scene_transparent(MopViewport *vp) {
   MopFrustum frustum = mop_viewport_get_frustum(vp);
   uint32_t trans_count = 0;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *mesh = &vp->meshes[i];
+    struct MopMesh *mesh = vp->meshes[i];
     if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
       continue;
     if (mesh->object_id >= 0xFFFE0000u)
@@ -2179,7 +2436,7 @@ static void pass_scene_transparent(MopViewport *vp) {
       vp->trans_sort_capacity = 0;
       MOP_WARN("transparent sort allocation failed, rendering unsorted");
       for (uint32_t i = 0; i < vp->mesh_count; i++) {
-        struct MopMesh *mesh = &vp->meshes[i];
+        struct MopMesh *mesh = vp->meshes[i];
         if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
           continue;
         if (mesh->object_id >= 0xFFFE0000u)
@@ -2198,7 +2455,7 @@ static void pass_scene_transparent(MopViewport *vp) {
   uint32_t ti = 0;
   MopVec3 eye = vp->cam_eye;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *mesh = &vp->meshes[i];
+    struct MopMesh *mesh = vp->meshes[i];
     if (!mesh->active || mesh->blend_mode == MOP_BLEND_OPAQUE)
       continue;
     if (mesh->object_id >= 0xFFFE0000u)
@@ -2229,14 +2486,14 @@ static void pass_scene_transparent(MopViewport *vp) {
   }
 
   for (uint32_t j = 0; j < trans_count; j++) {
-    EMIT_DRAW(vp, &vp->meshes[trans_idx[j]]);
+    EMIT_DRAW(vp, vp->meshes[trans_idx[j]]);
   }
 }
 
 /* ---- Pass: gizmo overlays + light indicators ---- */
 static void pass_gizmo(MopViewport *vp) {
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    struct MopMesh *mesh = &vp->meshes[i];
+    struct MopMesh *mesh = vp->meshes[i];
     if (!mesh->active)
       continue;
     if (mesh->object_id < 0xFFFE0000u)
@@ -2281,8 +2538,10 @@ static void pass_overlays(MopViewport *vp) {
 
 /* ---- Pass: instanced meshes ---- */
 static void pass_instanced(MopViewport *vp) {
+  if (!vp->rhi->draw_instanced)
+    return;
   for (uint32_t i = 0; i < vp->instanced_count; i++) {
-    struct MopInstancedMesh *im = &vp->instanced_meshes[i];
+    struct MopInstancedMesh *im = vp->instanced_meshes[i];
     if (!im->active || im->instance_count == 0)
       continue;
 
@@ -2510,8 +2769,11 @@ static void rg_cleanup(MopViewport *vp, void *ud) {
     mop_sw_shadow_clear();
     mop_sw_ibl_clear();
   }
-  mop_subsystem_dispatch(&vp->subsystems, MOP_SUBSYS_PHASE_POST_RENDER, vp,
-                         0.0f, vp->last_frame_time);
+  /* Apply post-processing effects directly (no subsystem dispatch) */
+  if (vp->post_effects != 0 && vp->backend_type == MOP_BACKEND_CPU) {
+    MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)vp->framebuffer;
+    mop_postprocess_apply(sw_fb, vp->post_effects, &vp->fog_params);
+  }
 }
 
 /* -------------------------------------------------------------------------
@@ -2547,6 +2809,10 @@ static void rg_add_simple(MopRenderGraph *rg, const char *name,
 MopRenderResult mop_viewport_render(MopViewport *viewport) {
   if (!viewport)
     return MOP_RENDER_ERROR;
+
+  /* Serialize render against concurrent host mutations (DCC worker
+   * threads, game logic threads). Released before the function returns. */
+  pthread_mutex_lock(&viewport->scene_mutex);
 
   double t_frame_start = mop_profile_now_ms();
 
@@ -2595,7 +2861,7 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
 
   /* Compute local transforms for all active meshes */
   for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    struct MopMesh *mesh = &viewport->meshes[i];
+    struct MopMesh *mesh = viewport->meshes[i];
     if (!mesh->active)
       continue;
     if (mesh->use_trs) {
@@ -2604,34 +2870,63 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
     }
   }
 
-  /* Compute world_transform (roots first, then children) */
-  for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    struct MopMesh *mesh = &viewport->meshes[i];
-    if (!mesh->active)
-      continue;
-    if (mesh->parent_index == -1) {
-      mesh->world_transform = mesh->transform;
-    }
-  }
-  for (int pass = 0; pass < 16; pass++) {
-    bool changed = false;
-    for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-      struct MopMesh *mesh = &viewport->meshes[i];
-      if (!mesh->active || mesh->parent_index < 0)
-        continue;
-      uint32_t pi = (uint32_t)mesh->parent_index;
-      if (pi < viewport->mesh_count && viewport->meshes[pi].active) {
-        MopMat4 new_world = mop_mat4_multiply(
-            viewport->meshes[pi].world_transform, mesh->transform);
-        if (new_world.d[0] != mesh->world_transform.d[0] ||
-            new_world.d[12] != mesh->world_transform.d[12]) {
-          changed = true;
+  /* Compute world_transform for every active mesh. Iterative topological
+   * walk: for each uncomputed mesh, follow the parent chain upward until
+   * we hit a computed ancestor or a root, pushing indices onto a scratch
+   * stack; then unwind deepest-first computing world transforms. This is
+   * O(N) amortized — each mesh is pushed/popped once per frame — and
+   * supports arbitrary hierarchy depth. Cycles (which a well-formed
+   * scene should never contain) are broken by treating the revisited
+   * node as a root for that walk. */
+  if (viewport->mesh_count > 0) {
+    enum { ST_UNSEEN = 0, ST_ON_STACK = 1, ST_DONE = 2 };
+    uint8_t *state = calloc((size_t)viewport->mesh_count, sizeof(uint8_t));
+    uint32_t *stack = malloc((size_t)viewport->mesh_count * sizeof(uint32_t));
+    if (state && stack) {
+      for (uint32_t start = 0; start < viewport->mesh_count; start++) {
+        if (state[start] == ST_DONE)
+          continue;
+        struct MopMesh *sm = viewport->meshes[start];
+        if (!sm->active) {
+          state[start] = ST_DONE;
+          continue;
         }
-        mesh->world_transform = new_world;
+        /* Climb ancestry, pushing onto stack, until we hit a done node,
+         * a root, or a cycle (ST_ON_STACK already). */
+        uint32_t sp = 0;
+        uint32_t cur = start;
+        while (true) {
+          state[cur] = ST_ON_STACK;
+          stack[sp++] = cur;
+          int32_t pi = viewport->meshes[cur]->parent_index;
+          if (pi < 0 || (uint32_t)pi >= viewport->mesh_count)
+            break;
+          if (!viewport->meshes[pi]->active)
+            break;
+          if (state[pi] == ST_DONE)
+            break; /* unwind using parent's resolved transform */
+          if (state[pi] == ST_ON_STACK)
+            break; /* cycle — unwind treating pi as root for this walk */
+          cur = (uint32_t)pi;
+        }
+        /* Unwind: deepest first. */
+        while (sp > 0) {
+          uint32_t idx = stack[--sp];
+          struct MopMesh *im = viewport->meshes[idx];
+          int32_t pi = im->parent_index;
+          if (pi < 0 || (uint32_t)pi >= viewport->mesh_count ||
+              !viewport->meshes[pi]->active || state[pi] != ST_DONE) {
+            im->world_transform = im->transform;
+          } else {
+            im->world_transform = mop_mat4_multiply(
+                viewport->meshes[pi]->world_transform, im->transform);
+          }
+          state[idx] = ST_DONE;
+        }
       }
     }
-    if (!changed)
-      break;
+    free(stack);
+    free(state);
   }
 
   /* LOD selection (Phase 9C) — compute projected diameter and select LOD */
@@ -2640,7 +2935,7 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
     MopMat4 vp_mat =
         mop_mat4_multiply(viewport->projection_matrix, viewport->view_matrix);
     for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-      struct MopMesh *mesh = &viewport->meshes[i];
+      struct MopMesh *mesh = viewport->meshes[i];
       if (!mesh->active || mesh->lod_level_count == 0)
         continue;
 
@@ -2678,16 +2973,9 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
 
   double t_transform_end = mop_profile_now_ms();
 
-  /* --- Simulation update (water, particles, etc. via subsystem dispatch) ---
-   * Must run BEFORE frame_begin so that Vulkan buffer updates (one-shot
-   * command buffers) complete before the main render command buffer reads
-   * the vertex data inside the render pass. */
-  mop_subsystem_dispatch(&viewport->subsystems, MOP_SUBSYS_PHASE_SIMULATE,
-                         viewport, 0.0f, viewport->last_frame_time);
-
   /* --- Apply CPU morph blending + skinning for dirty meshes --- */
   for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    MopMesh *m = &viewport->meshes[i];
+    MopMesh *m = viewport->meshes[i];
     if (!m->active)
       continue;
     /* Morph blending runs first (modifies bind-pose → vertex buffer),
@@ -2741,8 +3029,10 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
   rg_add_simple(&rg, "hook:post_clear", rg_dispatch_hook,
                 (void *)(uintptr_t)MOP_STAGE_POST_CLEAR);
 
-  if (viewport->show_chrome)
-    rg_add(&rg, "background", rg_background, NULL, NULL, 0, w_color, 1);
+  /* Background pass always runs — skybox (HDRI / procedural sky) is a
+   * scene concept independent of editor chrome. pass_background gates
+   * the editor gradient quad on vp->show_chrome internally. */
+  rg_add(&rg, "background", rg_background, NULL, NULL, 0, w_color, 1);
 
   rg_add_simple(&rg, "hook:pre_scene", rg_dispatch_hook,
                 (void *)(uintptr_t)MOP_STAGE_PRE_SCENE);
@@ -2837,6 +3127,8 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
 
   viewport->last_render_result = MOP_RENDER_OK;
   viewport->last_render_error[0] = '\0';
+  viewport->frame_counter++;
+  pthread_mutex_unlock(&viewport->scene_mutex);
   return MOP_RENDER_OK;
 }
 
@@ -2904,6 +3196,68 @@ const uint8_t *mop_viewport_read_color(MopViewport *viewport, int *out_width,
   if (out_height)
     *out_height = ph;
   return dst;
+}
+
+/* -------------------------------------------------------------------------
+ * Present-to-texture (host-framebuffer / RTT)
+ *
+ * Copies the viewport's LDR color buffer into a host-owned MopTexture.
+ * The texture must have matching dimensions to the viewport's framebuffer
+ * (width * ssaa_factor × height * ssaa_factor) and format MOP_TEX_FORMAT_RGBA8.
+ *
+ * Intended for DCC/host embedding where the host's compositor displays
+ * the viewport output as a texture.  Call after mop_viewport_render.
+ *
+ * Returns true on success, false on size mismatch, backend without
+ * copy support, or NULL parameters.
+ * ------------------------------------------------------------------------- */
+
+bool mop_viewport_present_to_texture(MopViewport *viewport,
+                                     MopTexture *target) {
+  if (!viewport || !target || !target->rhi_texture)
+    return false;
+  if (!viewport->rhi->framebuffer_copy_to_texture) {
+    MOP_WARN("mop_viewport_present_to_texture: backend '%s' does not "
+             "support RTT blit",
+             viewport->rhi->name);
+    return false;
+  }
+  return viewport->rhi->framebuffer_copy_to_texture(
+      viewport->device, viewport->framebuffer, target->rhi_texture);
+}
+
+/* -------------------------------------------------------------------------
+ * Fused render + present
+ *
+ * Convenience wrapper that renders a frame and blits the result into a
+ * host-owned texture in one call — the typical DCC/game-engine embed
+ * pattern. Returns the render result; the blit is attempted only if the
+ * render succeeded. If the blit itself fails (size mismatch, missing
+ * backend support), the function still returns MOP_RENDER_OK but writes
+ * a warning.
+ * ------------------------------------------------------------------------- */
+
+MopRenderResult mop_viewport_render_to(MopViewport *viewport,
+                                       MopTexture *target) {
+  MopRenderResult r = mop_viewport_render(viewport);
+  if (r != MOP_RENDER_OK)
+    return r;
+  if (target && !mop_viewport_present_to_texture(viewport, target)) {
+    /* present_to_texture already logged the reason; don't promote to a
+     * render error. The caller can check the target texture themselves. */
+  }
+  return r;
+}
+
+void mop_viewport_set_gpu_driven_rendering(MopViewport *viewport,
+                                           bool enabled) {
+  if (!viewport || !viewport->rhi || !viewport->device)
+    return;
+  if (!viewport->rhi->set_gpu_driven_rendering)
+    return; /* backend doesn't support it */
+  MOP_VP_LOCK(viewport);
+  viewport->rhi->set_gpu_driven_rendering(viewport->device, enabled);
+  MOP_VP_UNLOCK(viewport);
 }
 
 /* -------------------------------------------------------------------------
@@ -3184,18 +3538,8 @@ void mop_mesh_set_parent(MopMesh *mesh, MopMesh *parent,
   if (!mesh || !parent || !viewport)
     return;
 
-  /* Find the parent's index in the viewport's meshes array */
-  int32_t parent_idx = -1;
-  for (uint32_t i = 0; i < viewport->mesh_count; i++) {
-    if (&viewport->meshes[i] == parent) {
-      parent_idx = (int32_t)i;
-      break;
-    }
-  }
-  if (parent_idx < 0)
-    return; /* parent not found in this viewport */
-
-  mesh->parent_index = parent_idx;
+  /* The mesh carries its slot index — O(1) parent lookup, no scan. */
+  mesh->parent_index = (int32_t)parent->slot_index;
 }
 
 void mop_mesh_clear_parent(MopMesh *mesh) {
@@ -3226,57 +3570,41 @@ MopInstancedMesh *mop_viewport_add_instanced_mesh(MopViewport *viewport,
     return NULL;
   }
 
-  /* Find a free slot (reuse inactive entries) */
-  uint32_t slot = viewport->instanced_count;
-  for (uint32_t i = 0; i < viewport->instanced_count; i++) {
-    if (!viewport->instanced_meshes[i].active) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot == viewport->instanced_count) {
-    /* Need a new slot — grow if at capacity */
-    if (viewport->instanced_count >= viewport->instanced_capacity) {
-      uint32_t new_cap = viewport->instanced_capacity * 2;
-      struct MopInstancedMesh *new_arr =
-          realloc(viewport->instanced_meshes,
-                  new_cap * sizeof(struct MopInstancedMesh));
-      if (!new_arr) {
-        MOP_ERROR("instanced mesh realloc failed (capacity %u)", new_cap);
-        return NULL;
-      }
-      memset(new_arr + viewport->instanced_capacity, 0,
-             (new_cap - viewport->instanced_capacity) *
-                 sizeof(struct MopInstancedMesh));
-      viewport->instanced_meshes = new_arr;
-      viewport->instanced_capacity = new_cap;
-    }
-    viewport->instanced_count++;
+  uint32_t slot = mop_instanced_pool_acquire(viewport);
+  if (slot == UINT32_MAX) {
+    MOP_ERROR("instanced mesh pool exhausted (OOM)");
+    return NULL;
   }
 
   /* Create RHI buffers */
   MopRhiBufferDesc vb_desc = {.data = desc->vertices,
-                              .size = desc->vertex_count * sizeof(MopVertex)};
+                              .size = (size_t)desc->vertex_count *
+                                      sizeof(MopVertex)};
   MopRhiBuffer *vb = viewport->rhi->buffer_create(viewport->device, &vb_desc);
-  if (!vb)
+  if (!vb) {
+    mop_instanced_pool_release(viewport, slot);
     return NULL;
+  }
 
   MopRhiBufferDesc ib_desc = {.data = desc->indices,
-                              .size = desc->index_count * sizeof(uint32_t)};
+                              .size =
+                                  (size_t)desc->index_count * sizeof(uint32_t)};
   MopRhiBuffer *ib = viewport->rhi->buffer_create(viewport->device, &ib_desc);
   if (!ib) {
     viewport->rhi->buffer_destroy(viewport->device, vb);
+    mop_instanced_pool_release(viewport, slot);
     return NULL;
   }
 
   /* Copy transforms */
-  MopMat4 *tforms = malloc(instance_count * sizeof(MopMat4));
+  MopMat4 *tforms = malloc((size_t)instance_count * sizeof(MopMat4));
   if (!tforms) {
     viewport->rhi->buffer_destroy(viewport->device, ib);
     viewport->rhi->buffer_destroy(viewport->device, vb);
+    mop_instanced_pool_release(viewport, slot);
     return NULL;
   }
-  memcpy(tforms, transforms, instance_count * sizeof(MopMat4));
+  memcpy(tforms, transforms, (size_t)instance_count * sizeof(MopMat4));
 
   /* Compute an average base color from vertex colors */
   MopColor avg = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -3290,7 +3618,7 @@ MopInstancedMesh *mop_viewport_add_instanced_mesh(MopViewport *viewport,
   avg.g *= inv;
   avg.b *= inv;
 
-  struct MopInstancedMesh *im = &viewport->instanced_meshes[slot];
+  struct MopInstancedMesh *im = viewport->instanced_meshes[slot];
   im->vertex_buffer = vb;
   im->index_buffer = ib;
   im->vertex_count = desc->vertex_count;
@@ -3343,6 +3671,7 @@ void mop_viewport_remove_instanced_mesh(MopViewport *viewport,
   mesh->transforms = NULL;
   mesh->instance_count = 0;
   mesh->active = false;
+  mop_instanced_pool_release(viewport, mesh->slot_index);
 }
 
 /* -------------------------------------------------------------------------

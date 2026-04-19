@@ -37,14 +37,18 @@ MopShaderPlugin *mop_viewport_register_shader(MopViewport *vp,
   if ((unsigned)desc->stage >= MOP_SHADER_PLUGIN_STAGE_COUNT)
     return NULL;
 
+  MOP_VP_LOCK(vp);
   /* Allocate plugin */
   MopShaderPlugin *plugin = calloc(1, sizeof(MopShaderPlugin));
-  if (!plugin)
+  if (!plugin) {
+    MOP_VP_UNLOCK(vp);
     return NULL;
+  }
 
   plugin->name = strdup(desc->name);
   if (!plugin->name) {
     free(plugin);
+    MOP_VP_UNLOCK(vp);
     return NULL;
   }
   plugin->stage = desc->stage;
@@ -85,11 +89,13 @@ MopShaderPlugin *mop_viewport_register_shader(MopViewport *vp,
       }
       free(plugin->name);
       free(plugin);
+      MOP_VP_UNLOCK(vp);
       return NULL;
     }
   }
 
   vp->shader_plugins[vp->shader_plugin_count++] = plugin;
+  MOP_VP_UNLOCK(vp);
   return plugin;
 }
 
@@ -101,6 +107,7 @@ void mop_viewport_unregister_shader(MopViewport *vp, MopShaderPlugin *plugin) {
   if (!vp || !plugin)
     return;
 
+  MOP_VP_LOCK(vp);
   /* Find and remove from array */
   for (uint32_t i = 0; i < vp->shader_plugin_count; i++) {
     if (vp->shader_plugins[i] == plugin) {
@@ -125,6 +132,7 @@ void mop_viewport_unregister_shader(MopViewport *vp, MopShaderPlugin *plugin) {
   }
   free(plugin->name);
   free(plugin);
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -164,7 +172,7 @@ void mop_shader_plugins_dispatch(MopViewport *vp, MopShaderPluginStage stage) {
       .width = vp->width,
       .height = vp->height,
       .time = vp->last_frame_time,
-      .delta_time = 0.0f, /* TODO: track dt across frames */
+      .delta_time = vp->last_frame_time - vp->prev_frame_time,
       .rhi_device = vp->device,
   };
 

@@ -20,6 +20,7 @@
 #ifndef MOP_CORE_MATERIAL_GRAPH_H
 #define MOP_CORE_MATERIAL_GRAPH_H
 
+#include <mop/core/material.h>
 #include <mop/types.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -160,6 +161,14 @@ char *mop_mat_graph_to_json(const MopMaterialGraph *graph);
 
 /* Deserialize graph from JSON string.  Returns true on success. */
 bool mop_mat_graph_from_json(MopMaterialGraph *graph, const char *json);
+
+/* Compile the material graph into a flat MopMaterial.
+ * Evaluates constant nodes, resolves texture paths via the viewport's
+ * texture pipeline, and folds math nodes into final PBR parameters.
+ * Returns true on success.  On failure, out_material is zero-initialized
+ * and a warning is logged. */
+bool mop_mat_graph_compile(MopMaterialGraph *graph, MopViewport *viewport,
+                           MopMaterial *out_material);
 
 /* Free any allocated resources in the graph (compiled GLSL, etc.) */
 void mop_mat_graph_destroy(MopMaterialGraph *graph);

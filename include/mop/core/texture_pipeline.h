@@ -102,4 +102,15 @@ MopTexCacheStats mop_tex_cache_stats(const MopViewport *viewport);
 /* Flush textures that haven't been referenced in `max_age_frames` frames. */
 void mop_tex_cache_flush(MopViewport *viewport, uint32_t max_age_frames);
 
+/* Copy a texture's RGBA8 pixels into a caller-provided buffer.  `buf_size`
+ * must be >= width * height * 4.  Returns true on success, false on
+ * NULL args, size mismatch, or a backend without readback support.
+ *
+ * Cheap on CPU backend. GPU backends need to be wired with a staging
+ * buffer and currently return false — hosts using GPU backends should
+ * keep pixels on the GPU via `mop_viewport_present_to_texture` and
+ * consume the texture directly in their render pipeline. */
+bool mop_tex_read_rgba8(MopViewport *viewport, MopTexture *texture,
+                        uint8_t *out_buf, size_t buf_size);
+
 #endif /* MOP_CORE_TEXTURE_PIPELINE_H */

@@ -124,12 +124,39 @@ static void staging_upload_image(MopRhiDevice *dev, VkImage image,
                                  uint32_t width, uint32_t height,
                                  const uint8_t *rgba_data) {
   size_t size = (size_t)width * height * 4;
-  if (size > MOP_VK_STAGING_SIZE) {
-    MOP_ERROR("[VK] image staging upload too large: %zu", size);
-    return;
+
+  /* Fit in persistent staging → use it directly. Oversize → allocate
+   * a transient host-visible buffer for this one upload. Keeps the
+   * idle staging footprint small (16 MB) while supporting 4K and up. */
+  VkBuffer upl_buf = VK_NULL_HANDLE;
+  VkDeviceMemory upl_mem = VK_NULL_HANDLE;
+  void *upl_mapped = NULL;
+  bool transient = false;
+
+  if (size <= MOP_VK_STAGING_SIZE) {
+    upl_buf = dev->staging_buf;
+    upl_mapped = dev->staging_mapped;
+  } else {
+    VkResult r = mop_vk_create_buffer(dev->device, &dev->mem_props, size,
+                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      &upl_buf, &upl_mem);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] image upload: transient buffer create failed: %d", r);
+      return;
+    }
+    r = vkMapMemory(dev->device, upl_mem, 0, size, 0, &upl_mapped);
+    if (r != VK_SUCCESS) {
+      vkDestroyBuffer(dev->device, upl_buf, NULL);
+      vkFreeMemory(dev->device, upl_mem, NULL);
+      MOP_ERROR("[VK] image upload: map failed: %d", r);
+      return;
+    }
+    transient = true;
   }
 
-  memcpy(dev->staging_mapped, rgba_data, size);
+  memcpy(upl_mapped, rgba_data, size);
 
   VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
 
@@ -147,7 +174,7 @@ static void staging_upload_image(MopRhiDevice *dev, VkImage image,
           },
       .imageExtent = {width, height, 1},
   };
-  vkCmdCopyBufferToImage(cb, dev->staging_buf, image,
+  vkCmdCopyBufferToImage(cb, upl_buf, image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
   /* Transition to SHADER_READ_ONLY */
@@ -159,6 +186,12 @@ static void staging_upload_image(MopRhiDevice *dev, VkImage image,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
   staging_submit_and_wait(dev, cb);
+
+  if (transient) {
+    vkUnmapMemory(dev->device, upl_mem);
+    vkDestroyBuffer(dev->device, upl_buf, NULL);
+    vkFreeMemory(dev->device, upl_mem, NULL);
+  }
 }
 
 /* =========================================================================
@@ -1338,7 +1371,13 @@ postprocess_done:
                                                     &dev->tonemap_render_pass);
     if (tr != VK_SUCCESS) {
       MOP_WARN("[VK] tonemap render pass failed: %d", tr);
-    } else {
+    }
+    VkResult tr2 = mop_vk_create_tonemap_render_pass_taa(
+        dev->device, &dev->tonemap_render_pass_taa);
+    if (tr2 != VK_SUCCESS) {
+      MOP_WARN("[VK] tonemap render pass (TAA variant) failed: %d", tr2);
+    }
+    if (tr == VK_SUCCESS) {
       /* Descriptor set layout: HDR + bloom[0..4] + SSAO + SSR (8 samplers).
        * Multi-level bloom is combined directly in the tonemap shader to
        * avoid a separate upsample chain (TBDR issues on MoltenVK). */
@@ -1767,6 +1806,78 @@ ssao_done:
       dev->skybox_pipeline = mop_vk_create_skybox_pipeline(dev);
       if (dev->skybox_pipeline) {
         MOP_INFO("[VK] skybox pipeline created");
+      }
+    }
+  }
+#endif
+
+  /* ---- GPU skinning compute pipeline (scaffolding) ----
+   * Creates a compute pipeline + descriptor layout for mop_skin.comp.
+   * Only activates if the shader was compiled into vulkan_shaders.h.
+   * The dispatch helper is in vulkan_pipeline.c; actual wiring into
+   * mop_skin_apply() is pending (see docs/TODO.md). */
+#if defined(MOP_VK_HAS_SKIN_SHADER)
+  {
+    dev->skin_comp = create_shader_module(dev->device, mop_skin_comp_spv,
+                                          mop_skin_comp_spv_size);
+    if (dev->skin_comp) {
+      /* 3 SSBO bindings: bind-pose, output, bone matrices */
+      VkDescriptorSetLayoutBinding skin_b[3] = {
+          {.binding = 0,
+           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+           .descriptorCount = 1,
+           .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+          {.binding = 1,
+           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+           .descriptorCount = 1,
+           .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+          {.binding = 2,
+           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+           .descriptorCount = 1,
+           .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+      };
+      VkDescriptorSetLayoutCreateInfo dsl_ci = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+          .bindingCount = 3,
+          .pBindings = skin_b,
+      };
+      vkCreateDescriptorSetLayout(dev->device, &dsl_ci, NULL,
+                                  &dev->skin_desc_layout);
+
+      VkPushConstantRange skin_pc = {
+          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+          .offset = 0,
+          .size = 32, /* 8 × u32 */
+      };
+      VkPipelineLayoutCreateInfo pl_ci = {
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+          .setLayoutCount = 1,
+          .pSetLayouts = &dev->skin_desc_layout,
+          .pushConstantRangeCount = 1,
+          .pPushConstantRanges = &skin_pc,
+      };
+      vkCreatePipelineLayout(dev->device, &pl_ci, NULL,
+                             &dev->skin_pipeline_layout);
+
+      if (dev->skin_desc_layout && dev->skin_pipeline_layout) {
+        VkComputePipelineCreateInfo cp_ci = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = {.sType =
+                          VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                      .module = dev->skin_comp,
+                      .pName = "main"},
+            .layout = dev->skin_pipeline_layout,
+        };
+        VkResult sr =
+            vkCreateComputePipelines(dev->device, dev->vk_pipeline_cache, 1,
+                                     &cp_ci, NULL, &dev->skin_pipeline);
+        if (sr == VK_SUCCESS) {
+          dev->skin_enabled = true;
+          MOP_INFO("[VK] skin compute pipeline created");
+        } else {
+          MOP_WARN("[VK] skin compute pipeline creation failed: %d", sr);
+        }
       }
     }
   }
@@ -2446,6 +2557,8 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyDescriptorSetLayout(d, dev->tonemap_desc_layout, NULL);
     if (dev->tonemap_render_pass)
       vkDestroyRenderPass(d, dev->tonemap_render_pass, NULL);
+    if (dev->tonemap_render_pass_taa)
+      vkDestroyRenderPass(d, dev->tonemap_render_pass_taa, NULL);
     if (dev->tonemap_frag)
       vkDestroyShaderModule(d, dev->tonemap_frag, NULL);
 
@@ -2520,6 +2633,16 @@ static void vk_device_destroy(MopRhiDevice *dev) {
       vkDestroyDescriptorSetLayout(d, dev->skybox_desc_layout, NULL);
     if (dev->skybox_frag)
       vkDestroyShaderModule(d, dev->skybox_frag, NULL);
+
+    /* Skin compute cleanup */
+    if (dev->skin_pipeline)
+      vkDestroyPipeline(d, dev->skin_pipeline, NULL);
+    if (dev->skin_pipeline_layout)
+      vkDestroyPipelineLayout(d, dev->skin_pipeline_layout, NULL);
+    if (dev->skin_desc_layout)
+      vkDestroyDescriptorSetLayout(d, dev->skin_desc_layout, NULL);
+    if (dev->skin_comp)
+      vkDestroyShaderModule(d, dev->skin_comp, NULL);
 
     /* Overlay cleanup */
     if (dev->overlay_pipeline)
@@ -6027,11 +6150,16 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
   /* Phase 7: async compute semaphore wait is for future use with same-frame
    * indirect draw. With temporal (1-frame-behind) culling, no wait needed. */
 
-  /* Track indirect draw readiness -- need 1 frame of cull data first */
-  if (dev->gpu_culling_enabled && fb->output_draw_cmds) {
+  /* Track indirect draw readiness. Gated on host request — auto-flipping
+   * was too eager (the real render path isn't wired to consume it yet). */
+  if (dev->indirect_draw_requested && dev->gpu_culling_enabled &&
+      fb->output_draw_cmds) {
     dev->indirect_draw_frame_count++;
     if (dev->indirect_draw_frame_count >= 2)
       dev->indirect_draw_enabled = true;
+  } else {
+    dev->indirect_draw_frame_count = 0;
+    dev->indirect_draw_enabled = false;
   }
 
   /* ---- Indirect draw from temporal GPU cull results (Phase 4) ----
@@ -7264,7 +7392,10 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       VkClearValue clear = {.color = {{0, 0, 0, 1}}};
       VkRenderPassBeginInfo rp_bi = {
           .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-          .renderPass = dev->tonemap_render_pass,
+          .renderPass =
+              (dev->taa_enabled && fb->taa_history[0] && fb->taa_framebuffer[0])
+                  ? dev->tonemap_render_pass_taa
+                  : dev->tonemap_render_pass,
           .framebuffer = fb->tonemap_framebuffer,
           .renderArea = {.extent = {(uint32_t)fb->width, (uint32_t)fb->height}},
           .clearValueCount = 1,
@@ -7303,15 +7434,11 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
       vkCmdDraw(dev->cmd_buf, 3, 1, 0, 0); /* fullscreen triangle */
 
       vkCmdEndRenderPass(dev->cmd_buf);
-      /* tonemap render pass transitions ldr_color_image to
-       * TRANSFER_SRC_OPTIMAL */
+      /* When TAA is active the TAA-variant render pass leaves ldr_color
+       * in SHADER_READ_ONLY_OPTIMAL; otherwise TRANSFER_SRC_OPTIMAL. */
     }
   }
   mop_vk_pass_timestamp_end(dev);
-
-  /* Phase 6 TODO: Merge tonemap + TAA into a single 2-subpass render pass.
-   * Currently they run as separate passes. Merging eliminates one tile
-   * flush + reload cycle on TBDR GPUs (Apple Silicon). */
 
   /* ---- TAA resolve pass: LDR + history + depth → taa_history[current] ---- */
   mop_vk_pass_timestamp_begin(dev, "taa");
@@ -7319,14 +7446,19 @@ static void vk_frame_end(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
     uint32_t cur = fb->taa_current;
     uint32_t prev = 1 - cur;
 
-    /* Transition LDR color: TRANSFER_SRC → SHADER_READ_ONLY (TAA reads it) */
-    mop_vk_transition_image(
-        dev->cmd_buf, fb->ldr_color_image, VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    /* Transition LDR color to SHADER_READ_ONLY for TAA sampling.
+     * When tonemap ran with the TAA pass variant, ldr_color is already in
+     * SHADER_READ_ONLY_OPTIMAL — skip the barrier (TBDR optimisation). */
+    bool tonemap_ran = dev->tonemap_enabled && fb->tonemap_framebuffer;
+    if (!tonemap_ran) {
+      mop_vk_transition_image(
+          dev->cmd_buf, fb->ldr_color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    }
 
     /* Transition depth: TRANSFER_SRC → SHADER_READ_ONLY */
     mop_vk_transition_image(
@@ -7680,6 +7812,167 @@ static const float *vk_framebuffer_read_depth(MopRhiDevice *dev,
 }
 
 /* =========================================================================
+ * Render-to-texture — blit LDR color into a host-owned texture.
+ *
+ * Uses vkCmdBlitImage: source is the framebuffer's ldr_color_image
+ * (R8G8B8A8_SRGB after tonemap + post-process), destination is the
+ * caller-supplied R8G8B8A8_UNORM texture.  Dimensions must match.
+ *
+ * Must be called AFTER `frame_end` so the LDR image is populated.
+ * ========================================================================= */
+
+static bool vk_framebuffer_copy_to_texture(MopRhiDevice *dev,
+                                           MopRhiFramebuffer *fb,
+                                           MopRhiTexture *target) {
+  if (!dev || !fb || !target || !target->image)
+    return false;
+  if (target->is_hdr) {
+    MOP_WARN("[VK] framebuffer_copy_to_texture: HDR target not supported");
+    return false;
+  }
+  /* Target is allowed to be smaller than fb; vkCmdBlitImage with
+   * VK_FILTER_LINEAR performs the SSAA-to-presentation downsample. */
+
+  VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+
+  /* Source: LDR color image transitions SHADER_READ_ONLY → TRANSFER_SRC. */
+  mop_vk_transition_image(
+      cb, fb->ldr_color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+  /* Target: UNDEFINED/SHADER_READ_ONLY → TRANSFER_DST. */
+  mop_vk_transition_image(
+      cb, target->image, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+  VkImageBlit blit = {
+      .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                         .layerCount = 1},
+      .srcOffsets = {{0, 0, 0}, {fb->width, fb->height, 1}},
+      .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                         .layerCount = 1},
+      .dstOffsets = {{0, 0, 0}, {target->width, target->height, 1}},
+  };
+  vkCmdBlitImage(cb, fb->ldr_color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 target->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                 VK_FILTER_LINEAR);
+
+  /* Restore layouts. */
+  mop_vk_transition_image(
+      cb, fb->ldr_color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+      VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+  mop_vk_transition_image(
+      cb, target->image, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+  staging_submit_and_wait(dev, cb);
+  return true;
+}
+
+/* =========================================================================
+ * Texture readback — copy an RGBA8 texture to a host-provided buffer via a
+ * transient staging buffer. Used for CPU-side frame capture / testing.
+ * For production GPU pipelines, prefer keeping pixels on GPU via
+ * vk_framebuffer_copy_to_texture and consuming the texture directly.
+ * ========================================================================= */
+
+static bool vk_texture_read_rgba8(MopRhiDevice *dev, MopRhiTexture *texture,
+                                  uint8_t *out_buf, size_t buf_size) {
+  if (!dev || !texture || !texture->image || !out_buf)
+    return false;
+  if (texture->is_hdr) {
+    MOP_WARN("[VK] texture_read_rgba8: HDR textures not supported");
+    return false;
+  }
+  size_t needed = (size_t)texture->width * (size_t)texture->height * 4;
+  if (buf_size < needed)
+    return false;
+
+  /* If the texture fits in the persistent staging buffer, reuse it to
+   * avoid an allocate/free cycle.  Otherwise allocate a transient
+   * host-visible buffer just for this readback — keeps the persistent
+   * staging small while still supporting 4K and beyond. */
+  VkBuffer read_buf = VK_NULL_HANDLE;
+  VkDeviceMemory read_mem = VK_NULL_HANDLE;
+  void *read_mapped = NULL;
+  bool transient = false;
+
+  if (needed <= MOP_VK_STAGING_SIZE) {
+    read_buf = dev->staging_buf;
+    read_mapped = dev->staging_mapped;
+  } else {
+    VkResult r = mop_vk_create_buffer(dev->device, &dev->mem_props, needed,
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      &read_buf, &read_mem);
+    if (r != VK_SUCCESS) {
+      MOP_ERROR("[VK] texture_read_rgba8: transient buffer create failed: %d",
+                r);
+      return false;
+    }
+    r = vkMapMemory(dev->device, read_mem, 0, needed, 0, &read_mapped);
+    if (r != VK_SUCCESS) {
+      vkDestroyBuffer(dev->device, read_buf, NULL);
+      vkFreeMemory(dev->device, read_mem, NULL);
+      MOP_ERROR("[VK] texture_read_rgba8: map failed: %d", r);
+      return false;
+    }
+    transient = true;
+  }
+
+  VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+
+  /* Transition SHADER_READ_ONLY → TRANSFER_SRC. */
+  mop_vk_transition_image(
+      cb, texture->image, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+  VkBufferImageCopy region = {
+      .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                           .layerCount = 1},
+      .imageExtent = {(uint32_t)texture->width, (uint32_t)texture->height, 1},
+  };
+  vkCmdCopyImageToBuffer(cb, texture->image,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, read_buf, 1,
+                         &region);
+
+  /* Restore layout. */
+  mop_vk_transition_image(
+      cb, texture->image, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+      VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+  staging_submit_and_wait(dev, cb);
+  memcpy(out_buf, read_mapped, needed);
+
+  if (transient) {
+    vkUnmapMemory(dev->device, read_mem);
+    vkDestroyBuffer(dev->device, read_buf, NULL);
+    vkFreeMemory(dev->device, read_mem, NULL);
+  }
+  return true;
+}
+
+/* =========================================================================
  * 14. pick_read_id
  * ========================================================================= */
 
@@ -7866,6 +8159,165 @@ static MopRhiTexture *vk_texture_create_hdr(MopRhiDevice *dev, int width,
     tex->bindless_index = -1;
   }
 
+  return tex;
+}
+
+/* =========================================================================
+ * 16c. texture_create_ex (compressed BC1/3/5/7 + RGBA8 passthrough)
+ * ========================================================================= */
+
+static VkFormat mop_tex_format_to_vk(int format) {
+  switch (format) {
+  case 0:
+    return VK_FORMAT_R8G8B8A8_UNORM; /* MOP_TEX_FORMAT_RGBA8 */
+  case 1:
+    return VK_FORMAT_BC1_RGB_UNORM_BLOCK; /* MOP_TEX_FORMAT_BC1 */
+  case 2:
+    return VK_FORMAT_BC3_UNORM_BLOCK; /* MOP_TEX_FORMAT_BC3 */
+  case 3:
+    return VK_FORMAT_BC5_UNORM_BLOCK; /* MOP_TEX_FORMAT_BC5 */
+  case 4:
+    return VK_FORMAT_BC7_UNORM_BLOCK; /* MOP_TEX_FORMAT_BC7 */
+  default:
+    return VK_FORMAT_UNDEFINED;
+  }
+}
+
+static MopRhiTexture *vk_texture_create_ex(MopRhiDevice *dev, int width,
+                                           int height, int format,
+                                           int mip_levels, const uint8_t *data,
+                                           size_t data_size) {
+  /* RGBA8: delegate to the standard path */
+  if (format == 0)
+    return vk_texture_create(dev, width, height, data);
+
+  VkFormat vk_fmt = mop_tex_format_to_vk(format);
+  if (vk_fmt == VK_FORMAT_UNDEFINED) {
+    MOP_WARN("[VK] texture_create_ex: unsupported format %d", format);
+    return NULL;
+  }
+
+  /* Check BC texture compression support */
+  VkPhysicalDeviceFeatures feats;
+  vkGetPhysicalDeviceFeatures(dev->physical_device, &feats);
+  if (!feats.textureCompressionBC) {
+    MOP_WARN("[VK] texture_create_ex: BC texture compression not supported by "
+             "device");
+    return NULL;
+  }
+
+  if (!data || data_size == 0) {
+    MOP_WARN("[VK] texture_create_ex: NULL or empty data");
+    return NULL;
+  }
+
+  MopRhiTexture *tex = calloc(1, sizeof(MopRhiTexture));
+  if (!tex)
+    return NULL;
+
+  tex->width = width;
+  tex->height = height;
+  tex->bindless_index = -1;
+
+  VkResult r = mop_vk_create_image(
+      dev->device, &dev->mem_props, (uint32_t)width, (uint32_t)height, vk_fmt,
+      VK_SAMPLE_COUNT_1_BIT,
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &tex->image,
+      &tex->memory);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] texture_create_ex: image create failed: %d", r);
+    free(tex);
+    return NULL;
+  }
+
+  r = mop_vk_create_image_view(dev->device, tex->image, vk_fmt,
+                               VK_IMAGE_ASPECT_COLOR_BIT, &tex->view);
+  if (r != VK_SUCCESS) {
+    MOP_ERROR("[VK] texture_create_ex: view create failed: %d", r);
+    vkDestroyImage(dev->device, tex->image, NULL);
+    vkFreeMemory(dev->device, tex->memory, NULL);
+    free(tex);
+    return NULL;
+  }
+
+  /* Upload compressed data via staging buffer (batched if needed) */
+  {
+    size_t remaining = data_size;
+    size_t src_offset = 0;
+
+    /* Transition to TRANSFER_DST once */
+    VkCommandBuffer cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+    mop_vk_transition_image(
+        cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    staging_submit_and_wait(dev, cb);
+
+    /* Upload in batches that fit the staging buffer */
+    while (remaining > 0) {
+      size_t batch = remaining;
+      if (batch > MOP_VK_STAGING_SIZE)
+        batch = MOP_VK_STAGING_SIZE;
+
+      memcpy(dev->staging_mapped, data + src_offset, batch);
+
+      cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+
+      /* For compressed formats, a single copy covering the whole mip 0.
+       * bufferRowLength/bufferImageHeight=0 means tightly packed. */
+      VkBufferImageCopy region = {
+          .bufferOffset = 0,
+          .bufferRowLength = (uint32_t)width,
+          .bufferImageHeight = (uint32_t)height,
+          .imageSubresource =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                  .layerCount = 1,
+              },
+          .imageExtent = {(uint32_t)width, (uint32_t)height, 1},
+      };
+
+      /* If uploading in one batch, use a single copy; otherwise
+       * we only support single-batch uploads for compressed data */
+      if (remaining == data_size && batch == remaining) {
+        vkCmdCopyBufferToImage(cb, dev->staging_buf, tex->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                               &region);
+      } else {
+        /* Multi-batch: just copy what fits — for compressed textures
+         * this is best-effort (caller should ensure data_size <= staging) */
+        region.imageExtent.height = 1; /* partial upload fallback */
+        vkCmdCopyBufferToImage(cb, dev->staging_buf, tex->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                               &region);
+      }
+
+      staging_submit_and_wait(dev, cb);
+      src_offset += batch;
+      remaining -= batch;
+    }
+
+    /* Transition to SHADER_READ_ONLY */
+    cb = mop_vk_begin_oneshot(dev->device, dev->cmd_pool);
+    mop_vk_transition_image(
+        cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    staging_submit_and_wait(dev, cb);
+  }
+
+  /* Register in bindless texture array if descriptor indexing is available */
+  if (dev->has_descriptor_indexing &&
+      dev->texture_registry_count < MOP_VK_MAX_BINDLESS_TEXTURES) {
+    tex->bindless_index = (int32_t)dev->texture_registry_count;
+    dev->texture_registry[dev->texture_registry_count++] = tex->view;
+  } else {
+    tex->bindless_index = -1;
+  }
+
+  (void)mip_levels; /* TODO: per-mip upload for compressed mip chains */
   return tex;
 }
 
@@ -8640,6 +9092,27 @@ static void vk_shader_destroy(MopRhiDevice *dev, MopRhiShader *shader) {
   free(shader);
 }
 
+/* =========================================================================
+ * GPU-driven rendering toggle (scaffolding)
+ *
+ * Flips `indirect_draw_requested`, which the frame-end warm-up tracker
+ * consumes to promote the flag to `indirect_draw_enabled`. The main
+ * render path does not yet consume the enabled flag — the actual
+ * per-pipeline-bucket vkCmdDrawIndexedIndirectCount dispatch needs
+ * uber-shader + bindless + pipeline bucketing work (docs/TODO.md).
+ * Safe to toggle today; it just gates whether the warm-up counter runs.
+ * ========================================================================= */
+
+static void vk_set_gpu_driven_rendering(MopRhiDevice *dev, bool enabled) {
+  if (!dev)
+    return;
+  dev->indirect_draw_requested = enabled;
+  if (!enabled) {
+    dev->indirect_draw_enabled = false;
+    dev->indirect_draw_frame_count = 0;
+  }
+}
+
 static const MopRhiBackend VK_BACKEND = {
     .name = "vulkan",
     .device_create = vk_device_create,
@@ -8647,6 +9120,8 @@ static const MopRhiBackend VK_BACKEND = {
     .buffer_create = vk_buffer_create,
     .buffer_destroy = vk_buffer_destroy,
     .framebuffer_create = vk_framebuffer_create,
+    .framebuffer_create_from_texture =
+        NULL, /* TODO: wrap host VkImage as color attachment */
     .framebuffer_destroy = vk_framebuffer_destroy,
     .framebuffer_resize = vk_framebuffer_resize,
     .frame_begin = vk_frame_begin,
@@ -8660,6 +9135,7 @@ static const MopRhiBackend VK_BACKEND = {
     .framebuffer_read_depth = vk_framebuffer_read_depth,
     .texture_create = vk_texture_create,
     .texture_create_hdr = vk_texture_create_hdr,
+    .texture_create_ex = vk_texture_create_ex,
     .texture_destroy = vk_texture_destroy,
     .draw_instanced = vk_draw_instanced,
     .buffer_update = vk_buffer_update,
@@ -8680,6 +9156,9 @@ static const MopRhiBackend VK_BACKEND = {
     .draw_overlays = vk_draw_overlays,
     .shader_create = vk_shader_create,
     .shader_destroy = vk_shader_destroy,
+    .framebuffer_copy_to_texture = vk_framebuffer_copy_to_texture,
+    .texture_read_rgba8 = vk_texture_read_rgba8,
+    .set_gpu_driven_rendering = vk_set_gpu_driven_rendering,
 };
 
 const MopRhiBackend *mop_rhi_backend_vulkan(void) { return &VK_BACKEND; }

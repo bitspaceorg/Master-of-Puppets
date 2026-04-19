@@ -16,7 +16,7 @@ CC       ?= cc
 AR       ?= ar
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-unused-parameter -Wno-missing-field-initializers \
-            -fno-common \
+            -fno-common -fno-strict-aliasing \
             -Iinclude -Isrc -Ithird_party/stb -Ithird_party/tinyexr
 CXX      ?= c++
 CXXFLAGS := -std=c++11 -Wall -Wextra -Wno-unused-parameter \
@@ -41,6 +41,11 @@ endif
 ifeq ($(SANITIZE),ubsan)
 CFLAGS += -fsanitize=undefined -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=undefined
+endif
+ifeq ($(SANITIZE),tsan)
+CFLAGS += -fsanitize=thread -fno-omit-frame-pointer
+CXXFLAGS += -fsanitize=thread -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=thread
 endif
 endif
 
@@ -70,7 +75,6 @@ CORE_SRCS := \
   src/core/display.c \
   src/core/overlay.c \
   src/core/overlay_builtin.c \
-  src/core/subsystem.c \
   src/core/camera_object.c \
   src/core/environment.c \
   src/core/render_graph.c \
@@ -89,9 +93,7 @@ CORE_SRCS := \
   src/loader/gltf_loader.c \
   src/util/log.c \
   src/util/profile.c \
-  src/subsystem/particle.c \
-  src/subsystem/water.c \
-  src/subsystem/postprocess.c \
+  src/render/postprocess.c \
   src/query/query.c \
   src/query/camera_query.c \
   src/query/snapshot.c \
@@ -110,21 +112,6 @@ CORE_SRCS := \
 
 # C++ sources (tinyexr requires C++)
 CXX_SRCS := src/util/tinyexr_impl.cc
-
-# Lua config support — auto-detected via pkg-config, disable with MOP_DISABLE_LUA=1
-ifndef MOP_DISABLE_LUA
-  LUA_CFLAGS  := $(shell pkg-config --cflags lua5.4 2>/dev/null || \
-                          pkg-config --cflags luajit 2>/dev/null || \
-                          pkg-config --cflags lua 2>/dev/null)
-  LUA_LDFLAGS := $(shell pkg-config --libs lua5.4 2>/dev/null || \
-                          pkg-config --libs luajit 2>/dev/null || \
-                          pkg-config --libs lua 2>/dev/null)
-  HAS_LUA     := $(if $(LUA_LDFLAGS),1,)
-  ifeq ($(HAS_LUA),1)
-    CORE_SRCS += src/config/config.c
-    CFLAGS    += -DMOP_HAS_LUA=1 $(LUA_CFLAGS)
-  endif
-endif
 
 # Optional: OpenGL 3.3 backend (requires GL headers and libraries)
 ifdef MOP_ENABLE_OPENGL
@@ -192,10 +179,8 @@ obj_dirs:
 	@mkdir -p $(OBJ_DIR)/core
 	@mkdir -p $(OBJ_DIR)/rasterizer
 	@mkdir -p $(OBJ_DIR)/interact
-	@mkdir -p $(OBJ_DIR)/config
 	@mkdir -p $(OBJ_DIR)/loader
 	@mkdir -p $(OBJ_DIR)/util
-	@mkdir -p $(OBJ_DIR)/subsystem
 	@mkdir -p $(OBJ_DIR)/query
 	@mkdir -p $(OBJ_DIR)/export
 	@mkdir -p $(OBJ_DIR)/render

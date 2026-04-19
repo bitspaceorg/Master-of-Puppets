@@ -14,6 +14,7 @@ uint32_t mop_viewport_add_overlay(MopViewport *vp, const char *name,
   if (!vp || !draw_fn)
     return UINT32_MAX;
 
+  MOP_VP_LOCK(vp);
   /* Find a free slot after the built-in range */
   for (uint32_t i = MOP_OVERLAY_BUILTIN_COUNT; i < vp->overlay_count; i++) {
     if (!vp->overlays[i].active) {
@@ -22,6 +23,7 @@ uint32_t mop_viewport_add_overlay(MopViewport *vp, const char *name,
       vp->overlays[i].user_data = user_data;
       vp->overlays[i].active = true;
       vp->overlay_enabled[i] = true;
+      MOP_VP_UNLOCK(vp);
       return i;
     }
   }
@@ -30,13 +32,17 @@ uint32_t mop_viewport_add_overlay(MopViewport *vp, const char *name,
   if (vp->overlay_count >= vp->overlay_capacity) {
     uint32_t old_cap = vp->overlay_capacity;
     if (!mop_dyn_grow((void **)&vp->overlays, &vp->overlay_capacity,
-                      sizeof(MopOverlayEntry), MOP_INITIAL_OVERLAY_CAPACITY))
+                      sizeof(MopOverlayEntry), MOP_INITIAL_OVERLAY_CAPACITY)) {
+      MOP_VP_UNLOCK(vp);
       return UINT32_MAX;
+    }
     /* Grow the parallel overlay_enabled array to match */
     bool *new_enabled = realloc(vp->overlay_enabled,
                                 (size_t)vp->overlay_capacity * sizeof(bool));
-    if (!new_enabled)
+    if (!new_enabled) {
+      MOP_VP_UNLOCK(vp);
       return UINT32_MAX;
+    }
     memset(new_enabled + old_cap, 0,
            (size_t)(vp->overlay_capacity - old_cap) * sizeof(bool));
     vp->overlay_enabled = new_enabled;
@@ -48,22 +54,27 @@ uint32_t mop_viewport_add_overlay(MopViewport *vp, const char *name,
   vp->overlays[slot].user_data = user_data;
   vp->overlays[slot].active = true;
   vp->overlay_enabled[slot] = true;
+  MOP_VP_UNLOCK(vp);
   return slot;
 }
 
 void mop_viewport_remove_overlay(MopViewport *vp, uint32_t handle) {
   if (!vp || handle < MOP_OVERLAY_BUILTIN_COUNT || handle >= vp->overlay_count)
     return;
+  MOP_VP_LOCK(vp);
   vp->overlays[handle].active = false;
   vp->overlays[handle].draw_fn = NULL;
   vp->overlay_enabled[handle] = false;
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_set_overlay_enabled(MopViewport *vp, uint32_t id,
                                       bool enabled) {
   if (!vp || id >= vp->overlay_count)
     return;
+  MOP_VP_LOCK(vp);
   vp->overlay_enabled[id] = enabled;
+  MOP_VP_UNLOCK(vp);
 }
 
 bool mop_viewport_get_overlay_enabled(const MopViewport *vp, uint32_t id) {

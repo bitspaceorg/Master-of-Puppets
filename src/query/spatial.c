@@ -370,9 +370,9 @@ MopAABB mop_viewport_get_scene_aabb(const MopViewport *vp) {
 
   bool first = true;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (!is_scene_mesh(&vp->meshes[i]))
+    if (!is_scene_mesh(vp->meshes[i]))
       continue;
-    MopAABB mb = mop_mesh_get_aabb_world(&vp->meshes[i], vp);
+    MopAABB mb = mop_mesh_get_aabb_world(vp->meshes[i], vp);
     if (first) {
       scene = mb;
       first = false;
@@ -389,9 +389,9 @@ uint32_t mop_viewport_visible_mesh_count(const MopViewport *vp) {
   MopFrustum frustum = mop_viewport_get_frustum(vp);
   uint32_t count = 0;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (!is_scene_mesh(&vp->meshes[i]))
+    if (!is_scene_mesh(vp->meshes[i]))
       continue;
-    MopAABB wb = mop_mesh_get_aabb_world(&vp->meshes[i], vp);
+    MopAABB wb = mop_mesh_get_aabb_world(vp->meshes[i], vp);
     if (mop_frustum_test_aabb(&frustum, wb) >= 0)
       count++;
   }
@@ -410,7 +410,7 @@ MopRayHit mop_viewport_raycast_ray(const MopViewport *vp, MopRay ray) {
   float closest_t = FLT_MAX;
 
   for (uint32_t mi = 0; mi < vp->mesh_count; mi++) {
-    const struct MopMesh *mesh = &vp->meshes[mi];
+    const struct MopMesh *mesh = vp->meshes[mi];
     if (!is_scene_mesh(mesh))
       continue;
 

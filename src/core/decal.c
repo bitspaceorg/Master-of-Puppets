@@ -13,8 +13,11 @@ int32_t mop_viewport_add_decal(MopViewport *vp, const MopDecalDesc *desc) {
     return -1;
   if (!vp->rhi || !vp->device || !vp->rhi->add_decal)
     return -1;
-  return vp->rhi->add_decal(vp->device, desc->transform.d, desc->opacity,
-                            desc->texture_idx);
+  MOP_VP_LOCK(vp);
+  int32_t id = vp->rhi->add_decal(vp->device, desc->transform.d, desc->opacity,
+                                  desc->texture_idx);
+  MOP_VP_UNLOCK(vp);
+  return id;
 }
 
 void mop_viewport_remove_decal(MopViewport *vp, int32_t decal_id) {
@@ -22,7 +25,9 @@ void mop_viewport_remove_decal(MopViewport *vp, int32_t decal_id) {
     return;
   if (!vp->rhi || !vp->device || !vp->rhi->remove_decal)
     return;
+  MOP_VP_LOCK(vp);
   vp->rhi->remove_decal(vp->device, decal_id);
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_clear_decals(MopViewport *vp) {
@@ -30,5 +35,7 @@ void mop_viewport_clear_decals(MopViewport *vp) {
     return;
   if (!vp->rhi || !vp->device || !vp->rhi->clear_decals)
     return;
+  MOP_VP_LOCK(vp);
   vp->rhi->clear_decals(vp->device);
+  MOP_VP_UNLOCK(vp);
 }

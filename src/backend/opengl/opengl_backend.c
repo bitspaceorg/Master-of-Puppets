@@ -22,6 +22,8 @@
 #include "rhi/rhi.h"
 #include "shaders.h"
 
+#include <mop/util/log.h>
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -641,6 +643,68 @@ static const uint8_t *gl_framebuffer_read_color(MopRhiDevice *device,
 }
 
 /* -------------------------------------------------------------------------
+ * Render-to-texture — blit framebuffer color into a host-owned texture.
+ *
+ * Uses glBlitFramebuffer: source is the framebuffer's color FBO, dest is
+ * an FBO temporarily bound to the target texture. Handles both same-size
+ * (1:1) and SSAA-downsample cases via GL_LINEAR filtering. The Y axis is
+ * flipped during the blit so the host texture is top-left origin.
+ * ------------------------------------------------------------------------- */
+
+static bool gl_framebuffer_copy_to_texture(MopRhiDevice *device,
+                                           MopRhiFramebuffer *fb,
+                                           MopRhiTexture *target) {
+  (void)device;
+  if (!fb || !target || !target->tex_id)
+    return false;
+
+  /* Create a transient read+draw FBO pair for the blit. */
+  GLuint read_fbo = fb->fbo;
+  GLuint draw_fbo = 0;
+  glGenFramebuffers(1, &draw_fbo);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo);
+  glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                         GL_TEXTURE_2D, target->tex_id, 0);
+  if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+      GL_FRAMEBUFFER_COMPLETE) {
+    MOP_WARN("gl_framebuffer_copy_to_texture: draw FBO incomplete");
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &draw_fbo);
+    return false;
+  }
+
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+  /* Flip Y: source (0, h) → (w, 0) maps to dest (0, 0) → (tw, th). */
+  glBlitFramebuffer(0, fb->height, fb->width, 0, 0, 0, target->width,
+                    target->height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  glDeleteFramebuffers(1, &draw_fbo);
+  return true;
+}
+
+/* -------------------------------------------------------------------------
+ * Texture readback — copy an RGBA8 texture to a host buffer.
+ * ------------------------------------------------------------------------- */
+
+static bool gl_texture_read_rgba8(MopRhiDevice *device, MopRhiTexture *texture,
+                                  uint8_t *out_buf, size_t buf_size) {
+  (void)device;
+  if (!texture || !texture->tex_id || !out_buf)
+    return false;
+  size_t needed = (size_t)texture->width * (size_t)texture->height * 4;
+  if (buf_size < needed)
+    return false;
+  glBindTexture(GL_TEXTURE_2D, texture->tex_id);
+  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, out_buf);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  return true;
+}
+
+/* -------------------------------------------------------------------------
  * Texture management
  * ------------------------------------------------------------------------- */
 
@@ -684,6 +748,24 @@ static const void *gl_buffer_read(MopRhiBuffer *buffer) {
 }
 
 /* -------------------------------------------------------------------------
+ * Shader module stubs — GL custom shader compilation is not yet supported.
+ * These no-ops prevent NULL dereference in the shader plugin system.
+ * ------------------------------------------------------------------------- */
+
+static MopRhiShader *gl_shader_create(MopRhiDevice *dev,
+                                      const uint32_t *bytecode, size_t size) {
+  (void)dev;
+  (void)bytecode;
+  (void)size;
+  return NULL; /* SPIR-V not applicable to GL; would need GLSL path */
+}
+
+static void gl_shader_destroy(MopRhiDevice *dev, MopRhiShader *shader) {
+  (void)dev;
+  (void)shader;
+}
+
+/* -------------------------------------------------------------------------
  * Backend function table
  * ------------------------------------------------------------------------- */
 
@@ -694,6 +776,8 @@ static const MopRhiBackend GL_BACKEND = {
     .buffer_create = gl_buffer_create,
     .buffer_destroy = gl_buffer_destroy,
     .framebuffer_create = gl_framebuffer_create,
+    .framebuffer_create_from_texture =
+        NULL, /* TODO: wrap host GLuint texture as color attachment */
     .framebuffer_destroy = gl_framebuffer_destroy,
     .framebuffer_resize = gl_framebuffer_resize,
     .frame_begin = gl_frame_begin,
@@ -704,12 +788,17 @@ static const MopRhiBackend GL_BACKEND = {
     .pick_read_depth = gl_pick_read_depth,
     .framebuffer_read_color = gl_framebuffer_read_color,
     .texture_create = gl_texture_create,
+    .texture_create_ex = NULL, /* BC formats not yet supported in GL */
     .texture_destroy = gl_texture_destroy,
     .draw_instanced = gl_draw_instanced,
     .buffer_update = gl_buffer_update,
     .buffer_read = gl_buffer_read,
-    .shader_create = NULL,  /* TODO: implement for GL */
-    .shader_destroy = NULL, /* TODO: implement for GL */
+    .shader_create = gl_shader_create,
+    .shader_destroy = gl_shader_destroy,
+    .framebuffer_copy_to_texture = gl_framebuffer_copy_to_texture,
+    .texture_read_rgba8 = gl_texture_read_rgba8,
+    .set_gpu_driven_rendering =
+        NULL, /* TODO: glMultiDrawElementsIndirectCount */
 };
 
 const MopRhiBackend *mop_rhi_backend_opengl(void) { return &GL_BACKEND; }

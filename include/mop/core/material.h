@@ -15,12 +15,12 @@ typedef struct MopTexture MopTexture;
 typedef struct MopMesh MopMesh;
 
 typedef struct MopMaterial {
-  MopColor base_color;
-  float metallic;
-  float roughness;
-  MopVec3 emissive;
-  MopTexture *albedo_map;
-  MopTexture *normal_map;
+  MopColor base_color;    /* sRGB base color (linear in shader) */
+  float metallic;         /* 0.0 = dielectric, 1.0 = metal */
+  float roughness;        /* 0.0 = mirror, 1.0 = diffuse */
+  MopVec3 emissive;       /* HDR emission color (linear, additive) */
+  MopTexture *albedo_map; /* sRGB base color texture (optional) */
+  MopTexture *normal_map; /* tangent-space normal map (optional) */
   MopTexture *metallic_roughness_map; /* glTF: G=roughness, B=metallic */
   MopTexture *ao_map;                 /* R channel = ambient occlusion */
 } MopMaterial;

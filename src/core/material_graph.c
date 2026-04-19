@@ -5,7 +5,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "core/viewport_internal.h"
+
+#include <math.h>
 #include <mop/core/material_graph.h>
+#include <mop/core/texture_pipeline.h>
 #include <mop/util/log.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -647,6 +651,392 @@ bool mop_mat_graph_from_json(MopMaterialGraph *graph, const char *json) {
   }
 
   return graph->node_count > 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Graph compilation — evaluate DAG into flat MopMaterial
+ *
+ * Walks backward from the output node (index 0), evaluates each upstream
+ * node recursively, and folds constant/math operations.  Texture sample
+ * nodes resolve paths through the viewport's texture pipeline cache.
+ *
+ * Output node input slots:
+ *   0 = base_color (vec4: RGBA)
+ *   1 = metallic   (float)
+ *   2 = roughness  (float)
+ *   3 = normal     (vec3 — stored as texture reference)
+ *   4 = emissive   (vec3)
+ *   5 = ao         (float — stored as texture reference)
+ * ------------------------------------------------------------------------- */
+
+/* Intermediate evaluation result */
+typedef enum EvalType {
+  EVAL_FLOAT,
+  EVAL_VEC3,
+  EVAL_VEC4,
+  EVAL_TEXTURE,
+} EvalType;
+
+typedef struct EvalResult {
+  EvalType type;
+  union {
+    float f;
+    float v3[3];
+    float v4[4];
+    MopTexture *tex;
+  };
+} EvalResult;
+
+/* Find the connection feeding dst_node:dst_input.
+ * Returns the connection index, or -1 if no connection. */
+static int find_connection(const MopMaterialGraph *graph, uint32_t dst_node,
+                           uint32_t dst_input) {
+  for (uint32_t i = 0; i < graph->connection_count; i++) {
+    if (graph->connections[i].dst_node == dst_node &&
+        graph->connections[i].dst_input == dst_input)
+      return (int)i;
+  }
+  return -1;
+}
+
+/* Evaluation context passed through recursion to avoid per-call allocations */
+typedef struct EvalCtx {
+  bool *on_stack;    /* cycle detection: true if node is an ancestor */
+  EvalResult *cache; /* result cache: one per node (avoids DAG re-eval) */
+  bool *cached;      /* true if cache[i] is valid */
+} EvalCtx;
+
+/* Helper: evaluate an input connection of a node.
+ * Returns a default EvalResult if no connection exists. */
+static EvalResult eval_input(const MopMaterialGraph *graph, MopViewport *vp,
+                             uint32_t node_idx, uint32_t input_slot,
+                             EvalCtx *ctx, EvalResult fallback);
+
+/* Recursive node evaluation with cycle detection and result caching.
+ *
+ * on_stack tracks ancestors in the current recursion path.  A node is
+ * marked true on entry and false on exit, so DAG nodes reachable from
+ * multiple paths don't produce false cycle reports, but actual back-edges
+ * (A→B→A) are caught because the ancestor is still marked true.
+ *
+ * The result cache avoids re-evaluating DAG nodes reached from multiple
+ * paths — each node is evaluated at most once per compile call. */
+static EvalResult eval_node(const MopMaterialGraph *graph, MopViewport *vp,
+                            uint32_t node_idx, uint32_t output_slot,
+                            EvalCtx *ctx) {
+  EvalResult r = {.type = EVAL_FLOAT, .f = 0.0f};
+
+  if (node_idx >= graph->node_count)
+    return r;
+  if (ctx->on_stack[node_idx]) {
+    MOP_WARN("mop_mat_graph_compile: cycle detected at node %u", node_idx);
+    return r;
+  }
+
+  /* Return cached result if this node was already evaluated */
+  if (ctx->cached[node_idx])
+    return ctx->cache[node_idx];
+
+  ctx->on_stack[node_idx] = true;
+  const MopMatNode *node = &graph->nodes[node_idx];
+
+  switch (node->type) {
+  case MOP_MAT_NODE_CONSTANT_FLOAT:
+    r.type = EVAL_FLOAT;
+    r.f = node->params.constant_float.value;
+    break;
+
+  case MOP_MAT_NODE_CONSTANT_VEC3:
+    r.type = EVAL_VEC3;
+    r.v3[0] = node->params.constant_vec3.rgb[0];
+    r.v3[1] = node->params.constant_vec3.rgb[1];
+    r.v3[2] = node->params.constant_vec3.rgb[2];
+    break;
+
+  case MOP_MAT_NODE_CONSTANT_VEC4:
+    r.type = EVAL_VEC4;
+    r.v4[0] = node->params.constant_vec4.rgba[0];
+    r.v4[1] = node->params.constant_vec4.rgba[1];
+    r.v4[2] = node->params.constant_vec4.rgba[2];
+    r.v4[3] = node->params.constant_vec4.rgba[3];
+    break;
+
+  case MOP_MAT_NODE_TEXTURE_SAMPLE: {
+    int32_t ti = node->params.texture_sample.texture_index;
+    if (ti >= 0 && (uint32_t)ti < graph->texture_count && vp) {
+      MopTexture *tex = mop_tex_load_async(vp, graph->texture_paths[ti]);
+      if (tex) {
+        r.type = EVAL_TEXTURE;
+        r.tex = tex;
+      }
+    }
+    break;
+  }
+
+  case MOP_MAT_NODE_NORMAL_MAP: {
+    /* Pass through the connected texture with strength metadata.
+     * Input 0 = texture connection. */
+    EvalResult fb = {.type = EVAL_FLOAT, .f = 0.0f};
+    r = eval_input(graph, vp, node_idx, 0, ctx, fb);
+    break;
+  }
+
+  case MOP_MAT_NODE_MIX: {
+    /* mix(A, B, factor) — inputs: 0=A, 1=B, 2=factor (optional) */
+    EvalResult fa = {.type = EVAL_FLOAT, .f = 0.0f};
+    EvalResult fb = {.type = EVAL_FLOAT, .f = 0.0f};
+    EvalResult ff = {.type = EVAL_FLOAT, .f = node->params.mix.factor};
+
+    EvalResult a = eval_input(graph, vp, node_idx, 0, ctx, fa);
+    EvalResult b = eval_input(graph, vp, node_idx, 1, ctx, fb);
+    EvalResult fr = eval_input(graph, vp, node_idx, 2, ctx, ff);
+    float factor = (fr.type == EVAL_FLOAT) ? fr.f : node->params.mix.factor;
+
+    /* Interpolate based on types */
+    if (a.type == EVAL_VEC3 || b.type == EVAL_VEC3) {
+      r.type = EVAL_VEC3;
+      float av[3] = {0, 0, 0}, bv[3] = {0, 0, 0};
+      if (a.type == EVAL_VEC3)
+        memcpy(av, a.v3, sizeof(av));
+      else if (a.type == EVAL_FLOAT) {
+        av[0] = av[1] = av[2] = a.f;
+      }
+      if (b.type == EVAL_VEC3)
+        memcpy(bv, b.v3, sizeof(bv));
+      else if (b.type == EVAL_FLOAT) {
+        bv[0] = bv[1] = bv[2] = b.f;
+      }
+      for (int i = 0; i < 3; i++)
+        r.v3[i] = av[i] * (1.0f - factor) + bv[i] * factor;
+    } else {
+      r.type = EVAL_FLOAT;
+      r.f = a.f * (1.0f - factor) + b.f * factor;
+    }
+    break;
+  }
+
+  case MOP_MAT_NODE_MULTIPLY: {
+    /* A * B — inputs: 0=A, 1=B */
+    EvalResult fa = {.type = EVAL_FLOAT, .f = 1.0f};
+    EvalResult fb = {.type = EVAL_FLOAT, .f = 1.0f};
+
+    EvalResult a = eval_input(graph, vp, node_idx, 0, ctx, fa);
+    EvalResult b = eval_input(graph, vp, node_idx, 1, ctx, fb);
+
+    if (a.type == EVAL_VEC3 || b.type == EVAL_VEC3) {
+      r.type = EVAL_VEC3;
+      float av[3], bv[3];
+      if (a.type == EVAL_VEC3)
+        memcpy(av, a.v3, sizeof(av));
+      else {
+        av[0] = av[1] = av[2] = a.f;
+      }
+      if (b.type == EVAL_VEC3)
+        memcpy(bv, b.v3, sizeof(bv));
+      else {
+        bv[0] = bv[1] = bv[2] = b.f;
+      }
+      for (int i = 0; i < 3; i++)
+        r.v3[i] = av[i] * bv[i];
+    } else {
+      r.type = EVAL_FLOAT;
+      r.f = a.f * b.f;
+    }
+    break;
+  }
+
+  case MOP_MAT_NODE_ADD: {
+    /* A + B — inputs: 0=A, 1=B */
+    EvalResult fa = {.type = EVAL_FLOAT, .f = 0.0f};
+    EvalResult fb = {.type = EVAL_FLOAT, .f = 0.0f};
+
+    EvalResult a = eval_input(graph, vp, node_idx, 0, ctx, fa);
+    EvalResult b = eval_input(graph, vp, node_idx, 1, ctx, fb);
+
+    if (a.type == EVAL_VEC3 || b.type == EVAL_VEC3) {
+      r.type = EVAL_VEC3;
+      float av[3] = {0, 0, 0}, bv[3] = {0, 0, 0};
+      if (a.type == EVAL_VEC3)
+        memcpy(av, a.v3, sizeof(av));
+      else {
+        av[0] = av[1] = av[2] = a.f;
+      }
+      if (b.type == EVAL_VEC3)
+        memcpy(bv, b.v3, sizeof(bv));
+      else {
+        bv[0] = bv[1] = bv[2] = b.f;
+      }
+      for (int i = 0; i < 3; i++)
+        r.v3[i] = av[i] + bv[i];
+    } else {
+      r.type = EVAL_FLOAT;
+      r.f = a.f + b.f;
+    }
+    break;
+  }
+
+  case MOP_MAT_NODE_FRESNEL: {
+    /* Schlick F0 from IOR: F0 = ((ior-1)/(ior+1))^2 */
+    float ior = node->params.fresnel.ior;
+    if (ior <= 0.0f)
+      ior = 1.5f;
+    float f0 = (ior - 1.0f) / (ior + 1.0f);
+    f0 = f0 * f0;
+    r.type = EVAL_FLOAT;
+    r.f = f0;
+    break;
+  }
+
+  case MOP_MAT_NODE_UV_TRANSFORM: {
+    /* UV transform modifies texture coordinates — pass through input 0
+     * so the upstream texture/value propagates to the output. */
+    EvalResult fb = {.type = EVAL_FLOAT, .f = 0.0f};
+    r = eval_input(graph, vp, node_idx, 0, ctx, fb);
+    break;
+  }
+
+  case MOP_MAT_NODE_VERTEX_COLOR:
+    /* Vertex colors are runtime — return white as compile-time fallback */
+    r.type = EVAL_VEC4;
+    r.v4[0] = r.v4[1] = r.v4[2] = r.v4[3] = 1.0f;
+    break;
+
+  case MOP_MAT_NODE_OUTPUT:
+    /* Output node shouldn't be evaluated directly — skip */
+    break;
+
+  case MOP_MAT_NODE_COUNT:
+    break;
+  }
+
+  ctx->on_stack[node_idx] = false;
+
+  /* Cache result for DAG reuse */
+  ctx->cache[node_idx] = r;
+  ctx->cached[node_idx] = true;
+
+  return r;
+}
+
+/* Evaluate a specific input slot of a node via its connection.
+ * Returns fallback if no connection exists for that slot. */
+static EvalResult eval_input(const MopMaterialGraph *graph, MopViewport *vp,
+                             uint32_t node_idx, uint32_t input_slot,
+                             EvalCtx *ctx, EvalResult fallback) {
+  int ci = find_connection(graph, node_idx, input_slot);
+  if (ci < 0)
+    return fallback;
+  const MopMatConnection *c = &graph->connections[ci];
+  return eval_node(graph, vp, c->src_node, c->src_output, ctx);
+}
+
+/* Helper: clamp float to [0,1] */
+static float clamp01(float x) {
+  return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+}
+
+bool mop_mat_graph_compile(MopMaterialGraph *graph, MopViewport *vp,
+                           MopMaterial *out_material) {
+  if (!graph || !out_material) {
+    if (out_material)
+      memset(out_material, 0, sizeof(*out_material));
+    return false;
+  }
+
+  /* Start with defaults */
+  *out_material = mop_material_default();
+
+  if (graph->node_count == 0 || graph->nodes[0].type != MOP_MAT_NODE_OUTPUT) {
+    MOP_WARN("mop_mat_graph_compile: no output node at index 0");
+    return false;
+  }
+
+  /* Allocate evaluation context — single allocation for all three arrays */
+  size_t nc = graph->node_count;
+  EvalCtx ctx;
+  ctx.on_stack = calloc(nc, sizeof(bool));
+  ctx.cache = calloc(nc, sizeof(EvalResult));
+  ctx.cached = calloc(nc, sizeof(bool));
+  if (!ctx.on_stack || !ctx.cache || !ctx.cached) {
+    free(ctx.on_stack);
+    free(ctx.cache);
+    free(ctx.cached);
+    return false;
+  }
+
+  /* Evaluate each output input slot.  on_stack is zeroed between slots
+   * because each slot is an independent evaluation root — no recursion
+   * is active between them.  The result cache persists across slots so
+   * nodes shared by multiple outputs are evaluated only once. */
+  for (uint32_t slot = 0; slot < 6; slot++) {
+    int ci = find_connection(graph, 0, slot);
+    if (ci < 0)
+      continue; /* no connection to this slot — use default */
+
+    const MopMatConnection *conn = &graph->connections[ci];
+    memset(ctx.on_stack, 0, nc * sizeof(bool));
+    EvalResult r = eval_node(graph, vp, conn->src_node, conn->src_output, &ctx);
+
+    switch (slot) {
+    case 0: /* base_color */
+      if (r.type == EVAL_TEXTURE) {
+        out_material->albedo_map = r.tex;
+      } else if (r.type == EVAL_VEC4) {
+        out_material->base_color = (MopColor){
+            .r = clamp01(r.v4[0]),
+            .g = clamp01(r.v4[1]),
+            .b = clamp01(r.v4[2]),
+            .a = clamp01(r.v4[3]),
+        };
+      } else if (r.type == EVAL_VEC3) {
+        out_material->base_color = (MopColor){
+            .r = clamp01(r.v3[0]),
+            .g = clamp01(r.v3[1]),
+            .b = clamp01(r.v3[2]),
+            .a = 1.0f,
+        };
+      }
+      break;
+
+    case 1: /* metallic */
+      if (r.type == EVAL_TEXTURE) {
+        out_material->metallic_roughness_map = r.tex;
+      } else if (r.type == EVAL_FLOAT) {
+        out_material->metallic = clamp01(r.f);
+      }
+      break;
+
+    case 2: /* roughness */
+      if (r.type == EVAL_FLOAT)
+        out_material->roughness = clamp01(r.f);
+      break;
+
+    case 3: /* normal */
+      if (r.type == EVAL_TEXTURE)
+        out_material->normal_map = r.tex;
+      break;
+
+    case 4: /* emissive */
+      if (r.type == EVAL_VEC3) {
+        out_material->emissive =
+            (MopVec3){.x = r.v3[0], .y = r.v3[1], .z = r.v3[2]};
+      } else if (r.type == EVAL_FLOAT) {
+        out_material->emissive = (MopVec3){.x = r.f, .y = r.f, .z = r.f};
+      }
+      break;
+
+    case 5: /* ao */
+      if (r.type == EVAL_TEXTURE)
+        out_material->ao_map = r.tex;
+      break;
+    }
+  }
+
+  free(ctx.on_stack);
+  free(ctx.cache);
+  free(ctx.cached);
+  graph->compiled = true;
+  return true;
 }
 
 /* -------------------------------------------------------------------------

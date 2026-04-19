@@ -107,13 +107,23 @@ typedef struct MopRhiDrawCall {
 /* -------------------------------------------------------------------------
  * Backend function table
  *
- * Every backend must populate every function pointer.  NULL entries are
- * invalid and will cause the viewport to reject the backend at creation.
+ * Functions fall into two groups:
+ *
+ *   Mandatory  — device lifecycle, buffer/framebuffer/texture management,
+ *                frame_begin/frame_end/draw, all readbacks, buffer_read.
+ *                The viewport invokes these unconditionally; a backend that
+ *                leaves any of them NULL will crash at first render.
+ *
+ *   Optional   — every set_* effect hook (bloom, ssao, ssr, oit, volumetric,
+ *                taa, ibl, exposure), decal operations, draw_skybox,
+ *                draw_overlays, frame_submit, frame_gpu_time_ms,
+ *                texture_create_ex, texture_create_hdr, shader_create,
+ *                shader_destroy, framebuffer_copy_to_texture. Every
+ *                caller guards these with a NULL check; a backend may
+ *                leave them NULL if the feature is unsupported (CPU
+ *                backend does this for GPU-only effects).
  * ------------------------------------------------------------------------- */
 
-/* All function pointers in this table MUST be non-NULL.  The viewport
- * core calls them unconditionally.  Backends must provide complete
- * implementations for all functions. */
 typedef struct MopRhiBackend {
   const char *name;
 
@@ -132,6 +142,14 @@ typedef struct MopRhiBackend {
   void (*framebuffer_destroy)(MopRhiDevice *device, MopRhiFramebuffer *fb);
   void (*framebuffer_resize)(MopRhiDevice *device, MopRhiFramebuffer *fb,
                              int width, int height);
+
+  /* Create a framebuffer that wraps a host-owned color texture. Depth
+   * and picking attachments remain backend-internal. The host retains
+   * ownership of `color` — MOP will not destroy it. Optional — NULL if
+   * the backend doesn't support external color targets. */
+  MopRhiFramebuffer *(*framebuffer_create_from_texture)(MopRhiDevice *device,
+                                                        MopRhiTexture *color,
+                                                        int width, int height);
 
   /* Frame commands */
   void (*frame_begin)(MopRhiDevice *device, MopRhiFramebuffer *fb,
@@ -169,6 +187,17 @@ typedef struct MopRhiBackend {
   MopRhiTexture *(*texture_create_hdr)(MopRhiDevice *device, int width,
                                        int height,
                                        const float *rgba_float_data);
+
+  /* Extended texture creation with format, mip count, and data size.
+   * For compressed formats (BC1/3/5/7), data is pre-compressed blocks.
+   * format: MopTexFormat enum value.
+   * mip_levels: number of mip levels in data (0 = single level).
+   * data_size: total byte size of data buffer.
+   * Returns NULL if the format is unsupported by the backend. */
+  MopRhiTexture *(*texture_create_ex)(MopRhiDevice *device, int width,
+                                      int height, int format, int mip_levels,
+                                      const uint8_t *data, size_t data_size);
+
   void (*texture_destroy)(MopRhiDevice *device, MopRhiTexture *texture);
 
   /* Instanced drawing (Phase 6B) */
@@ -265,6 +294,34 @@ typedef struct MopRhiBackend {
   MopRhiShader *(*shader_create)(MopRhiDevice *dev, const uint32_t *bytecode,
                                  size_t size);
   void (*shader_destroy)(MopRhiDevice *dev, MopRhiShader *shader);
+
+  /* Copy the color attachment of `fb` into `target` (a host-owned RHI
+   * texture, RGBA8). `fb` and `target` must have matching dimensions.
+   * Returns true on success.
+   *
+   * Used to implement host-framebuffer / render-to-texture: the host
+   * creates a texture, the viewport renders into its own framebuffer,
+   * and the backend blits the result into the host's texture for
+   * compositing. Optional — NULL if the backend doesn't support it. */
+  bool (*framebuffer_copy_to_texture)(MopRhiDevice *dev, MopRhiFramebuffer *fb,
+                                      MopRhiTexture *target);
+
+  /* Read RGBA8 pixels from a texture into a caller-provided buffer.
+   * `buf_size` must be at least width*height*4. Returns true on success.
+   *
+   * Cheap on CPU backend (direct memcpy from tex->data).  GPU backends
+   * require a readback staging buffer and a blocking submit; may be
+   * left NULL if unsupported. Hosts that want GPU-resident output
+   * should use framebuffer_copy_to_texture and keep pixels on GPU. */
+  bool (*texture_read_rgba8)(MopRhiDevice *dev, MopRhiTexture *texture,
+                             uint8_t *out_buf, size_t buf_size);
+
+  /* Request GPU-driven rendering (indirect draw + per-object SSBO
+   * feeding). Vulkan: enables the vkCmdDrawIndexedIndirectCount path.
+   * Other backends: NULL / no-op. Today this is scaffolding — the main
+   * render path still issues per-mesh draws; consuming the indirect
+   * buffer requires pipeline bucketing work (see docs/TODO.md). */
+  void (*set_gpu_driven_rendering)(MopRhiDevice *dev, bool enabled);
 } MopRhiBackend;
 
 /* -------------------------------------------------------------------------

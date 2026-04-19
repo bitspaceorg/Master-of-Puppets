@@ -1,0 +1,136 @@
+#version 450
+
+/*
+ * Master of Puppets — Vulkan Backend
+ * mop_skin.comp — Linear blend skinning compute shader
+ *
+ * For each vertex in the bind-pose buffer, looks up its 4 bone indices and
+ * 4 weights, computes the blended skinning matrix, and writes the
+ * transformed position + normal to the output vertex buffer.
+ *
+ * The shader is format-agnostic at the SSBO level — it reads position
+ * at offset pos_offset (float3), normal at norm_offset (float3), joints
+ * at joint_offset (4 × uint8 packed in uint), weights at weight_offset
+ * (float4), and writes back position + normal at the same offsets in the
+ * output buffer. Stride is caller-supplied. All other attributes are
+ * copied through untouched.
+ *
+ * Dispatch: ceil(vertex_count / 64) workgroups.
+ *
+ * Descriptor layout (set 0):
+ *   binding 0: readonly buffer   BindPose      (raw vertex bytes)
+ *   binding 1: readwrite buffer  Output        (raw vertex bytes)
+ *   binding 2: readonly buffer   BoneMatrices  (mat4[bone_count])
+ *
+ * Push constants (48 bytes):
+ *   uint vertex_count
+ *   uint stride         — bytes per vertex
+ *   uint pos_offset     — byte offset of position (float3)
+ *   uint norm_offset    — byte offset of normal (float3), 0xFFFFFFFF = absent
+ *   uint joint_offset   — byte offset of joints (uvec4 of u8 packed)
+ *   uint weight_offset  — byte offset of weights (float4)
+ *   uint bone_count
+ *   uint _pad
+ *
+ * NOTE: Unshipped — pipeline + descriptor layout are scaffolded in
+ * vulkan_backend.c but the dispatch helper is TODO. See docs/TODO.md.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer BindPose {
+    uint bind_pose[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer Output {
+    uint vout[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer BoneMatrices {
+    mat4 bones[];
+};
+
+layout(push_constant) uniform PC {
+    uint vertex_count;
+    uint stride;
+    uint pos_offset;
+    uint norm_offset;
+    uint joint_offset;
+    uint weight_offset;
+    uint bone_count;
+    uint _pad;
+} pc;
+
+vec3 load_vec3(uint byte_offset) {
+    uint u = byte_offset >> 2;
+    return vec3(uintBitsToFloat(bind_pose[u]),
+                uintBitsToFloat(bind_pose[u + 1]),
+                uintBitsToFloat(bind_pose[u + 2]));
+}
+
+vec4 load_vec4(uint byte_offset) {
+    uint u = byte_offset >> 2;
+    return vec4(uintBitsToFloat(bind_pose[u]),
+                uintBitsToFloat(bind_pose[u + 1]),
+                uintBitsToFloat(bind_pose[u + 2]),
+                uintBitsToFloat(bind_pose[u + 3]));
+}
+
+uvec4 load_joints_u8(uint byte_offset) {
+    /* 4 × u8 packed in one uint */
+    uint u = byte_offset >> 2;
+    uint packed = bind_pose[u];
+    return uvec4(packed & 0xFFu,
+                 (packed >> 8) & 0xFFu,
+                 (packed >> 16) & 0xFFu,
+                 (packed >> 24) & 0xFFu);
+}
+
+void store_vec3(uint byte_offset, vec3 v) {
+    uint u = byte_offset >> 2;
+    vout[u]     = floatBitsToUint(v.x);
+    vout[u + 1] = floatBitsToUint(v.y);
+    vout[u + 2] = floatBitsToUint(v.z);
+}
+
+void main() {
+    uint vi = gl_GlobalInvocationID.x;
+    if (vi >= pc.vertex_count) return;
+
+    uint v_base = vi * pc.stride;
+
+    /* First pass: copy the whole vertex through. */
+    uint dw_count = pc.stride >> 2;
+    for (uint d = 0; d < dw_count; d++)
+        vout[(v_base >> 2) + d] = bind_pose[(v_base >> 2) + d];
+
+    /* Load skinning inputs. */
+    vec3  pos     = load_vec3(v_base + pc.pos_offset);
+    uvec4 joints  = load_joints_u8(v_base + pc.joint_offset);
+    vec4  weights = load_vec4(v_base + pc.weight_offset);
+
+    /* Compute blended skin matrix. Clamp indices defensively. */
+    uint j0 = min(joints.x, pc.bone_count - 1u);
+    uint j1 = min(joints.y, pc.bone_count - 1u);
+    uint j2 = min(joints.z, pc.bone_count - 1u);
+    uint j3 = min(joints.w, pc.bone_count - 1u);
+
+    mat4 skin = bones[j0] * weights.x
+              + bones[j1] * weights.y
+              + bones[j2] * weights.z
+              + bones[j3] * weights.w;
+
+    vec3 new_pos = (skin * vec4(pos, 1.0)).xyz;
+    store_vec3(v_base + pc.pos_offset, new_pos);
+
+    /* Normal: transform by skin's 3x3, normalize.  No inverse-transpose —
+     * uniform bone scales only. For non-uniform scales a precomputed
+     * normal matrix per bone would be needed. */
+    if (pc.norm_offset != 0xFFFFFFFFu) {
+        vec3 n = load_vec3(v_base + pc.norm_offset);
+        vec3 new_n = normalize(mat3(skin) * n);
+        store_vec3(v_base + pc.norm_offset, new_n);
+    }
+}

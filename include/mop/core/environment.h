@@ -5,15 +5,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef MOP_ENVIRONMENT_H
-#define MOP_ENVIRONMENT_H
+#ifndef MOP_CORE_ENVIRONMENT_H
+#define MOP_CORE_ENVIRONMENT_H
 
 #include <mop/types.h>
 #include <stdbool.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
@@ -72,8 +68,4 @@ void mop_viewport_set_environment_background(MopViewport *vp, bool show);
 void mop_viewport_set_procedural_sky(MopViewport *vp,
                                      const MopProceduralSkyDesc *desc);
 
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* MOP_ENVIRONMENT_H */
+#endif /* MOP_CORE_ENVIRONMENT_H */

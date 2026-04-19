@@ -45,8 +45,9 @@ static void push_event(MopViewport *vp, MopEvent ev) {
 /* Find the MopMesh by object_id in the viewport's mesh array */
 static MopMesh *find_mesh_by_id(MopViewport *vp, uint32_t object_id) {
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    if (vp->meshes[i].active && vp->meshes[i].object_id == object_id)
-      return &vp->meshes[i];
+    MopMesh *m = vp->meshes[i];
+    if (m->active && m->object_id == object_id)
+      return m;
   }
   return NULL;
 }
@@ -166,6 +167,7 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
   if (!vp || !event)
     return;
 
+  MOP_VP_LOCK(vp);
   switch (event->type) {
 
   /* ----- Pointer down ----- */
@@ -487,6 +489,7 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
   case MOP_INPUT_EDIT_MODE_FACE:
     break;
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -496,11 +499,15 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
 bool mop_viewport_poll_event(MopViewport *vp, MopEvent *out) {
   if (!vp || !out)
     return false;
-  if (vp->event_head == vp->event_tail)
+  MOP_VP_LOCK(vp);
+  if (vp->event_head == vp->event_tail) {
+    MOP_VP_UNLOCK(vp);
     return false;
+  }
 
   *out = vp->events[vp->event_head];
   vp->event_head = (vp->event_head + 1) % (int)vp->event_capacity;
+  MOP_VP_UNLOCK(vp);
   return true;
 }
 

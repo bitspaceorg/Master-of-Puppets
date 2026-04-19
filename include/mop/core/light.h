@@ -27,6 +27,9 @@ typedef enum MopLightType {
  * Light descriptor
  * ------------------------------------------------------------------------- */
 
+/* Forward declaration */
+typedef struct MopViewport MopViewport;
+
 typedef struct MopLight {
   MopLightType type;
   MopVec3 position;     /* world space (point/spot) */
@@ -38,6 +41,12 @@ typedef struct MopLight {
   float spot_outer_cos; /* cos(outer_cone_angle) */
   bool active;
   bool cast_shadows; /* reserved for future use */
+
+  /* Viewport back-pointer: set by mop_viewport_add_light for the pool
+   * copy so setters (mop_light_set_position etc.) can auto-acquire the
+   * scene lock. Hosts stack-allocating a MopLight for the add_light call
+   * don't need to fill this — it's overwritten on copy into the pool. */
+  MopViewport *viewport;
 } MopLight;
 
 /* -------------------------------------------------------------------------
@@ -46,9 +55,6 @@ typedef struct MopLight {
  * Viewport 0 is always a directional light matching the legacy
  * mop_viewport_set_light_dir() / set_ambient() behavior.
  * ------------------------------------------------------------------------- */
-
-/* Forward declaration */
-typedef struct MopViewport MopViewport;
 
 /* Add a light to the viewport.  Returns pointer to the slot, or NULL
  * on allocation failure.  The viewport copies the descriptor. */

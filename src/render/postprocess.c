@@ -15,52 +15,6 @@
 #include <stdlib.h>
 
 /* -------------------------------------------------------------------------
- * Subsystem vtable — postprocess runs in POST_RENDER phase
- * ------------------------------------------------------------------------- */
-
-static void postprocess_subsys_update(MopSubsystem *self, MopViewport *vp,
-                                      float dt, float t);
-static void postprocess_subsys_destroy(MopSubsystem *self, MopViewport *vp);
-
-static const MopSubsystemVTable postprocess_vtable = {
-    .name = "postprocess",
-    .phase = MOP_SUBSYS_PHASE_POST_RENDER,
-    .update = postprocess_subsys_update,
-    .destroy = postprocess_subsys_destroy,
-};
-
-/* Thin wrapper — postprocess is stateless, only the base is needed */
-typedef struct MopPostProcessSubsystem {
-  MopSubsystem base;
-} MopPostProcessSubsystem;
-
-static void postprocess_subsys_update(MopSubsystem *self, MopViewport *vp,
-                                      float dt, float t) {
-  (void)self;
-  (void)dt;
-  (void)t;
-  if (vp->post_effects == 0 || vp->backend_type != MOP_BACKEND_CPU)
-    return;
-  MopSwFramebuffer *sw_fb = (MopSwFramebuffer *)vp->framebuffer;
-  mop_postprocess_apply(sw_fb, vp->post_effects, &vp->fog_params);
-}
-
-static void postprocess_subsys_destroy(MopSubsystem *self, MopViewport *vp) {
-  (void)vp;
-  free(self);
-}
-
-/* Called from viewport_create to auto-register postprocess subsystem */
-void mop_postprocess_register(MopViewport *vp) {
-  MopPostProcessSubsystem *pp = calloc(1, sizeof(MopPostProcessSubsystem));
-  if (!pp)
-    return;
-  pp->base.vtable = &postprocess_vtable;
-  pp->base.enabled = true;
-  mop_subsystem_register(&vp->subsystems, &pp->base);
-}
-
-/* -------------------------------------------------------------------------
  * Post-processing application
  *
  * Iterates all pixels in the framebuffer and applies the requested effects.
@@ -168,6 +122,7 @@ void mop_postprocess_apply(MopSwFramebuffer *fb, uint32_t effects,
 void mop_viewport_set_post_effects(MopViewport *viewport, uint32_t effects) {
   if (!viewport)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->post_effects = effects;
 
   /* Propagate bloom enable/disable to GPU backend */
@@ -209,17 +164,23 @@ void mop_viewport_set_post_effects(MopViewport *viewport, uint32_t effects) {
                                     viewport->volumetric_params.steps);
     }
   }
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_fog(MopViewport *viewport, const MopFogParams *fog) {
   if (!viewport || !fog)
     return;
+  MOP_VP_LOCK(viewport);
   viewport->fog_params = *fog;
+  MOP_VP_UNLOCK(viewport);
 }
 
 void mop_viewport_set_exposure(MopViewport *vp, float exposure) {
-  if (vp)
-    vp->exposure = exposure > 0.0f ? exposure : 0.001f;
+  if (!vp)
+    return;
+  MOP_VP_LOCK(vp);
+  vp->exposure = exposure > 0.0f ? exposure : 0.001f;
+  MOP_VP_UNLOCK(vp);
 }
 
 float mop_viewport_get_exposure(const MopViewport *vp) {
@@ -229,6 +190,7 @@ float mop_viewport_get_exposure(const MopViewport *vp) {
 void mop_viewport_set_ssr(MopViewport *vp, float intensity) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   vp->ssr_intensity = intensity > 0.0f ? intensity : 0.0f;
 
   /* Propagate to GPU backend */
@@ -236,12 +198,14 @@ void mop_viewport_set_ssr(MopViewport *vp, float intensity) {
     bool enabled = (vp->post_effects & MOP_POST_SSR) != 0;
     vp->rhi->set_ssr(vp->device, enabled, vp->ssr_intensity);
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_set_volumetric(MopViewport *vp,
                                  const MopVolumetricParams *params) {
   if (!vp || !params)
     return;
+  MOP_VP_LOCK(vp);
   vp->volumetric_params = *params;
 
   /* Propagate to GPU backend */
@@ -250,11 +214,13 @@ void mop_viewport_set_volumetric(MopViewport *vp,
                             params->color.g, params->color.b,
                             params->anisotropy, params->steps);
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_set_bloom(MopViewport *vp, float threshold, float intensity) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   vp->bloom_threshold = threshold > 0.0f ? threshold : 0.01f;
   vp->bloom_intensity = intensity > 0.0f ? intensity : 0.0f;
 
@@ -264,4 +230,5 @@ void mop_viewport_set_bloom(MopViewport *vp, float threshold, float intensity) {
     vp->rhi->set_bloom(vp->device, enabled, vp->bloom_threshold,
                        vp->bloom_intensity);
   }
+  MOP_VP_UNLOCK(vp);
 }

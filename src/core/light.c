@@ -27,25 +27,33 @@ MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc) {
   if (!vp || !desc)
     return NULL;
 
+  MOP_VP_LOCK(vp);
   /* Find an inactive slot below the high-water mark */
   for (uint32_t i = 0; i < vp->light_count; i++) {
     if (!vp->lights[i].active) {
       vp->lights[i] = *desc;
       vp->lights[i].active = true;
-      return &vp->lights[i];
+      vp->lights[i].viewport = vp;
+      MopLight *ret = &vp->lights[i];
+      MOP_VP_UNLOCK(vp);
+      return ret;
     }
   }
 
   /* No inactive slot — grow if at capacity */
   if (vp->light_count >= vp->light_capacity) {
     if (!mop_dyn_grow((void **)&vp->lights, &vp->light_capacity,
-                      sizeof(MopLight), MOP_INITIAL_LIGHT_CAPACITY))
+                      sizeof(MopLight), MOP_INITIAL_LIGHT_CAPACITY)) {
+      MOP_VP_UNLOCK(vp);
       return NULL;
+    }
     /* Grow light_indicators to match */
     MopMesh **new_ind = realloc(vp->light_indicators,
                                 (size_t)vp->light_capacity * sizeof(MopMesh *));
-    if (!new_ind)
+    if (!new_ind) {
+      MOP_VP_UNLOCK(vp);
       return NULL;
+    }
     /* Zero the newly allocated portion */
     uint32_t old_ind_count = vp->light_count; /* was == old capacity */
     memset(new_ind + old_ind_count, 0,
@@ -56,46 +64,61 @@ MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc) {
   uint32_t idx = vp->light_count++;
   vp->lights[idx] = *desc;
   vp->lights[idx].active = true;
-  return &vp->lights[idx];
+  vp->lights[idx].viewport = vp;
+  MopLight *ret = &vp->lights[idx];
+  MOP_VP_UNLOCK(vp);
+  return ret;
 }
 
 void mop_viewport_remove_light(MopViewport *vp, MopLight *light) {
   if (!vp || !light)
     return;
+  MOP_VP_LOCK(vp);
   light->active = false;
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_clear_lights(MopViewport *vp) {
   if (!vp)
     return;
+  MOP_VP_LOCK(vp);
   for (uint32_t i = 0; i < vp->light_count; i++) {
     vp->lights[i].active = false;
   }
   vp->light_count = 0;
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_light_set_position(MopLight *l, MopVec3 pos) {
   if (!l)
     return;
+  MOP_VP_LOCK(l->viewport);
   l->position = pos;
+  MOP_VP_UNLOCK(l->viewport);
 }
 
 void mop_light_set_direction(MopLight *l, MopVec3 dir) {
   if (!l)
     return;
+  MOP_VP_LOCK(l->viewport);
   l->direction = dir;
+  MOP_VP_UNLOCK(l->viewport);
 }
 
 void mop_light_set_color(MopLight *l, MopColor color) {
   if (!l)
     return;
+  MOP_VP_LOCK(l->viewport);
   l->color = color;
+  MOP_VP_UNLOCK(l->viewport);
 }
 
 void mop_light_set_intensity(MopLight *l, float intensity) {
   if (!l)
     return;
+  MOP_VP_LOCK(l->viewport);
   l->intensity = intensity;
+  MOP_VP_UNLOCK(l->viewport);
 }
 
 uint32_t mop_viewport_light_count(const MopViewport *vp) {

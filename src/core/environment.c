@@ -668,6 +668,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
   if (!vp || !desc)
     return false;
 
+  MOP_VP_LOCK(vp);
   /* Clean up previous environment */
   env_cleanup(vp);
 
@@ -676,6 +677,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
   vp->env_intensity = desc->intensity > 0.0f ? desc->intensity : 1.0f;
 
   if (desc->type == MOP_ENV_NONE || desc->type == MOP_ENV_GRADIENT) {
+    MOP_VP_UNLOCK(vp);
     return true;
   }
 
@@ -693,6 +695,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
     precompute_irradiance(vp);
     precompute_prefiltered(vp);
     precompute_brdf_lut(vp);
+    MOP_VP_UNLOCK(vp);
     return true;
   }
 
@@ -700,6 +703,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
   if (!desc->hdr_path) {
     MOP_ERROR("MOP_ENV_HDRI requires hdr_path");
     vp->env_type = MOP_ENV_GRADIENT;
+    MOP_VP_UNLOCK(vp);
     return false;
   }
 
@@ -713,6 +717,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
     if (!rgba) {
       MOP_ERROR("failed to load EXR image: %s", desc->hdr_path);
       vp->env_type = MOP_ENV_GRADIENT;
+      MOP_VP_UNLOCK(vp);
       return false;
     }
   } else {
@@ -722,6 +727,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
     if (!rgb_data) {
       MOP_ERROR("failed to load HDR image: %s", desc->hdr_path);
       vp->env_type = MOP_ENV_GRADIENT;
+      MOP_VP_UNLOCK(vp);
       return false;
     }
 
@@ -731,6 +737,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
     if (!rgba) {
       stbi_image_free(rgb_data);
       vp->env_type = MOP_ENV_GRADIENT;
+      MOP_VP_UNLOCK(vp);
       return false;
     }
 
@@ -806,6 +813,7 @@ bool mop_viewport_set_environment(MopViewport *vp,
 
   MOP_INFO("loaded %s environment: %dx%d (%s)", is_exr ? "EXR" : "HDR", w, h,
            desc->hdr_path);
+  MOP_VP_UNLOCK(vp);
   return true;
 }
 
@@ -814,18 +822,27 @@ bool mop_viewport_set_environment(MopViewport *vp,
  * ------------------------------------------------------------------------- */
 
 void mop_viewport_set_environment_rotation(MopViewport *vp, float rotation) {
-  if (vp)
-    vp->env_rotation = rotation;
+  if (!vp)
+    return;
+  MOP_VP_LOCK(vp);
+  vp->env_rotation = rotation;
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_set_environment_intensity(MopViewport *vp, float intensity) {
-  if (vp)
-    vp->env_intensity = intensity > 0.0f ? intensity : 0.0f;
+  if (!vp)
+    return;
+  MOP_VP_LOCK(vp);
+  vp->env_intensity = intensity > 0.0f ? intensity : 0.0f;
+  MOP_VP_UNLOCK(vp);
 }
 
 void mop_viewport_set_environment_background(MopViewport *vp, bool show) {
-  if (vp)
-    vp->show_env_background = show;
+  if (!vp)
+    return;
+  MOP_VP_LOCK(vp);
+  vp->show_env_background = show;
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------
@@ -836,6 +853,7 @@ void mop_viewport_set_procedural_sky(MopViewport *vp,
                                      const MopProceduralSkyDesc *desc) {
   if (!vp || !desc)
     return;
+  MOP_VP_LOCK(vp);
   vp->sky_desc = *desc;
   if (vp->env_type == MOP_ENV_PROCEDURAL_SKY) {
     /* Regenerate sky texture */
@@ -857,6 +875,7 @@ void mop_viewport_set_procedural_sky(MopViewport *vp,
     vp->env_prefiltered_data = NULL;
     precompute_prefiltered(vp);
   }
+  MOP_VP_UNLOCK(vp);
 }
 
 /* -------------------------------------------------------------------------

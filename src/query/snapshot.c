@@ -47,7 +47,7 @@ bool mop_snapshot_next_mesh(MopSceneSnapshot *snap, MopMeshView *out) {
   const MopViewport *vp = snap->_vp;
 
   while (snap->_mesh_idx < vp->mesh_count) {
-    const struct MopMesh *m = &vp->meshes[snap->_mesh_idx];
+    const struct MopMesh *m = vp->meshes[snap->_mesh_idx];
     snap->_mesh_idx++;
 
     if (!is_scene_mesh(m))
@@ -101,7 +101,7 @@ uint32_t mop_snapshot_triangle_count(const MopSceneSnapshot *snap) {
   const MopViewport *vp = snap->_vp;
   uint32_t total = 0;
   for (uint32_t i = 0; i < vp->mesh_count; i++) {
-    const struct MopMesh *m = &vp->meshes[i];
+    const struct MopMesh *m = vp->meshes[i];
     if (is_scene_mesh(m))
       total += m->index_count / 3;
   }

@@ -10,6 +10,7 @@
 
 #include <mop/core/camera_object.h>
 #include <mop/core/display.h>
+#include <mop/core/environment.h>
 #include <mop/core/light.h>
 #include <mop/core/material.h>
 #include <mop/core/material_graph.h>

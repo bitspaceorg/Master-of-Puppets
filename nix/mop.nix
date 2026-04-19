@@ -10,7 +10,6 @@
                 buildInputs =
                     with pkgs;
                     [
-                        lua5_4
                         vulkan-loader
                         vulkan-headers
                         vulkan-validation-layers
@@ -40,7 +39,7 @@
                     gnumake
                     pkg-config
                 ];
-                buildInputs = with pkgs; [ lua5_4 ];
+                buildInputs = with pkgs; [ ];
 
                 buildPhase = ''
                     make RELEASE=1 CC=${pkgs.stdenv.cc}/bin/cc

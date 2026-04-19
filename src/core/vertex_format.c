@@ -45,6 +45,37 @@ MopVertexFormat mop_vertex_format_standard(void) {
   return fmt;
 }
 
+MopVertexFormat mop_vertex_format_posonly(void) {
+  MopVertexFormat fmt = {.attrib_count = 1,
+                         .stride = 12,
+                         .attribs = {
+                             [0] = {MOP_ATTRIB_POSITION, MOP_FORMAT_FLOAT3, 0},
+                         }};
+  return fmt;
+}
+
+MopVertexFormat mop_vertex_format_pos_normal(void) {
+  MopVertexFormat fmt = {.attrib_count = 2,
+                         .stride = 24,
+                         .attribs = {
+                             [0] = {MOP_ATTRIB_POSITION, MOP_FORMAT_FLOAT3, 0},
+                             [1] = {MOP_ATTRIB_NORMAL, MOP_FORMAT_FLOAT3, 12},
+                         }};
+  return fmt;
+}
+
+MopVertexFormat mop_vertex_format_pos_normal_uv(void) {
+  MopVertexFormat fmt = {
+      .attrib_count = 3,
+      .stride = 32,
+      .attribs = {
+          [0] = {MOP_ATTRIB_POSITION, MOP_FORMAT_FLOAT3, 0},
+          [1] = {MOP_ATTRIB_NORMAL, MOP_FORMAT_FLOAT3, 12},
+          [2] = {MOP_ATTRIB_TEXCOORD0, MOP_FORMAT_FLOAT2, 24},
+      }};
+  return fmt;
+}
+
 const MopVertexAttrib *mop_vertex_format_find(const MopVertexFormat *fmt,
                                               MopAttribSemantic sem) {
   if (!fmt)
