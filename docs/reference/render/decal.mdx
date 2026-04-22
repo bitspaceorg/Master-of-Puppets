@@ -1,0 +1,90 @@
+---
+title: "Decals"
+description: "Deferred projective decals (GPU only)"
+slug: "reference-render-decal"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "decal", "gpu", "vulkan"]
+---
+
+## Location
+
+```
+include/mop/render/decal.h   — Public API
+src/core/decal.c             — Decal registry + dispatch
+```
+
+## Availability
+
+**Vulkan backend only.** `mop_viewport_add_decal` returns `-1` on the CPU backend or if the RHI lacks a decal callback. Plan accordingly in backend-neutral code.
+
+## Model
+
+A decal is a unit box (`[-1, 1]³` in its local frame) transformed into world space. The decal renderer reads the scene depth buffer, reconstructs world-space surface positions, and projects the decal texture onto any surface inside the box. Edges of the box fade based on alignment with the decal's surface normal direction.
+
+Use cases: bullet holes, footprints, graffiti, blood splatter — anything that marks onto existing geometry without modifying its vertex data.
+
+## Types
+
+```c
+typedef struct MopDecalDesc {
+    MopMat4 transform;       /* box center, rotation, half-extents (scale) */
+    float   opacity;         /* [0, 1] alpha multiplier                    */
+    int32_t texture_idx;     /* bindless texture index; -1 = white          */
+} MopDecalDesc;
+```
+
+## Constants
+
+```c
+#define MOP_MAX_DECALS 256
+```
+
+Fixed upper bound per viewport.
+
+## Functions
+
+```c
+int32_t mop_viewport_add_decal   (MopViewport *vp, const MopDecalDesc *desc);
+void    mop_viewport_remove_decal(MopViewport *vp, int32_t decal_id);
+void    mop_viewport_clear_decals(MopViewport *vp);
+```
+
+`add_decal` returns:
+
+- `-1` — no GPU backend, or the RHI does not expose a decal callback.
+- `≥ 0` — the decal ID (dense index; pass back to `remove_decal`).
+
+## Usage
+
+```c
+/* Stamp a decal at a raycast hit. */
+MopRayHit h = mop_viewport_raycast(vp, mouse_x, mouse_y);
+if (h.hit) {
+    MopMat4 t = mop_mat4_translate(h.position);
+    /* Orient the decal's -Z toward the surface normal, size 0.2 units. */
+    /* (build orthonormal basis from h.normal, apply scale 0.2) */
+    int32_t id = mop_viewport_add_decal(vp, &(MopDecalDesc){
+        .transform   = t,
+        .opacity     = 0.9f,
+        .texture_idx = bullet_hole_tex_idx,
+    });
+    if (id < 0) { /* GPU not available; fall back to a decal-free marker */ }
+}
+
+/* Later, remove it. */
+mop_viewport_remove_decal(vp, id);
+
+/* Or clear all. */
+mop_viewport_clear_decals(vp);
+```
+
+## Notes
+
+- Decal textures are referenced by **bindless index**, not `MopTexture *`. The Vulkan backend maintains a bindless texture table; the index is assigned when the texture is created. For scaffold / dev decals use `-1` (white).
+- Decals draw after opaque geometry but before transparents, reading the current depth buffer. They do not self-occlude with other decals.
+- There is no built-in serialization — decals are runtime-only state, not part of the `.mop` scene file.
+
+## See Also
+
+- [Texture Pipeline](reference-core-texture-pipeline) · [Vulkan Backend](reference-render-backend-vulkan) · [Post-processing](reference-render-postprocess)

@@ -1,0 +1,138 @@
+---
+title: "Texture Pipeline"
+description: "Streaming, compressed, deduplicated texture loading"
+slug: "reference-core-texture-pipeline"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "texture", "streaming", "compression"]
+---
+
+## Location
+
+```
+include/mop/core/texture_pipeline.h   — Streaming + compressed tex API
+src/core/texture_pipeline.c           — Cache + mip gen + async loader
+```
+
+## Relationship to `mop_viewport_create_texture`
+
+`mop_viewport_create_texture(vp, w, h, rgba)` is the 80% path: give it raw RGBA8 bytes, get a `MopTexture *` back. For the other 20% — compressed formats, progressive loading, content-hash deduplication, explicit mip chains — use this API.
+
+Both produce a `MopTexture *` that slots into the same `mop_mesh_set_texture` / material slots.
+
+## Types
+
+### MopTexFormat
+
+```c
+typedef enum MopTexFormat {
+    MOP_TEX_FORMAT_RGBA8 = 0,   /* uncompressed, 4 B/pixel            */
+    MOP_TEX_FORMAT_BC1,         /* RGB, 4:1 compression (0.5 B/pixel) */
+    MOP_TEX_FORMAT_BC3,         /* RGBA, 4:1 compression (1 B/pixel)  */
+    MOP_TEX_FORMAT_BC5,         /* RG  (normal maps), 2:1             */
+    MOP_TEX_FORMAT_BC7,         /* RGBA high-quality, 4:1             */
+    MOP_TEX_FORMAT_COUNT,
+} MopTexFormat;
+```
+
+BC formats are GPU-decoded. On the CPU backend they are decoded to RGBA8 on load.
+
+### MopTexStreamState
+
+```c
+typedef enum MopTexStreamState {
+    MOP_TEX_STREAM_PENDING   = 0,   /* not yet loaded */
+    MOP_TEX_STREAM_PARTIAL,         /* some mips loaded  */
+    MOP_TEX_STREAM_COMPLETE,        /* all mips loaded  */
+    MOP_TEX_STREAM_ERROR,           /* failed to load    */
+} MopTexStreamState;
+```
+
+### MopTextureDesc
+
+```c
+typedef struct MopTextureDesc {
+    int          width, height;
+    int          mip_levels;        /* 0 = auto-compute from size    */
+    MopTexFormat format;
+    const uint8_t *data;            /* mip 0 bytes; NULL for streaming */
+    uint32_t     data_size;
+    bool         generate_mips;     /* auto-generate chain from mip 0 */
+    bool         srgb;              /* interpret as sRGB (albedo/emi.) */
+} MopTextureDesc;
+```
+
+### MopTexCacheStats
+
+```c
+typedef struct MopTexCacheStats {
+    uint32_t total_textures;
+    uint32_t unique_textures;    /* after dedup                  */
+    uint64_t memory_used;        /* GPU memory in bytes          */
+    uint32_t pending_loads;      /* still streaming              */
+    uint32_t cache_hits;         /* loads avoided via dedup      */
+} MopTexCacheStats;
+```
+
+## Functions
+
+### Create
+
+```c
+MopTexture *mop_tex_create(MopViewport *vp, const MopTextureDesc *desc);
+```
+
+Full-control creation: explicit mip levels, format, sRGB flag, mip generation. Synchronous — the texture is fully uploaded when this returns.
+
+### Async load
+
+```c
+MopTexture *mop_tex_load_async(MopViewport *vp, const char *path);
+```
+
+Returns a handle immediately, backed by a 1×1 fallback. Streams the real texture in over subsequent frames (low mip levels first). Supported extensions: `.png`, `.jpg`, `.hdr`, `.exr`, `.ktx2`.
+
+### Introspection
+
+```c
+MopTexStreamState mop_tex_get_stream_state(const MopTexture *t);
+uint64_t          mop_tex_get_hash        (const MopTexture *t);
+MopTexCacheStats  mop_tex_cache_stats     (const MopViewport *vp);
+```
+
+Hash is FNV-1a 64-bit over the raw image data. Two `async_load` calls for the same file hash to the same texture handle (dedup).
+
+### Cache maintenance
+
+```c
+void mop_tex_cache_flush(MopViewport *vp, uint32_t max_age_frames);
+bool mop_tex_read_rgba8 (MopViewport *vp, MopTexture *t,
+                         uint8_t *out_buf, size_t buf_size);
+```
+
+- **flush**: evicts any texture not referenced in the last `max_age_frames` frames.
+- **read_rgba8**: reads back decoded RGBA8. Cheap on CPU (direct memcpy), may return `false` on GPU backends where staging is not implemented. For GPU-to-GPU handoff, use `mop_viewport_present_to_texture` instead.
+
+## Usage
+
+```c
+/* Explicit, synchronous create with mip chain */
+MopTexture *t = mop_tex_create(vp, &(MopTextureDesc){
+    .width  = 1024, .height = 1024,
+    .format = MOP_TEX_FORMAT_RGBA8,
+    .data   = pixels, .data_size = 1024 * 1024 * 4,
+    .generate_mips = true,
+    .srgb = true,
+});
+
+/* Streamed, async */
+MopTexture *async_tex = mop_tex_load_async(vp, "env_albedo_2k.png");
+while (mop_tex_get_stream_state(async_tex) == MOP_TEX_STREAM_PARTIAL) {
+    mop_viewport_render(vp);  /* keeps improving over frames */
+}
+```
+
+## See Also
+
+- [Scene](reference-core-scene) — `mop_viewport_create_texture` (simple path)
+- [Material](reference-core-material) · [Environment](reference-core-environment) — HDRI path uses this internally

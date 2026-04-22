@@ -1,0 +1,24 @@
+---
+title: "Render"
+description: "RHI, backends, post-processing, overlays, decals, meshlets"
+slug: "reference-render"
+author: "rahulmnavneeth"
+date: "23 APR 2026"
+tags: ["reference", "render"]
+---
+
+The "how rendering happens" layer — from the backend-agnostic RHI contract down to specific GPU / CPU implementations and the effects that run on top.
+
+| Page                                               | Topic                                                            |
+| -------------------------------------------------- | ---------------------------------------------------------------- |
+| [RHI](reference-render-rhi)                        | Backend-agnostic function-pointer table                          |
+| [Software Rasterizer](reference-render-rasterizer) | Shared CPU rasterizer (edge-function, anti-aliased)              |
+| [CPU Backend](reference-render-backend-cpu)        | Always-available software backend                                |
+| [Vulkan Backend](reference-render-backend-vulkan)  | Primary GPU backend — PBR, shadows, GPU culling, Hi-Z            |
+| [OpenGL Backend](reference-render-backend-opengl)  | OpenGL 3.3 backend (contract; stub)                              |
+| [Post-Processing](reference-render-postprocess)    | Gamma, tonemap, FXAA, bloom, SSAO, TAA, SSR, OIT, volumetric fog |
+| [Overlay](reference-render-overlay)                | Built-in + custom overlays, CPU readback rasterizer              |
+| [Pipeline Hooks](reference-render-pipeline)        | Custom render-graph pass injection                               |
+| [Shader Plugin](reference-render-shader-plugin)    | SPIR-V plugins at named stages                                   |
+| [Decal](reference-render-decal)                    | Deferred projective decals (Vulkan only)                         |
+| [Meshlet](reference-render-meshlet)                | Fixed-size geometry clusters for GPU culling                     |

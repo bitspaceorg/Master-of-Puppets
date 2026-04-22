@@ -11,7 +11,7 @@ tags: ["architecture", "extension"]
 
 1. **Create directory:** `src/backend/<name>/`
 2. **Define internal types:** Concrete structs for `MopRhiDevice`, `MopRhiBuffer`, `MopRhiFramebuffer`
-3. **Implement all 14 RHI functions** — see [RHI](reference-rhi) for the full contract
+3. **Implement all 14 RHI functions** — see [RHI](reference-render-rhi) for the full contract
 4. **Expose factory:** `const MopRhiBackend *mop_rhi_backend_<name>(void);`
 5. **Register in dispatcher:** Add a `case` to `mop_rhi_get_backend` in `src/rhi/rhi.c`
 6. **Add source to root Makefile:** Append the `.c` file to `CORE_SRCS` and add the obj directory to `obj_dirs`

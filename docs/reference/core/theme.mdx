@@ -1,0 +1,107 @@
+---
+title: "Theme"
+description: "Viewport color and line-width customization"
+slug: "reference-core-theme"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "theme", "ui"]
+---
+
+## Location
+
+```
+include/mop/core/theme.h   — MopTheme + API
+src/core/theme.c           — Default values
+```
+
+## MopTheme
+
+Single struct covering all chrome colors and line widths. One accent color drives outlines and indicators; per-subsystem overrides (gizmo, grid, wireframe) stay near at hand.
+
+```c
+typedef struct MopTheme {
+    /* UI accent (outlines, indicators) */
+    MopColor accent;
+
+    /* Background gradient */
+    MopColor bg_top;
+    MopColor bg_bottom;
+
+    /* Grid */
+    MopColor grid_minor, grid_major, grid_axis_x, grid_axis_z;
+    float grid_line_width_minor, grid_line_width_major, grid_line_width_axis;
+
+    /* Gizmo */
+    MopColor gizmo_x, gizmo_y, gizmo_z, gizmo_center, gizmo_hover;
+    float    gizmo_line_width;       /* literal px, DPI-unscaled  */
+    float    gizmo_opacity;
+    float    gizmo_target_opacity;   /* selected mesh when gizmo on */
+
+    /* Wireframe overlay */
+    MopColor wireframe_color;
+    float    wireframe_opacity;
+    float    wireframe_line_width;
+
+    /* Selection */
+    MopColor selection_outline;      /* post-process outline stroke */
+    float    selection_outline_width;
+    MopColor vertex_select_color, edge_select_color, face_select_color;
+    float    vertex_select_size;
+    float    edge_select_width;
+    float    face_select_opacity;
+
+    /* Object outline (always-on border) */
+    float outline_opacity_selected;
+    float outline_opacity_unselected;
+
+    /* Overlay extras */
+    MopColor normal_color;   float normal_line_width;
+    MopColor bounds_color;   float bounds_line_width;
+
+    /* HUD axis indicator */
+    MopColor axis_x, axis_y, axis_z, axis_neg_x, axis_neg_y, axis_neg_z;
+
+    /* Camera frustum visualization */
+    MopColor camera_frustum_color;
+    float    camera_frustum_line_width;
+
+    /* Depth bias for coplanar overlays */
+    float depth_bias;
+} MopTheme;
+```
+
+## Functions
+
+```c
+MopTheme        mop_theme_default(void);
+void            mop_viewport_set_theme(MopViewport *vp, const MopTheme *theme);
+const MopTheme *mop_viewport_get_theme(const MopViewport *vp);
+```
+
+The theme struct is copied on `set_theme`; callers may free their copy afterwards.
+
+## Defaults
+
+- Background: mid-gray (`#10101b` linear)
+- Accent: white — selection outline and indicator color
+- Gizmo X / Y / Z: bright saturated red / green / blue; hover tint is the theme accent
+- Face selection fill: derived mid-shade `(0.35, 0.35, 0.35)` at `face_select_opacity = 0.4`
+
+## Outline Color Gotcha
+
+The selection outline painter reads **`theme.accent`** (not `theme.selection_outline`). `selection_outline` is the width-based stroke drawn in the 2D chrome pass for subelement highlights. To change the silhouette outline color around selected objects, set `accent`:
+
+```c
+MopTheme t = mop_theme_default();
+t.accent = (MopColor){1, 1, 1, 1};   /* white silhouette outline */
+mop_viewport_set_theme(vp, &t);
+```
+
+## DPI Note
+
+`gizmo_line_width` is in literal framebuffer pixels and is **not scaled** with DPI or framebuffer height. The shaft stays thin at high resolutions — matching the corner axis navigator style. Tip balls, axis letters, and diamond handles do scale with framebuffer height (reference 1080p → 1× at 1080, 1.33× at 1440p, 2× at 4K) so they remain readable.
+
+## See Also
+
+- [Overlay](reference-render-overlay) — how the theme feeds the 2D chrome rasterizer
+- [Gizmo](reference-interaction-gizmo) · [Display](reference-core-display)

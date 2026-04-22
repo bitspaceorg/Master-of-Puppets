@@ -1,0 +1,188 @@
+---
+title: "Material Graph"
+description: "DAG-based material authoring — nodes, connections, JSON, compilation"
+slug: "reference-core-material-graph"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "material", "graph", "pbr"]
+---
+
+## Location
+
+```
+include/mop/core/material_graph.h   — Node + graph types, API
+src/core/material_graph.c           — Node storage, JSON codec, compile
+```
+
+## When to Use This
+
+The flat [Material](reference-core-material) struct is usually enough. Reach for the graph when you need:
+
+- **Procedural materials** assembled from parts at load time.
+- **Material presets** serialized to / loaded from JSON.
+- **Per-channel blending** that goes beyond `base_color × metallic × roughness`.
+
+A compiled graph produces a standard `MopMaterial` — everything downstream (texture binding, shading) is identical.
+
+## Node Types
+
+```c
+typedef enum MopMatNodeType {
+    MOP_MAT_NODE_OUTPUT          = 0,  /* exactly one, at index 0          */
+    MOP_MAT_NODE_CONSTANT_FLOAT,       /* scalar constant                  */
+    MOP_MAT_NODE_CONSTANT_VEC3,        /* RGB constant                     */
+    MOP_MAT_NODE_CONSTANT_VEC4,        /* RGBA constant                    */
+    MOP_MAT_NODE_TEXTURE_SAMPLE,       /* sample texture at UV set         */
+    MOP_MAT_NODE_NORMAL_MAP,           /* tangent-space normal lookup      */
+    MOP_MAT_NODE_MIX,                  /* mix(A, B, factor)                */
+    MOP_MAT_NODE_MULTIPLY,             /* component-wise A * B             */
+    MOP_MAT_NODE_ADD,                  /* component-wise A + B             */
+    MOP_MAT_NODE_FRESNEL,              /* Schlick fresnel                  */
+    MOP_MAT_NODE_UV_TRANSFORM,         /* scale / offset / rotate UVs      */
+    MOP_MAT_NODE_VERTEX_COLOR,         /* per-vertex color attribute       */
+    MOP_MAT_NODE_COUNT
+} MopMatNodeType;
+```
+
+## Limits
+
+```c
+#define MOP_MAT_NODE_NAME_MAX   32
+#define MOP_MAT_MAX_NODES       64
+#define MOP_MAT_MAX_CONNECTIONS 128
+#define MOP_MAT_MAX_TEXTURES     8
+```
+
+## MopMatNode
+
+Each node carries its type, a name, and a type-tagged parameter block:
+
+```c
+typedef struct MopMatNode {
+    MopMatNodeType type;
+    char name[MOP_MAT_NODE_NAME_MAX];
+    union {
+        struct { float value; }                     constant_float;
+        struct { float rgb[3]; }                    constant_vec3;
+        struct { float rgba[4]; }                   constant_vec4;
+        struct { int32_t texture_index, uv_set; }   texture_sample;
+        struct { float strength; }                  normal_map;
+        struct { float factor; }                    mix;
+        struct { float ior; }                       fresnel;
+        struct { float scale[2], offset[2], rotation; } uv_transform;
+    } params;
+} MopMatNode;
+```
+
+## MopMatConnection
+
+Each connection wires one output slot of a source node into one input slot of a destination node:
+
+```c
+typedef struct MopMatConnection {
+    uint32_t src_node, src_output;
+    uint32_t dst_node, dst_input;
+} MopMatConnection;
+```
+
+Input / output slot indices are node-type-specific (e.g. `MIX` has `A`, `B`, `factor` inputs at slots 0/1/2).
+
+## MopMaterialGraph
+
+```c
+typedef struct MopMaterialGraph {
+    char             name[64];
+    MopMatNode       nodes      [MOP_MAT_MAX_NODES];        uint32_t node_count;
+    MopMatConnection connections[MOP_MAT_MAX_CONNECTIONS];  uint32_t connection_count;
+    char             texture_paths[MOP_MAT_MAX_TEXTURES][256];
+    uint32_t         texture_count;
+
+    enum {
+        MOP_MAT_GRAPH_CUSTOM               = 0,
+        MOP_MAT_GRAPH_METALLIC_ROUGHNESS,
+        MOP_MAT_GRAPH_SPECULAR_GLOSSINESS,
+        MOP_MAT_GRAPH_UNLIT,
+    } preset;
+
+    bool   compiled;
+    char  *_compiled_glsl;    /* internal, freed by destroy */
+} MopMaterialGraph;
+```
+
+## Functions
+
+### Build
+
+```c
+void     mop_mat_graph_init    (MopMaterialGraph *g, const char *name);
+uint32_t mop_mat_graph_add_node(MopMaterialGraph *g, const MopMatNode *node);
+bool     mop_mat_graph_connect (MopMaterialGraph *g,
+                                uint32_t src_node, uint32_t src_output,
+                                uint32_t dst_node, uint32_t dst_input);
+```
+
+`init` pre-populates node 0 as the `OUTPUT` node. `add_node` returns the new node's index, or `UINT32_MAX` on capacity overflow. `connect` returns `false` on invalid node / slot indices.
+
+### Presets
+
+```c
+void mop_mat_graph_preset_pbr(MopMaterialGraph *g);
+```
+
+Wires a metallic-roughness graph: `base_color_tex → output.base_color`, `mr_tex → output.metallic + roughness`, `normal_tex → output.normal`. Texture paths are set on the graph; bind actual `MopTexture *` at compile time.
+
+### Persistence
+
+```c
+char *mop_mat_graph_to_json  (const MopMaterialGraph *g);   /* caller frees */
+bool  mop_mat_graph_from_json(MopMaterialGraph *g, const char *json);
+```
+
+Round-trippable. The internal compiled GLSL (`_compiled_glsl`) is not serialized — `compiled` is cleared on load.
+
+### Compile
+
+```c
+bool mop_mat_graph_compile(MopMaterialGraph *g, MopViewport *vp,
+                           MopMaterial *out_material);
+```
+
+Resolves texture paths through the viewport's texture pipeline, evaluates constant nodes, folds math chains, and fills the output `MopMaterial` with flat fields plus texture pointers. Returns `false` on missing output node, cycle detection, or texture load failure.
+
+### Free
+
+```c
+void mop_mat_graph_destroy(MopMaterialGraph *g);
+```
+
+Frees the internal compiled GLSL buffer. Safe to call on a zero-initialized graph.
+
+## Usage
+
+```c
+MopMaterialGraph g;
+mop_mat_graph_init(&g, "brass");
+
+/* Start from the PBR preset, then override roughness. */
+mop_mat_graph_preset_pbr(&g);
+strncpy(g.texture_paths[g.texture_count++], "brass_albedo.png", 255);
+strncpy(g.texture_paths[g.texture_count++], "brass_mr.png",     255);
+
+MopMatNode roughness_scale = {
+    .type = MOP_MAT_NODE_CONSTANT_FLOAT, .params.constant_float.value = 0.4f,
+};
+uint32_t ri = mop_mat_graph_add_node(&g, &roughness_scale);
+mop_mat_graph_connect(&g, ri, 0, /*output*/ 0, /*roughness slot*/ 3);
+
+MopMaterial m;
+if (mop_mat_graph_compile(&g, vp, &m)) {
+    mop_mesh_set_material(mesh, &m);
+}
+
+mop_mat_graph_destroy(&g);
+```
+
+## See Also
+
+- [Material](reference-core-material) — the flat output target
+- [Shader Plugin](reference-render-shader-plugin) · [Texture Pipeline](reference-core-texture-pipeline)

@@ -72,6 +72,6 @@ Each backend lives in `src/backend/<name>/` and implements every function in `Mo
 
 **Function-pointer table** enables runtime backend selection. The application chooses `MOP_BACKEND_CPU` or `MOP_BACKEND_OPENGL` at viewport creation — no recompilation needed.
 
-**Flat mesh array** with `active` flags avoids allocator complexity. The upper bound `MOP_MAX_MESHES` (4096) can be raised by recompiling.
+**Pointer-stable scene pool** — `vp->meshes` is an array of `MopMesh *`, each struct heap-allocated individually. Reallocating the pointer array on grow does **not** invalidate any `MopMesh *` the application holds. Freed slots are tracked in an O(1) free list and reused on next add. Every mesh carries its own `slot_index` and a back-pointer to its viewport so `mop_mesh_set_*` calls can auto-acquire the scene lock without the caller providing the viewport handle. Instanced meshes use the same design.
 
 **Column-major matrices** match OpenGL and Vulkan conventions. `MopMat4.d[col * 4 + row]`.

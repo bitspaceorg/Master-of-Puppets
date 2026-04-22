@@ -9,32 +9,32 @@ tags: ["reference", "api"]
 
 ## Headers
 
-| Header            | Contents                                      | Docs                                     |
-| ----------------- | --------------------------------------------- | ---------------------------------------- |
-| `types.h`         | Value types, math utilities                   | [Math](reference-math)                   |
-| `backend.h`       | Backend enumeration and query functions       |                                          |
-| `viewport.h`      | Viewport lifecycle, camera, rendering         |                                          |
-| `scene.h`         | Mesh creation, removal, transforms, textures  |                                          |
-| `picking.h`       | Object picking via ID buffer                  | [Picking](reference-picking)             |
-| `light.h`         | Multi-light system (directional, point, spot) | [Light](reference-light)                 |
-| `input.h`         | Input events, output events, interaction      | [Input](reference-input)                 |
-| `gizmo.h`         | TRS manipulation gizmo                        | [Gizmo](reference-gizmo)                 |
-| `camera.h`        | Orbit camera                                  | [Camera](reference-camera)               |
-| `camera_query.h`  | Camera state snapshot, ray generation         | [Camera Query](reference-camera-query)   |
-| `display.h`       | Display settings and visualization modes      | [Display](reference-display)             |
-| `overlay.h`       | Built-in and custom overlays                  | [Overlay](reference-overlay)             |
-| `material.h`      | PBR-inspired material descriptor              | [Material](reference-material)           |
-| `vertex_format.h` | Flexible vertex attributes                    | [Vertex Format](reference-vertex-format) |
-| `loader.h`        | OBJ and binary mesh loading                   | [Loader](reference-loader)               |
-| `query.h`         | Read-only mesh introspection                  | [Query](reference-query)                 |
-| `snapshot.h`      | Zero-copy scene iteration                     | [Snapshot](reference-snapshot)           |
-| `spatial.h`       | AABB, frustum culling, raycasting             | [Spatial](reference-spatial)             |
-| `undo.h`          | Transform undo/redo stack                     | [Undo](reference-undo)                   |
-| `pipeline.h`      | Custom render pass hooks                      | [Pipeline](reference-pipeline)           |
-| `postprocess.h`   | Gamma, tonemapping, vignette, fog             | [Post-Processing](reference-postprocess) |
-| `log.h`           | Logging levels and callbacks                  | [Log](reference-log)                     |
-| `profile.h`       | Frame timing statistics                       | [Profile](reference-profile)             |
-| `mop.h`           | Umbrella header — includes all above          |                                          |
+| Header            | Contents                                      | Docs                                            |
+| ----------------- | --------------------------------------------- | ----------------------------------------------- |
+| `types.h`         | Value types, math utilities                   | [Math](reference-math)                          |
+| `backend.h`       | Backend enumeration and query functions       |                                                 |
+| `viewport.h`      | Viewport lifecycle, camera, rendering         |                                                 |
+| `scene.h`         | Mesh creation, removal, transforms, textures  |                                                 |
+| `picking.h`       | Object picking via ID buffer                  | [Picking](reference-interaction-picking)        |
+| `light.h`         | Multi-light system (directional, point, spot) | [Light](reference-core-light)                   |
+| `input.h`         | Input events, output events, interaction      | [Input](reference-interaction-input)            |
+| `gizmo.h`         | TRS manipulation gizmo                        | [Gizmo](reference-interaction-gizmo)            |
+| `camera.h`        | Orbit camera                                  | [Camera](reference-interaction-camera)          |
+| `camera_query.h`  | Camera state snapshot, ray generation         | [Camera Query](reference-query-camera-query)    |
+| `display.h`       | Display settings and visualization modes      | [Display](reference-core-display)               |
+| `overlay.h`       | Built-in and custom overlays                  | [Overlay](reference-render-overlay)             |
+| `material.h`      | PBR-inspired material descriptor              | [Material](reference-core-material)             |
+| `vertex_format.h` | Flexible vertex attributes                    | [Vertex Format](reference-core-vertex-format)   |
+| `loader.h`        | OBJ and binary mesh loading                   | [Loader](reference-io-loader)                   |
+| `query.h`         | Read-only mesh introspection                  | [Query](reference-query-query)                  |
+| `snapshot.h`      | Zero-copy scene iteration                     | [Snapshot](reference-query-snapshot)            |
+| `spatial.h`       | AABB, frustum culling, raycasting             | [Spatial](reference-query-spatial)              |
+| `undo.h`          | Transform undo/redo stack                     | [Undo](reference-interaction-undo)              |
+| `pipeline.h`      | Custom render pass hooks                      | [Pipeline](reference-render-pipeline)           |
+| `postprocess.h`   | Gamma, tonemapping, vignette, fog             | [Post-Processing](reference-render-postprocess) |
+| `log.h`           | Logging levels and callbacks                  | [Log](reference-util-log)                       |
+| `profile.h`       | Frame timing statistics                       | [Profile](reference-util-profile)               |
+| `mop.h`           | Umbrella header — includes all above          |                                                 |
 
 ## Viewport Lifecycle
 
@@ -193,7 +193,7 @@ MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y);
 void mop_viewport_input(MopViewport *viewport, const MopInputEvent *event);
 ```
 
-Feeds a platform input event into the viewport's interaction state machine. See [Input](reference-input) for the full event type list and state machine.
+Feeds a platform input event into the viewport's interaction state machine. See [Input](reference-interaction-input) for the full event type list and state machine.
 
 ### `mop_viewport_poll_event`
 
@@ -201,4 +201,4 @@ Feeds a platform input event into the viewport's interaction state machine. See 
 bool mop_viewport_poll_event(MopViewport *viewport, MopEvent *out);
 ```
 
-Dequeues the next output event. Returns `false` when the queue is empty. See [Input](reference-input) for the full output event type list.
+Dequeues the next output event. Returns `false` when the queue is empty. See [Input](reference-interaction-input) for the full output event type list.

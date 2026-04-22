@@ -9,10 +9,15 @@ tags: ["index", "overview"]
 
 Master of Puppets is a backend-agnostic viewport rendering engine written in C11. It provides a clean, layered architecture for rendering 3D geometry through interchangeable backends — CPU software rasterization, OpenGL, or Vulkan — behind a single public API.
 
+## Start Here
+
+**[Skill](skill)** — self-contained, task-oriented entry point. Build + render loop, all common API with signatures, capability matrix per backend, shading model, full worked example, gotchas. Read this first.
+
 ## Documentation
 
 | Section                      | Purpose                                              |
 | ---------------------------- | ---------------------------------------------------- |
+| [Skill](skill)               | Build-anything source-of-truth guide                 |
 | [Architecture](architecture) | System design, layer separation, data flow           |
 | [Reference](reference)       | Module-level API contracts and implementation detail |
 | [Development](development)   | Build system, platform support, contribution guide   |
@@ -29,26 +34,20 @@ Master of Puppets is a backend-agnostic viewport rendering engine written in C11
 | [Extension Strategy](architecture-extension)    | How to add backends, features, and subsystems     |
 | [Scene Graph](architecture-scene-graph)         | Hierarchical transforms and parent-child meshes   |
 
-## Reference — Module Map
+## Reference
 
-| Layer            | Modules                                      | Docs                                                                                                                           |
-| ---------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Public**       | types, viewport, scene, pick, input, light   | [API Contracts](reference-api)                                                                                                 |
-| **Interaction**  | Gizmo, Camera, Undo                          | [Gizmo](reference-gizmo), [Camera](reference-camera), [Undo](reference-undo)                                                   |
-| **Core**         | Lights, Overlays, Display, Pipeline          | [Light](reference-light), [Overlay](reference-overlay), [Display](reference-display), [Pipeline](reference-pipeline)           |
-| **Query**        | Scene query, Camera query, Snapshot, Spatial | [Query](reference-query), [Camera Query](reference-camera-query), [Snapshot](reference-snapshot), [Spatial](reference-spatial) |
-| **RHI**          | Device, Buffer, Framebuffer                  | [RHI](reference-rhi)                                                                                                           |
-| **CPU**          | Rasterizer, Backend                          | [CPU Backend](reference-backend-cpu)                                                                                           |
-| **OpenGL**       | Backend                                      | [OpenGL Backend](reference-backend-opengl)                                                                                     |
-| **Vulkan**       | Backend                                      | [Vulkan Backend](reference-backend-vulkan)                                                                                     |
-| **Math**         | Vec3, Mat4, transforms                       | [Math](reference-math)                                                                                                         |
-| **Picking**      | Object ID buffer                             | [Picking](reference-picking)                                                                                                   |
-| **Material**     | PBR-inspired materials                       | [Material System](reference-material)                                                                                          |
-| **Vertex**       | Flexible vertex format                       | [Vertex Format](reference-vertex-format)                                                                                       |
-| **Loading**      | OBJ, binary .mop format                      | [Loader](reference-loader), [Binary Format](reference-binary-format)                                                           |
-| **Environment**  | HDRI loading, IBL, skybox                    | [Viewport](reference-viewport)                                                                                                 |
-| **Post-Process** | Gamma, fog, vignette                         | [Post-Processing](reference-postprocess)                                                                                       |
-| **Utility**      | Logging, profiling                           | [Log](reference-log), [Profile](reference-profile)                                                                             |
+Grouped to mirror `include/mop/`.
+
+| Section                              | Covers                                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| [Core](reference-core)               | Viewport, scene, meshes, cameras, materials, lights, environment, textures, theme, display |
+| [Interaction](reference-interaction) | Input, gizmo, camera orbit, selection, mesh edit, undo, picking                            |
+| [Render](reference-render)           | RHI, backends, post-processing, overlays, shader plugins, decals, meshlets                 |
+| [Query](reference-query)             | Scene introspection, snapshot, camera state, spatial queries                               |
+| [I/O](reference-io)                  | OBJ / glTF / `.mop` loaders + exporters                                                    |
+| [Utility](reference-util)            | Logging, profiling                                                                         |
+| [API Contracts](reference-api)       | Public preconditions / postconditions (cross-cutting)                                      |
+| [Math](reference-math)               | Vector / matrix / transform primitives (cross-cutting)                                     |
 
 ## Development
 

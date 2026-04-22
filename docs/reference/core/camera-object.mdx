@@ -1,0 +1,130 @@
+---
+title: "Camera Object"
+description: "Cameras as scene objects — icons, frustum visualization, multi-camera setups"
+slug: "reference-core-camera-object"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "camera", "scene"]
+---
+
+## Location
+
+```
+include/mop/core/camera_object.h   — Public API
+src/core/camera_object.c           — Pointer-stable array, frustum mesh
+```
+
+## Purpose
+
+The main viewport camera (`mop_viewport_set_camera`) is a free-floating position / target pair. `MopCameraObject` is an orthogonal concept: a **named, pickable, visualizable camera** stored alongside meshes. Use it when you need:
+
+- Multi-camera setups (switch between rendering viewpoints)
+- Camera icons + frustum wireframes in the viewport
+- Cameras serialized to / loaded from scene files
+
+`MopCameraObject` stores parameters; `mop_viewport_set_active_camera` promotes one to be the active render camera.
+
+## Types
+
+```c
+typedef struct MopCameraObject MopCameraObject;
+
+typedef struct MopCameraObjectDesc {
+    MopVec3  position;
+    MopVec3  target;
+    MopVec3  up;
+    float    fov_degrees;
+    float    near_plane;
+    float    far_plane;
+    float    aspect_ratio;
+    uint32_t object_id;     /* must be nonzero; 0 = reserved for orbit camera */
+    const char *name;       /* display name, copied internally */
+} MopCameraObjectDesc;
+```
+
+## Functions
+
+### Lifecycle
+
+```c
+MopCameraObject *mop_viewport_add_camera   (MopViewport *vp,
+                                            const MopCameraObjectDesc *desc);
+void             mop_viewport_remove_camera(MopViewport *vp,
+                                            MopCameraObject *cam);
+```
+
+`add_camera` returns `NULL` on invalid desc (zero `object_id` is rejected). The returned pointer is stable across other `add_camera` calls — cache it.
+
+### Property setters
+
+```c
+void mop_camera_object_set_position(MopCameraObject *c, MopVec3 pos);
+void mop_camera_object_set_target  (MopCameraObject *c, MopVec3 target);
+void mop_camera_object_set_up      (MopCameraObject *c, MopVec3 up);
+void mop_camera_object_set_fov     (MopCameraObject *c, float fov_degrees);
+void mop_camera_object_set_near    (MopCameraObject *c, float near_plane);
+void mop_camera_object_set_far     (MopCameraObject *c, float far_plane);
+void mop_camera_object_set_aspect  (MopCameraObject *c, float aspect_ratio);
+```
+
+Setters acquire the viewport scene lock internally via the camera's back-pointer — safe to call from any thread.
+
+### Getters
+
+```c
+MopVec3     mop_camera_object_get_position(const MopCameraObject *c);
+MopVec3     mop_camera_object_get_target  (const MopCameraObject *c);
+float       mop_camera_object_get_fov     (const MopCameraObject *c);
+uint32_t    mop_camera_object_get_id      (const MopCameraObject *c);
+const char *mop_camera_object_get_name    (const MopCameraObject *c);
+```
+
+### Frustum visualization
+
+```c
+void mop_camera_object_set_frustum_visible(MopCameraObject *c, bool visible);
+bool mop_camera_object_get_frustum_visible(const MopCameraObject *c);
+```
+
+When enabled, the camera shows up in the viewport as an icon plus a wireframe frustum built from its near / far / fov / aspect. The icon uses a chrome `object_id` (in the `≥ 0xFFFD0000` range) for picking.
+
+### Active camera + enumeration
+
+```c
+void             mop_viewport_set_active_camera(MopViewport *vp,
+                                                MopCameraObject *cam);
+MopCameraObject *mop_viewport_get_active_camera(const MopViewport *vp);
+uint32_t         mop_viewport_get_camera_count (const MopViewport *vp);
+MopCameraObject *mop_viewport_get_camera       (const MopViewport *vp,
+                                                uint32_t index);
+```
+
+`set_active_camera` copies the camera's parameters into the viewport's render camera (equivalent to `mop_viewport_set_camera` with those values). Pass `NULL` to return to the default free camera.
+
+## Usage
+
+```c
+MopCameraObject *c1 = mop_viewport_add_camera(vp, &(MopCameraObjectDesc){
+    .position = {5, 3, 5}, .target = {0, 0, 0}, .up = {0, 1, 0},
+    .fov_degrees = 45, .near_plane = 0.1f, .far_plane = 100,
+    .aspect_ratio = 16.0f / 9.0f,
+    .object_id = 2001, .name = "hero_cam",
+});
+MopCameraObject *c2 = mop_viewport_add_camera(vp, &(MopCameraObjectDesc){
+    .position = {0, 10, 0}, .target = {0, 0, 0}, .up = {0, 0, -1},
+    .fov_degrees = 60, .near_plane = 0.1f, .far_plane = 50,
+    .aspect_ratio = 16.0f / 9.0f,
+    .object_id = 2002, .name = "top_down",
+});
+
+mop_camera_object_set_frustum_visible(c1, true);
+mop_camera_object_set_frustum_visible(c2, true);
+
+/* Switch render viewpoints */
+mop_viewport_set_active_camera(vp, c1);
+```
+
+## See Also
+
+- [Camera](reference-interaction-camera) — main viewport camera + orbit utility
+- [Scene](reference-core-scene) · [Theme](reference-core-theme) — frustum color / width

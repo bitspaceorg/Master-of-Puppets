@@ -1,0 +1,123 @@
+---
+title: "Material System"
+description: "PBR-inspired material descriptor for mesh shading"
+slug: "reference-core-material"
+author: "rahulmnavneeth"
+date: "20 FEB 2026"
+tags: ["reference", "material", "shading"]
+---
+
+## Location
+
+```
+include/mop/core/material.h         — Material descriptor + API
+include/mop/core/material_graph.h   — Node-graph authoring (optional)
+src/core/viewport.c                 — Draw call population
+src/rasterizer/rasterizer.c         — GGX + Lambert shading (CPU)
+src/backend/vulkan/shaders/         — PBR shaders (Vulkan)
+```
+
+## Types
+
+### MopMaterial
+
+```c
+typedef struct MopMaterial {
+    MopColor    base_color;                /* Multiplied with vertex color  */
+    float       metallic;                  /* [0, 1], 0 = dielectric        */
+    float       roughness;                 /* [0, 1], 1 = fully rough       */
+    MopVec3     emissive;                  /* Self-illumination (post-light) */
+    MopTexture *albedo_map;                /* Optional albedo texture       */
+    MopTexture *normal_map;                /* Optional tangent-space normals */
+    MopTexture *metallic_roughness_map;    /* G = roughness, B = metallic   */
+    MopTexture *ao_map;                    /* R = ambient-occlusion factor  */
+} MopMaterial;
+```
+
+Default values (from `mop_material_default()`):
+
+| Field                    | Default                |
+| ------------------------ | ---------------------- |
+| `base_color`             | `{1, 1, 1, 1}` (white) |
+| `metallic`               | `0.0`                  |
+| `roughness`              | `0.5`                  |
+| `emissive`               | `{0, 0, 0}`            |
+| `albedo_map`             | `NULL`                 |
+| `normal_map`             | `NULL`                 |
+| `metallic_roughness_map` | `NULL`                 |
+| `ao_map`                 | `NULL`                 |
+
+## Functions
+
+### mop_material_default
+
+```c
+MopMaterial mop_material_default(void);
+```
+
+Returns a material with sensible defaults. Use this as a starting point and override individual fields.
+
+### mop_mesh_set_material
+
+```c
+void mop_mesh_set_material(MopMesh *mesh, const MopMaterial *material);
+```
+
+Assigns a material to a mesh. The material struct is copied — the application may free or modify its copy after the call.
+
+Texture pointers (`albedo_map`, `normal_map`) are retained by reference. The textures must remain alive as long as the mesh uses them.
+
+## Shading Model
+
+MOP uses a physically-based shading model on both CPU and Vulkan backends. The math is identical between backends; the Vulkan path simply runs it on the GPU.
+
+### Specular — GGX Cook-Torrance
+
+- `D` (normal distribution): Trowbridge-Reitz GGX
+- `G` (geometry): Smith-Schlick
+- `F` (fresnel): Schlick approximation
+
+`roughness` squared is used as the GGX alpha. `metallic` blends the albedo into the Fresnel F0 (`F0 = mix(0.04, base_color, metallic)`).
+
+### Diffuse — Lambert
+
+Plain Lambert, **no `π` division**. The missing `π` cancels out with the Blender directional-light mapping described below, so numbers match the reference renderer.
+
+### Attenuation
+
+Physical inverse-square `1 / d²`, clamped to `d² >= 0.01` to avoid singularities near the light.
+
+### Blender Energy Matching
+
+MOP `intensity` maps to Blender light `strength` as follows:
+
+| Blender light | MOP intensity    |
+| ------------- | ---------------- |
+| Sun           | `strength × π`   |
+| Point / Spot  | `strength × 4π²` |
+
+Following these conventions, SSIM vs EEVEE is ≥ 0.92 on the reference quality-pipeline scenes.
+
+## Node Graph Authoring (Optional)
+
+`include/mop/core/material_graph.h` exposes a DAG of `MopMatNode`s (constants, texture samples, normal map, mix, multiply, add, fresnel, UV transform, vertex color, output) that can be compiled to a flat `MopMaterial`. Use this when you need procedural material construction or want to ship material presets as JSON.
+
+```c
+MopMaterialGraph g;
+mop_mat_graph_init(&g, "brass");
+mop_mat_graph_preset_pbr(&g);
+
+MopMaterial out;
+mop_mat_graph_compile(&g, vp, &out);
+mop_mesh_set_material(mesh, &out);
+```
+
+`mop_mat_graph_to_json` / `mop_mat_graph_from_json` round-trip graphs for persistence.
+
+## Interaction with Other Systems
+
+- **Textures:** create with `mop_viewport_create_texture()`, assign via `material.albedo_map` / `normal_map` / `metallic_roughness_map` / `ao_map`.
+- **Normal mapping:** requires tangent data in the mesh. `mop_obj_load` computes tangents automatically when UVs are present. The glTF loader preserves authored tangents when the file provides them.
+- **Metallic-roughness map:** glTF convention — `G` channel = roughness, `B` channel = metallic. Scalar `metallic` / `roughness` fields multiply the sampled values.
+- **Blend modes:** materials do not control blending. Use `mop_mesh_set_blend_mode()` and `mop_mesh_set_opacity()` separately.
+- **Shading mode:** `MOP_SHADING_FLAT` uses face normals; `MOP_SHADING_SMOOTH` uses interpolated per-vertex normals. The BRDF is the same; only the normal source differs.

@@ -1,0 +1,102 @@
+---
+title: "Export"
+description: "OBJ, JSON scene, and PNG image export"
+slug: "reference-io-export"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "export"]
+---
+
+## Location
+
+```
+include/mop/export/obj_export.h    — Wavefront OBJ
+include/mop/export/scene_export.h  — JSON scene description
+include/mop/export/image_export.h  — PNG framebuffer / buffer
+src/export/obj_export.c
+src/export/scene_export.c
+src/export/image_export.c
+```
+
+All export functions return `0` on success and `-1` on failure.
+
+## OBJ Export
+
+### mop_export_obj_mesh
+
+```c
+int mop_export_obj_mesh(const MopMesh *mesh, const MopViewport *vp,
+                        const char *path);
+```
+
+Write a single mesh to a Wavefront OBJ file. Vertex / index data is read via the zero-copy query API (see [Query](reference-query-query)). Local positions are written as-is — world transform is **not** baked for single-mesh export.
+
+### mop_export_obj_scene
+
+```c
+int mop_export_obj_scene(const MopViewport *vp, const char *path);
+```
+
+Write every active mesh in the viewport to a single OBJ file. Positions are baked by the **world** transform; normals are transformed by the upper-3×3 of the world matrix (approximate for non-uniform scale). Each mesh is emitted as a named object group (`o object_<id>`); index bases auto-increment across meshes.
+
+## Scene JSON Export
+
+### mop_export_scene_json
+
+```c
+int mop_export_scene_json(const MopViewport *vp, const char *path);
+```
+
+Human-readable JSON snapshot of scene state for debug tooling, regression diffs, or round-tripping to external editors. Contents:
+
+- Camera: eye, target, up, fov (degrees), near, far
+- Lights: type, position / direction, color (linear), intensity
+- Objects: per-mesh `object_id`, TRS position / rotation / scale, base_color, metallic, roughness
+
+Not included: vertex / index data (use OBJ or `.mop`), textures, IBL state, post-process flags.
+
+Implemented with `snprintf` — no JSON library dependency.
+
+## PNG Export
+
+### mop_export_png
+
+```c
+int mop_export_png(MopViewport *vp, const char *path);
+```
+
+Read the current framebuffer via `mop_viewport_read_color` and write it as PNG. Call **after** `mop_viewport_render`. Pixel format is RGBA8.
+
+### mop_export_png_buffer
+
+```c
+int mop_export_png_buffer(const uint8_t *rgba, int width, int height,
+                          const char *path);
+```
+
+Write an application-owned RGBA8 buffer as PNG. Stride is `width * 4`. Useful for saving composited / annotated images without routing through a viewport.
+
+Both variants use `stb_image_write` internally.
+
+## Usage
+
+```c
+/* Render one frame and save as PNG. */
+mop_viewport_render(vp);
+mop_export_png(vp, "frame.png");
+
+/* Export entire scene (with baked transforms) to OBJ. */
+mop_export_obj_scene(vp, "scene.obj");
+
+/* Snapshot scene state to JSON for diff / QA. */
+mop_export_scene_json(vp, "scene.json");
+
+/* Save a composited buffer you built by hand. */
+mop_export_png_buffer(my_rgba, w, h, "annotated.png");
+```
+
+## See Also
+
+- [Scene File (.mop v2)](reference-io-scene-file) — binary whole-scene format with quantization
+- [Binary Format](reference-io-binary-format) — mesh-only binary format
+- [Query](reference-query-query) — the read APIs exports are built on top of

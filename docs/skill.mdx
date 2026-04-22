@@ -1,0 +1,956 @@
+---
+title: "MOP Skill — Build Anything"
+description: "Self-contained source of truth for building with Master of Puppets. Read this first."
+slug: "skill"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["skill", "guide", "reference", "source-of-truth"]
+---
+
+This page is the **single entry point** for building with Master of Puppets. It is
+self-contained for the common path — an agent or human can complete ~90% of
+typical tasks without leaving this document. Links go out only for the rare,
+deep material (full RHI vtable, backend internals, binary format spec, adding
+a new backend).
+
+If something in this document contradicts a reference doc, the code wins; file
+an issue or fix the doc.
+
+## What is MOP
+
+Backend-agnostic 3D viewport rendering engine in C11. One public API
+(`include/mop/`); at viewport creation you pick a backend:
+
+- **CPU** — software rasterizer. Deterministic, runs anywhere, no GPU
+  required.
+- **Vulkan** — primary GPU backend (via MoltenVK on macOS). GGX PBR,
+  tonemapping, bloom, SSAO, TAA, SSR, volumetrics, shadows, GPU culling, Hi-Z.
+- **OpenGL** — stub. Not production-ready.
+
+Designed for embedding: DCC viewports, custom tools, game-engine editors. MOP
+never owns a window, never calls `glfwInit` or `SDL_Init`. The host owns the
+window, forwards input, and blits the framebuffer MOP hands back.
+
+## 60-second quick start
+
+```bash
+# Build the static library (CPU only).
+make
+
+# Build with Vulkan backend.
+make MOP_ENABLE_VULKAN=1
+
+# Run the showcase: 60 frames to /tmp/mop-showcase-out/
+cd examples && nix run .#showcase
+
+# Interactive SDL window (Vulkan, HDRI skybox):
+cd examples && nix run .#interactive
+```
+
+Your program links `build/lib/libmop.a` and includes `<mop/mop.h>`.
+
+## Minimal render loop
+
+The smallest complete program. Creates a CPU viewport, adds a cube, renders
+one frame, reads the RGBA8 buffer.
+
+```c
+#include <mop/mop.h>
+#include <stdio.h>
+
+int main(void) {
+  MopViewport *vp = mop_viewport_create(&(MopViewportDesc){
+      .width = 640, .height = 360,
+      .backend = MOP_BACKEND_CPU,
+      .ssaa_factor = 1,
+  });
+  if (!vp) return 1;
+
+  mop_viewport_set_camera(vp,
+      (MopVec3){3, 2, 4},   /* eye    */
+      (MopVec3){0, 0, 0},   /* target */
+      (MopVec3){0, 1, 0},   /* up     */
+      45.0f, 0.1f, 100.0f); /* fov°, near, far */
+
+  mop_viewport_set_ambient(vp, 0.2f);
+  mop_viewport_add_light(vp, &(MopLight){
+      .type = MOP_LIGHT_DIRECTIONAL,
+      .direction = {-0.4f, -0.9f, -0.3f},
+      .color = {1, 1, 1, 1},
+      .intensity = 3.0f,
+      .active = true,
+  });
+
+  /* A single triangle (CCW viewed from camera). */
+  MopVertex v[3] = {
+      {.position = {-1, -1, 0}, .normal = {0, 0, 1}, .color = {1, 0, 0, 1}},
+      {.position = { 1, -1, 0}, .normal = {0, 0, 1}, .color = {0, 1, 0, 1}},
+      {.position = { 0,  1, 0}, .normal = {0, 0, 1}, .color = {0, 0, 1, 1}},
+  };
+  uint32_t idx[3] = {0, 1, 2};
+  mop_viewport_add_mesh(vp, &(MopMeshDesc){
+      .vertices = v, .vertex_count = 3,
+      .indices = idx, .index_count = 3,
+      .object_id = 1,
+  });
+
+  mop_viewport_render(vp);
+
+  int w, h;
+  const uint8_t *rgba = mop_viewport_read_color(vp, &w, &h);
+  mop_export_png_buffer(rgba, w, h, "/tmp/triangle.png");
+
+  mop_viewport_destroy(vp);
+  return 0;
+}
+```
+
+Compile:
+
+```bash
+cc -std=c11 -Iinclude demo.c -Lbuild/lib -lmop -lm -lpthread -lc++ -o demo
+```
+
+## Core concepts (the non-obvious stuff)
+
+| Concept               | Rule                                                                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Handles**           | `MopViewport *`, `MopMesh *`, `MopGizmo *`, `MopTexture *` are opaque. Never dereference. Size is not part of the ABI.                                                   |
+| **Math**              | Column-major matrices: `MopMat4.d[col * 4 + row]`. Translation goes at `M(row, col=3)`, **not** `M(row=3, col)`.                                                         |
+| **Winding**           | CCW viewed from outside. Verify with `dot(cross(e1, e2), n) > 0`. Sphere / OBJ input: double-check — silent flip is the #1 "lighting looks wrong" cause.                 |
+| **Color space**       | `MopColor` inputs are linear RGB. sRGB→linear conversion is the app's job for texture data; MOP does gamma on output via `MOP_POST_GAMMA`.                               |
+| **Coordinates**       | Right-handed. Y-up. Screen origin top-left when reading `object_id` buffer.                                                                                              |
+| **Object IDs**        | `MopMeshDesc.object_id` must be `> 0` and `< 0xFFFD0000`. IDs `≥ 0xFFFD0000` are reserved for chrome (gizmo handles, grid, lights).                                      |
+| **Reverse-Z**         | Optional (`MopViewportDesc.reverse_z`). Improves depth precision on GPU backends. The CPU backend ignores the flag.                                                      |
+| **SSAA**              | `ssaa_factor=N` renders at `N×` the stated size and box-filters down. Host-owned render targets require `ssaa_factor=1`.                                                 |
+| **Pointer stability** | `MopMesh*` and `MopInstancedMesh*` are pointer-stable across add/remove. You can cache the pointer for the life of the mesh.                                             |
+| **Thread safety**     | Single render thread by default. Any mutation from another thread must be wrapped in `mop_viewport_scene_lock` / `mop_viewport_scene_unlock`. The lock is non-recursive. |
+
+## Capability matrix
+
+| Feature                                       | CPU         | Vulkan   | OpenGL   |
+| --------------------------------------------- | ----------- | -------- | -------- |
+| Solid / wireframe / smooth / flat             | ✅          | ✅       | ⚠️       |
+| Gouraud / GGX Cook-Torrance                   | ✅ (GGX)    | ✅ (GGX) | ⚠️       |
+| Textures (albedo / normal / metal-rough / AO) | ✅          | ✅       | ⚠️       |
+| HDRI environment + IBL                        | ✅          | ✅       | ⚠️       |
+| Bloom, SSAO, SSR, TAA, OIT, Volumetrics       | —           | ✅       | —        |
+| Shadows (cascaded)                            | —           | ✅       | —        |
+| FXAA, Tonemap, Gamma, Fog, Vignette           | ✅          | ✅       | ⚠️       |
+| Picking (object-ID buffer)                    | ✅          | ✅       | ⚠️       |
+| CPU raycast (mesh/AABB)                       | ✅          | ✅       | ✅       |
+| Instanced meshes                              | ✅          | ✅       | ⚠️       |
+| Skinning / morph targets                      | ✅          | ✅       | ⚠️       |
+| LOD                                           | ✅          | ✅       | ⚠️       |
+| GPU frustum + Hi-Z occlusion culling          | —           | ✅       | —        |
+| GPU timing                                    | —           | ✅       | ⚠️       |
+| Host-owned render targets                     | ✅ (ssaa=1) | fallback | fallback |
+| Determinism (pixel-exact)                     | ✅          | ❌       | ❌       |
+
+Legend: ✅ works, — not available, ⚠️ partial / unverified on current stub.
+
+Pick **Vulkan** for quality and perf. Pick **CPU** for determinism, headless
+CI, or no-GPU environments. Avoid OpenGL for new work.
+
+```c
+/* Runtime selection. The .backend field takes any MopBackendType. */
+MopBackendType b = MOP_BACKEND_AUTO; /* platform default */
+b = MOP_BACKEND_CPU;    /* always available */
+b = MOP_BACKEND_VULKAN; /* requires MOP_ENABLE_VULKAN=1 at build */
+```
+
+## Viewport lifecycle
+
+```c
+MopViewport *mop_viewport_create(const MopViewportDesc *desc);
+void         mop_viewport_destroy(MopViewport *vp);
+void         mop_viewport_resize(MopViewport *vp, int w, int h);
+
+MopRenderResult mop_viewport_render(MopViewport *vp);
+const uint8_t  *mop_viewport_read_color(MopViewport *vp, int *w, int *h);
+MopFrameStats   mop_viewport_get_stats(const MopViewport *vp);
+```
+
+`MopViewportDesc`:
+
+```c
+typedef struct MopViewportDesc {
+  int width, height;            /* logical render size (pre-ssaa)     */
+  MopBackendType backend;       /* MOP_BACKEND_{AUTO,CPU,VULKAN,...}  */
+  bool reverse_z;               /* GPU only; CPU ignores              */
+  int ssaa_factor;              /* 1, 2, or 4                         */
+  MopTexture *render_target;    /* host-owned target, or NULL         */
+} MopViewportDesc;
+```
+
+Typical loop (host owns the window):
+
+```c
+while (running) {
+  pump_events(vp);                        /* mop_viewport_input */
+  mop_viewport_render(vp);                /* draws into internal fb */
+  int w, h;
+  const uint8_t *px = mop_viewport_read_color(vp, &w, &h);
+  blit_to_window(px, w, h);               /* host */
+}
+```
+
+## Meshes
+
+### Standard vertex format
+
+```c
+typedef struct MopVertex {
+  MopVec3 position;
+  MopVec3 normal;
+  MopColor color;                         /* linear RGBA [0,1] */
+  float u, v;                             /* UV [0,1] */
+} MopVertex;                              /* 48 bytes */
+```
+
+### Create / remove
+
+```c
+MopMesh *mop_viewport_add_mesh(MopViewport *vp, const MopMeshDesc *desc);
+void     mop_viewport_remove_mesh(MopViewport *vp, MopMesh *mesh);
+void     mop_mesh_update_geometry(MopMesh *m, MopViewport *vp,
+                                  const MopVertex *v, uint32_t vc,
+                                  const uint32_t *idx, uint32_t ic);
+```
+
+MOP copies vertex/index data on add. You can free your arrays immediately
+after the call returns.
+
+### Transform — prefer TRS over matrix
+
+```c
+mop_mesh_set_position(m, (MopVec3){0, 1, 0});
+mop_mesh_set_rotation(m, (MopVec3){0, M_PI / 4, 0});  /* euler rad */
+mop_mesh_set_scale   (m, (MopVec3){2, 2, 2});
+```
+
+`mop_mesh_set_transform(m, &MopMat4)` exists but the TRS path is faster and
+plays nicely with the gizmo + undo system.
+
+### Hierarchy
+
+```c
+mop_mesh_set_parent(child, parent, vp);
+mop_mesh_clear_parent(child);
+MopMat4 world = mop_mesh_get_world_transform(child);
+```
+
+Transforms propagate top-down in a single pass (no fixed iteration cap).
+Cycles are rejected by `set_parent`.
+
+### Material + textures
+
+```c
+MopMaterial m = mop_material_default();
+m.base_color = (MopColor){0.9f, 0.5f, 0.2f, 1.0f};
+m.metallic   = 0.9f;
+m.roughness  = 0.25f;
+mop_mesh_set_material(mesh, &m);
+
+MopTexture *tex = mop_viewport_create_texture(vp, w, h, rgba_bytes);
+mop_mesh_set_texture(mesh, tex);
+```
+
+`MopMaterial` fields: `base_color, metallic, roughness, emissive,
+albedo_map, normal_map, metallic_roughness_map, ao_map`.
+
+### Opacity + blend mode
+
+```c
+mop_mesh_set_opacity(m, 0.5f);
+mop_mesh_set_blend_mode(m, MOP_BLEND_ALPHA);
+/* Modes: MOP_BLEND_OPAQUE, MOP_BLEND_ALPHA, MOP_BLEND_ADDITIVE,
+ * MOP_BLEND_MULTIPLY. */
+```
+
+### Instanced meshes
+
+```c
+MopMat4 transforms[1000];
+for (int i = 0; i < 1000; i++)
+  transforms[i] = mop_mat4_translate((MopVec3){i * 1.5f, 0, 0});
+
+MopInstancedMesh *inst = mop_viewport_add_instanced_mesh(
+    vp, &desc, transforms, 1000);
+
+/* Update each frame without rebuilding vertex buffers: */
+mop_instanced_mesh_update_transforms(inst, transforms, 1000);
+```
+
+### LOD
+
+```c
+mop_mesh_add_lod(hi_res_mesh, vp, &lod1_desc, /*screen_px*/ 256.0f);
+mop_mesh_add_lod(hi_res_mesh, vp, &lod2_desc, /*screen_px*/ 64.0f);
+mop_viewport_set_lod_bias(vp, 0.0f);  /* + = lower detail, - = higher */
+```
+
+Max 8 LOD levels per mesh.
+
+### Skinning (joints + weights)
+
+Use `mop_viewport_add_mesh_ex` with a flexible `MopVertexFormat` that
+includes `MOP_ATTRIB_JOINTS` and `MOP_ATTRIB_WEIGHTS`. Then:
+
+```c
+mop_mesh_set_bone_hierarchy(mesh, parent_indices, bone_count);
+mop_mesh_set_bone_matrices (mesh, vp, current_matrices, bone_count);
+```
+
+First call records the bind pose. Subsequent calls animate bind-relative.
+
+### Morph targets
+
+```c
+mop_mesh_set_morph_targets(mesh, vp, targets, weights, target_count);
+/* target_count * vertex_count * 3 floats (position deltas). */
+mop_mesh_set_morph_weights(mesh, weights, target_count);
+```
+
+## Lights
+
+```c
+typedef enum {
+  MOP_LIGHT_DIRECTIONAL,
+  MOP_LIGHT_POINT,
+  MOP_LIGHT_SPOT,
+} MopLightType;
+
+MopLight *mop_viewport_add_light(MopViewport *vp, const MopLight *desc);
+void      mop_viewport_remove_light(MopViewport *vp, MopLight *light);
+void      mop_viewport_clear_lights(MopViewport *vp);
+```
+
+### Blender-matched intensity conventions
+
+- Directional (SUN): MOP `intensity` = Blender `strength × π`
+- Point / Spot: MOP `intensity` = Blender `strength × 4π²`
+
+Point / spot attenuation is physical `1 / d²` (clamped `d² ≥ 0.01`).
+
+### Diffuse + specular
+
+Lambert diffuse (no `π` division — cancels with the SUN `×π` mapping above).
+**GGX Cook-Torrance** specular: `D = Trowbridge-Reitz`, `G = Smith-Schlick`,
+`F = Schlick`. Metallic blends albedo into F0; roughness drives D and G.
+
+Old Blinn-Phong + `1/(1+d²)` are gone. Quality-pipeline SSIM vs Blender's
+EEVEE is ≥ 0.92 on the reference scenes.
+
+## Environment / HDRI
+
+```c
+mop_viewport_set_environment(vp, &(MopEnvironmentDesc){
+    .type = MOP_ENV_HDRI,
+    .hdr_path = "/path/to/skybox.exr",  /* .hdr or .exr */
+    .rotation = 0.0f,
+    .intensity = 1.0f,
+});
+mop_viewport_set_environment_background(vp, true);  /* draw as skybox */
+```
+
+Types: `MOP_ENV_NONE`, `MOP_ENV_GRADIENT`, `MOP_ENV_HDRI`,
+`MOP_ENV_PROCEDURAL_SKY`. HDRI path is baked into an irradiance cubemap for
+IBL and a prefiltered specular cubemap. First frame after `set_environment`
+is slower (convolution).
+
+For procedural sky, additionally call `mop_viewport_set_procedural_sky` with
+sun direction + turbidity + ground albedo.
+
+## Camera
+
+### Direct
+
+```c
+mop_viewport_set_camera(vp,
+    (MopVec3){eye_x, eye_y, eye_z},
+    (MopVec3){tgt_x, tgt_y, tgt_z},
+    (MopVec3){0, 1, 0},
+    45.0f,     /* fov degrees   */
+    0.1f,      /* near plane    */
+    100.0f);   /* far plane     */
+
+mop_viewport_set_camera_mode(vp, MOP_CAMERA_PERSPECTIVE);  /* or ORTHOGRAPHIC */
+```
+
+`mop_viewport_set_camera_orbit(...)` avoids the `asinf` pitch-clamp — use it
+from orbit-camera drag code; otherwise `set_camera` is fine.
+
+### Orbit utility
+
+```c
+MopOrbitCamera cam = mop_orbit_camera_default();
+
+/* per mouse event: */
+mop_orbit_camera_orbit(&cam, mouse_dx, mouse_dy, 0.005f);
+mop_orbit_camera_pan  (&cam, mouse_dx, mouse_dy);
+mop_orbit_camera_zoom (&cam, scroll_delta);
+mop_orbit_camera_snap_to_view(&cam, MOP_VIEW_FRONT);
+
+/* per frame: */
+mop_orbit_camera_tick(&cam, dt);         /* inertia decay */
+mop_orbit_camera_apply(&cam, vp);
+```
+
+### Frustum + ray
+
+```c
+MopFrustum f  = mop_viewport_get_frustum(vp);
+MopRay     r  = mop_viewport_pixel_to_ray(vp, mouse_x, mouse_y);
+MopRayHit  h  = mop_viewport_raycast(vp, mouse_x, mouse_y);  /* CPU */
+```
+
+CPU raycast does AABB broadphase + Moller-Trumbore narrowphase over all
+active meshes. For GPU-accelerated pick, use `mop_viewport_pick` (reads the
+object-ID buffer).
+
+## Post-processing
+
+Bitfield flags (see `include/mop/render/postprocess.h`):
+
+```c
+mop_viewport_set_post_effects(vp,
+    MOP_POST_GAMMA      |   /* always on for LDR display       */
+    MOP_POST_TONEMAP    |   /* ACES + exposure                 */
+    MOP_POST_FXAA       |   /* cheap edge AA                   */
+    MOP_POST_BLOOM      |   /* GPU only                        */
+    MOP_POST_SSAO       |   /* GPU only                        */
+    MOP_POST_TAA        |   /* GPU only; jittered accumulation */
+    MOP_POST_SSR        |   /* GPU only                        */
+    MOP_POST_FOG        |   /* set params below                */
+    MOP_POST_VIGNETTE   |
+    MOP_POST_VOLUMETRIC |   /* GPU only                        */
+    MOP_POST_OIT);          /* GPU only; order-independent     */
+```
+
+Parameters:
+
+```c
+mop_viewport_set_exposure(vp, 1.0f);
+mop_viewport_set_bloom   (vp, /*threshold*/ 1.0f, /*intensity*/ 0.5f);
+mop_viewport_set_ssr     (vp, 0.5f);
+mop_viewport_set_fog     (vp, &(MopFogParams){
+    .color = {0.5f, 0.6f, 0.7f, 1},
+    .near_dist = 5.0f, .far_dist = 50.0f,
+});
+mop_viewport_set_volumetric(vp, &(MopVolumetricParams){
+    .density = 0.02f, .anisotropy = 0.3f, .steps = 32,
+    .color = {1, 1, 1, 1},
+});
+```
+
+Effects that are not available on a backend are silently skipped; check the
+capability matrix.
+
+## Shading + render modes
+
+```c
+mop_viewport_set_shading    (vp, MOP_SHADING_SMOOTH);   /* or FLAT */
+mop_viewport_set_render_mode(vp, MOP_RENDER_SOLID);     /* or WIREFRAME */
+
+/* Per-mesh override (pass -1 to inherit): */
+mop_mesh_set_shading(mesh, MOP_SHADING_FLAT);
+```
+
+## Input + events
+
+The host translates platform events into `MopInputEvent` and feeds
+`mop_viewport_input`. Output events are drained from
+`mop_viewport_poll_event`.
+
+```c
+typedef struct MopInputEvent {
+  MopInputType type;      /* MOP_INPUT_POINTER_DOWN, ... */
+  float x, y;             /* pixel coords (drawable px)  */
+  float dx, dy;           /* pixel deltas                */
+  float scroll;
+  float value;            /* generic payload             */
+  uint32_t modifiers;     /* MOP_MOD_SHIFT | _CTRL | _ALT */
+} MopInputEvent;
+```
+
+Example mappings (see `examples/interactive.c` for the full SDL mapping):
+
+```c
+/* Left click */
+me.type = MOP_INPUT_POINTER_DOWN;
+me.x = pixel_x; me.y = pixel_y;
+mop_viewport_input(vp, &me);
+
+/* Mouse drag */
+me.type = MOP_INPUT_POINTER_MOVE;
+me.dx = rel_x; me.dy = rel_y;
+
+/* Ctrl + left drag = dolly zoom */
+me.type = MOP_INPUT_SCROLL;
+me.scroll = -rel_y * 0.02f;
+
+/* Two-finger trackpad scroll = orbit */
+me.type = MOP_INPUT_SCROLL_ORBIT;
+me.dx = -wheel_x * 8.0f;
+me.dy =  wheel_y * 8.0f;
+
+/* Gizmo mode hotkeys */
+me.type = MOP_INPUT_MODE_TRANSLATE;  /* also ROTATE, SCALE */
+
+/* Shading hotkeys */
+me.type = MOP_INPUT_SET_SHADING;
+me.value = MOP_SHADING_SMOOTH;
+
+/* History */
+me.type = MOP_INPUT_UNDO;   /* or REDO */
+```
+
+### Output events
+
+```c
+MopEvent e;
+while (mop_viewport_poll_event(vp, &e)) {
+  switch (e.type) {
+    case MOP_EVENT_SELECTED:          /* e.object_id */
+    case MOP_EVENT_DESELECTED:
+    case MOP_EVENT_TRANSFORM_CHANGED: /* e.position / rotation / scale */
+    case MOP_EVENT_SHADING_CHANGED:
+    case MOP_EVENT_RENDER_MODE_CHANGED:
+    case MOP_EVENT_POST_EFFECTS_CHANGED:
+    case MOP_EVENT_LIGHT_CHANGED:
+    case MOP_EVENT_EDIT_MODE_CHANGED:
+    case MOP_EVENT_ELEMENT_SELECTED:
+    case MOP_EVENT_ELEMENT_DESELECTED:
+      /* update host UI panel */
+      break;
+    default: break;
+  }
+}
+```
+
+## Gizmo
+
+Translate / rotate / scale handles. Hit testing, hover state, and drag math
+are handled internally — the host just feeds input and watches for
+`TRANSFORM_CHANGED` events.
+
+```c
+MopGizmo *g = mop_gizmo_create(vp);
+mop_gizmo_show(g, object_position, selected_mesh);
+mop_gizmo_set_mode(g, MOP_GIZMO_TRANSLATE);  /* or ROTATE, SCALE */
+
+/* Per-frame keep it screen-stable (the draw path calls this too, but */
+/* calling it once a frame is cheap and correct): */
+mop_gizmo_update(g);
+
+/* ...host drives with MOP_INPUT_POINTER_DOWN / MOVE / UP ... */
+
+mop_gizmo_hide(g);
+mop_gizmo_destroy(g);
+```
+
+Axis colors, shaft thickness, tip sizes, and hover tint come from the theme
+(see "Overlays + theme" below). At high DPI MOP scales tip ball and label
+sizes automatically; the shaft width is taken literally from
+`theme.gizmo_line_width`.
+
+## Selection + edit mode
+
+Object-level:
+
+```c
+mop_viewport_select_object(vp, object_id, /*additive=*/ false);
+mop_viewport_deselect_object(vp, object_id);
+bool sel = mop_viewport_is_object_selected(vp, object_id);
+uint32_t count = mop_viewport_get_selected_count(vp);
+```
+
+Sub-element (requires entering edit mode on a mesh):
+
+```c
+mop_mesh_set_edit_mode(mesh, MOP_EDIT_VERTEX);  /* or EDGE, FACE */
+mop_viewport_select_element(vp, element_index);
+const MopSelection *s = mop_viewport_get_selection(vp);
+```
+
+Mesh editing (topology mutation — pushes undo when called via input):
+
+```c
+mop_mesh_move_vertices  (m, vp, indices, count, delta);
+mop_mesh_delete_vertices(m, vp, indices, count);
+mop_mesh_merge_vertices (m, vp, v0, v1);
+mop_mesh_split_edge     (m, vp, e0, e1);
+mop_mesh_dissolve_edge  (m, vp, e0, e1);
+mop_mesh_extrude_faces  (m, vp, faces, count, distance);
+mop_mesh_inset_faces    (m, vp, faces, count, inset);
+mop_mesh_delete_faces   (m, vp, faces, count);
+mop_mesh_flip_normals   (m, vp, faces, count);
+```
+
+## Undo / Redo
+
+```c
+mop_viewport_push_undo         (vp, mesh);              /* TRS snapshot */
+mop_viewport_push_undo_material(vp, mesh);              /* material snapshot */
+mop_viewport_push_undo_batch   (vp, meshes, count);     /* atomic multi-mesh */
+mop_viewport_undo(vp);
+mop_viewport_redo(vp);
+```
+
+Input events (`MOP_INPUT_UNDO`, `MOP_INPUT_REDO`) are a convenience
+wrapper over the above. The gizmo drag path pushes its own undo entry on
+release — you don't need to.
+
+## Picking
+
+```c
+/* GPU pick — reads object-ID buffer (1 sample). */
+MopPickResult p = mop_viewport_pick(vp, pixel_x, pixel_y);
+if (p.hit) {
+  MopMesh *m = mop_viewport_mesh_by_id(vp, p.object_id);
+  float depth_ndc = p.depth;  /* [0,1] */
+}
+
+/* CPU raycast — tests all meshes, returns surface data. */
+MopRayHit h = mop_viewport_raycast(vp, pixel_x, pixel_y);
+if (h.hit) {
+  /* h.object_id, h.distance, h.position, h.normal, h.u, h.v */
+}
+```
+
+GPU pick is O(1) per query but only gives object ID + depth. CPU raycast
+gives full surface hit (position, normal, barycentrics, triangle index) at
+O(meshes × triangles) cost.
+
+## Overlays + theme
+
+Built-in overlays (toggle with `mop_viewport_set_overlay_enabled`):
+
+| ID                      | What                                   |
+| ----------------------- | -------------------------------------- |
+| `MOP_OVERLAY_WIREFRAME` | Wireframe-on-shaded                    |
+| `MOP_OVERLAY_NORMALS`   | Per-vertex normal lines                |
+| `MOP_OVERLAY_BOUNDS`    | AABB boxes                             |
+| `MOP_OVERLAY_SELECTION` | Highlight for selected meshes          |
+| `MOP_OVERLAY_OUTLINE`   | Silhouette outline on selected objects |
+| `MOP_OVERLAY_SKELETON`  | Bone visualization                     |
+
+Custom overlays are a `void (*)(MopViewport *, void *user_data)` callback
+registered with `mop_viewport_add_overlay`; inside the callback you push
+screen-space primitives via `mop_overlay_push_line/circle/diamond` (see
+`src/core/overlay_builtin.c`).
+
+### Theme
+
+```c
+MopTheme t = mop_theme_default();
+t.accent                    = (MopColor){1, 1, 1, 1};      /* outline color */
+t.selection_outline         = t.accent;
+t.selection_outline_width   = 2.0f;
+t.gizmo_line_width          = 10.0f;    /* literal px, DPI-unscaled */
+t.gizmo_target_opacity      = 1.0f;
+t.grid_line_width_major     = 2.0f;
+t.grid_line_width_axis      = 6.0f;
+mop_viewport_set_theme(vp, &t);
+```
+
+Outline color is `theme.accent` (not `selection_outline` — that one is the
+post-process outline shader's stroke color).
+
+### Internal overlay pipeline (why it matters)
+
+MOP rasterizes 2D chrome (gizmo, light indicators, camera icons, axis
+navigator) onto the **readback color buffer** on the CPU after the GPU
+frame readback. This guarantees:
+
+- Gizmo (pushed with `depth = -1`) always draws on top of the selection
+  outline on every backend.
+- Indicators pushed with `depth ≥ 0` are depth-tested against the scene
+  depth buffer and are correctly occluded by geometry.
+
+You don't need to care unless you're writing a new built-in overlay. If you
+do: push with `depth = -1` to draw always-on-top, or a real NDC depth to
+respect the scene.
+
+## Loaders
+
+```c
+/* Auto-detect by extension (.obj, .mop) */
+MopLoadedMesh m;
+if (mop_load("model.obj", &m)) {
+  /* m.vertices, m.vertex_count, m.indices, m.index_count, m.bbox_{min,max} */
+  mop_viewport_add_mesh(vp, &(MopMeshDesc){
+      .vertices = m.vertices, .vertex_count = m.vertex_count,
+      .indices  = m.indices,  .index_count  = m.index_count,
+      .object_id = 1,
+  });
+  mop_load_free(&m);
+}
+
+/* glTF 2.0 (.glb / .gltf) */
+MopGltfScene s;
+if (mop_gltf_load("model.glb", &s)) {
+  uint32_t added = mop_gltf_import(&s, vp, /*base_object_id=*/ 100);
+  /* Creates meshes + textures + materials + bone hierarchies. */
+  mop_gltf_free(&s);
+}
+
+/* MOP scene format (.mop v2, full viewport snapshot) */
+MopSceneFile *sf = mop_scene_load("scene.mop");
+uint32_t n = mop_scene_mesh_count(sf);
+MopLoadedMesh mesh;
+if (mop_scene_get_mesh(sf, 0, &mesh)) { /* ... */ }
+mop_scene_free(sf);
+```
+
+## Export
+
+```c
+mop_export_obj_mesh (mesh, vp, "cube.obj");
+mop_export_obj_scene(vp,       "scene.obj");     /* bakes transforms */
+mop_export_scene_json(vp,      "scene.json");    /* camera+lights+meshes */
+mop_export_png(vp,             "frame.png");     /* after render */
+mop_export_png_buffer(rgba, w, h, "frame.png");  /* raw buffer */
+
+mop_scene_save(vp, "scene.mop", MOP_SAVE_QUANTIZE);  /* .mop v2, 20B verts */
+```
+
+## Queries + snapshot
+
+### Enumeration
+
+```c
+uint32_t n = mop_viewport_mesh_count(vp);
+for (uint32_t i = 0; i < n; i++) {
+  MopMesh *m = mop_viewport_mesh_at(vp, i);
+  uint32_t id = mop_mesh_get_object_id(m);
+  MopAABB aabb = mop_mesh_get_aabb_world(m, vp);
+  /* ... */
+}
+MopMesh *m = mop_viewport_mesh_by_id(vp, specific_id);  /* O(n) */
+```
+
+### Zero-copy snapshot (for BVH builds, CPU raytracing, exporters)
+
+```c
+MopSceneSnapshot snap = mop_viewport_snapshot(vp);   /* call AFTER render */
+uint32_t tri_count = mop_snapshot_triangle_count(&snap);
+
+MopTriangleIter it = mop_triangle_iter_begin(vp);
+MopTriangle tri;
+while (mop_triangle_iter_next(&it, &tri)) {
+  /* tri.p[3], tri.n[3], tri.c[3], tri.uv[3][2],
+   * tri.material, tri.object_id — all world-space */
+}
+```
+
+### Spatial
+
+```c
+MopAABB scene_box = mop_viewport_get_scene_aabb(vp);
+MopFrustum f      = mop_viewport_get_frustum(vp);
+int class         = mop_frustum_test_aabb(&f, scene_box);  /* 1/0/-1 */
+bool hit          = mop_ray_intersect_aabb(ray, aabb, &tn, &tf);
+bool tri_hit      = mop_ray_intersect_triangle(ray, v0, v1, v2, &t, &u, &v);
+```
+
+## Threading
+
+The render loop runs on a single thread. Any mutation from another thread
+must be wrapped:
+
+```c
+mop_viewport_scene_lock(vp);
+mop_mesh_set_position(m, new_pos);
+mop_mesh_set_material(m, &mat);
+mop_viewport_scene_unlock(vp);
+```
+
+Rules:
+
+- The lock is **non-recursive**. Don't call `scene_lock` twice.
+- `mop_viewport_render` takes the lock internally for the duration of the
+  frame. Don't call render while holding the lock yourself.
+- Read-only queries (`mop_viewport_mesh_at`, `mop_mesh_get_position`) are
+  safe without the lock **only if** you know no other thread is mutating.
+- `MopMesh*` pointers are pointer-stable, so you can cache them across
+  frames without re-locking to look up the mesh each time.
+
+See `examples/showcase.c` for a worker-thread driving scene mutation while
+the main thread renders.
+
+## Gotchas (the painful non-obvious stuff)
+
+- **Matrix translation** — goes at `M(row, col=3)`, i.e. `d[12], d[13],
+d[14]`. Putting it at `M(row=3, col)` compiles and runs but gives garbage.
+- **OBJ winding** — Blender-exported spheres and some assets come CW. MOP
+  is strict CCW. Verify with `dot(cross(e1, e2), normal) > 0` on a known
+  front-facing triangle, or pre-flip on import.
+- **Perspective matrix** — `-1` at `d[11]` (col 2, row 3); `-2fn/(f-n)` at
+  `d[14]` (col 3, row 2). `mop_mat4_perspective` does this for you.
+- **MoltenVK D32_SFLOAT cross-CB sampling** — broken on MoltenVK/Metal. Do
+  NOT sample the depth image across command buffer boundaries. Use the
+  internal `depth_copy_image` path (R32_SFLOAT color copy via readback
+  buffer).
+- **`-O0` builds are slow for GGX** — torture tests time out. Build with
+  `make RELEASE=1` for perf work; `-Og` (the default) is the debug-friendly
+  compromise.
+- **SSIM comparisons** — golden images must come from Blender (or the
+  renderer you're matching), not from a prior MOP version. Self-comparison
+  accumulates drift.
+- **`object_id` range** — keep app IDs below `0xFFFD0000`; the top range is
+  reserved for MOP chrome (gizmo handles, grid, lights).
+- **Retina / HiDPI** — `MopViewportDesc.width/height` is physical pixels.
+  If your host window is 1280×720 on a 2× display, create the viewport at
+  2560×1440 (or let SDL tell you the drawable size). Input event positions
+  must be in the same pixel space.
+- **Per-triangle edge AA causes seams** — don't enable it. Use FXAA as a
+  post-process (`MOP_POST_FXAA`) instead.
+- **Pointer-stable pool** — `MopMesh*` stays valid across any number of
+  adds and removes. Don't rewrite your code to look up by `object_id` each
+  frame; the pointer cache works.
+
+## Full worked example
+
+Interactive embedding skeleton. Host owns the SDL window + SDL_Texture;
+MOP renders into an RGBA8 buffer that's uploaded each frame. Drawn from
+`examples/interactive.c` — see that file for the complete ~550-line
+implementation.
+
+```c
+#include <mop/mop.h>
+#include <mop/core/theme.h>
+#include <SDL.h>
+
+int main(int argc, char **argv) {
+  SDL_Init(SDL_INIT_VIDEO);
+  SDL_Window *win = SDL_CreateWindow("MOP", SDL_WINDOWPOS_CENTERED,
+      SDL_WINDOWPOS_CENTERED, 1280, 720,
+      SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+  SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+
+  int draw_w, draw_h;
+  SDL_GetRendererOutputSize(ren, &draw_w, &draw_h);
+  SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
+      SDL_TEXTUREACCESS_STREAMING, draw_w, draw_h);
+
+  MopViewport *vp = mop_viewport_create(&(MopViewportDesc){
+      .width = draw_w, .height = draw_h,
+      .backend = MOP_BACKEND_VULKAN,
+      .ssaa_factor = 1,
+  });
+
+  MopTheme th = mop_theme_default();
+  th.accent = (MopColor){1, 1, 1, 1};
+  mop_viewport_set_theme(vp, &th);
+
+  mop_viewport_set_camera(vp, (MopVec3){4.5f, 3.2f, 5.0f},
+      (MopVec3){0,0,0}, (MopVec3){0,1,0}, 45.0f, 0.1f, 100.0f);
+  mop_viewport_set_shading(vp, MOP_SHADING_SMOOTH);
+  mop_viewport_set_post_effects(vp,
+      MOP_POST_GAMMA | MOP_POST_TONEMAP | MOP_POST_FXAA);
+  mop_viewport_set_ambient(vp, 0.15f);
+  mop_viewport_add_light(vp, &(MopLight){
+      .type = MOP_LIGHT_DIRECTIONAL,
+      .direction = {-0.4f, -0.9f, -0.3f},
+      .color = {1, 0.95f, 0.9f, 1}, .intensity = 3.0f, .active = true,
+  });
+  mop_viewport_set_environment(vp, &(MopEnvironmentDesc){
+      .type = MOP_ENV_HDRI, .hdr_path = "skybox.exr", .intensity = 1.0f,
+  });
+  mop_viewport_set_environment_background(vp, true);
+
+  /* add_cube / add_sphere helpers omitted; see examples/interactive.c */
+  MopMesh *cube = add_cube(vp, 1, (MopColor){0.9f, 0.5f, 0.2f, 1});
+  MopMaterial m = mop_material_default();
+  m.metallic = 0.9f; m.roughness = 0.25f;
+  mop_mesh_set_material(cube, &m);
+
+  bool running = true;
+  while (running) {
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+      MopInputEvent me = {0};
+      switch (ev.type) {
+        case SDL_QUIT: running = false; break;
+        case SDL_MOUSEBUTTONDOWN:
+          me.type = (ev.button.button == SDL_BUTTON_LEFT)
+              ? MOP_INPUT_POINTER_DOWN : MOP_INPUT_SECONDARY_DOWN;
+          me.x = ev.button.x * ((float)draw_w / 1280.0f);
+          me.y = ev.button.y * ((float)draw_h / 720.0f);
+          mop_viewport_input(vp, &me);
+          break;
+        case SDL_MOUSEMOTION:
+          me.type = MOP_INPUT_POINTER_MOVE;
+          me.x = ev.motion.x;      me.y = ev.motion.y;
+          me.dx = ev.motion.xrel;  me.dy = ev.motion.yrel;
+          mop_viewport_input(vp, &me);
+          break;
+        case SDL_KEYDOWN:
+          if (ev.key.keysym.sym == SDLK_w) me.type = MOP_INPUT_MODE_TRANSLATE;
+          else if (ev.key.keysym.sym == SDLK_e) me.type = MOP_INPUT_MODE_ROTATE;
+          else if (ev.key.keysym.sym == SDLK_r) me.type = MOP_INPUT_MODE_SCALE;
+          else break;
+          mop_viewport_input(vp, &me);
+          break;
+      }
+    }
+
+    MopEvent oe;
+    while (mop_viewport_poll_event(vp, &oe)) { /* update UI panel */ }
+
+    mop_viewport_render(vp);
+
+    int rw, rh;
+    const uint8_t *px = mop_viewport_read_color(vp, &rw, &rh);
+    SDL_UpdateTexture(tex, NULL, px, rw * 4);
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, NULL, NULL);
+    SDL_RenderPresent(ren);
+  }
+
+  mop_viewport_destroy(vp);
+  SDL_Quit();
+  return 0;
+}
+```
+
+## Where to go deeper
+
+Reach for these only when the skill doesn't cover what you need.
+
+### Architecture (design intent — read once, forget)
+
+- [Layer separation](architecture-layers) — what may depend on what
+- [Frame lifecycle](architecture-frame-lifecycle) — pass-by-pass render graph
+- [Scene graph](architecture-scene-graph) — hierarchical transforms
+- [Threading model](architecture-threading) — lock semantics and invariants
+- [Memory ownership](architecture-memory) — who frees what
+- [Extension strategy](architecture-extension) — adding a new backend
+
+### Module references (if you need every parameter)
+
+- [Viewport](reference-core-viewport) · [Gizmo](reference-interaction-gizmo) ·
+  [Camera](reference-interaction-camera) · [Input](reference-interaction-input) ·
+  [Undo](reference-interaction-undo) · [Material](reference-core-material) ·
+  [Light](reference-core-light) · [Overlay](reference-render-overlay) ·
+  [Post-processing](reference-render-postprocess) · [Picking](reference-interaction-picking) ·
+  [Loader](reference-io-loader) · [Binary format](reference-io-binary-format) ·
+  [Vertex format](reference-core-vertex-format) · [Snapshot](reference-query-snapshot) ·
+  [Spatial queries](reference-query-spatial) · [Query](reference-query-query) ·
+  [Camera query](reference-query-camera-query) · [Display](reference-core-display) ·
+  [Pipeline](reference-render-pipeline) · [Math](reference-math) ·
+  [RHI](reference-render-rhi) · [Rasterizer](reference-render-rasterizer)
+
+### Backend internals (adding / modifying a backend)
+
+- [CPU backend](reference-render-backend-cpu) ·
+  [Vulkan backend](reference-render-backend-vulkan) ·
+  [OpenGL backend](reference-render-backend-opengl)
+
+### Build + platform
+
+- [Build](development-build) · [Platform](development-platform) ·
+  [Capabilities](development-capabilities) · [Testing](development-testing) ·
+  [Contributing](development-contributing)

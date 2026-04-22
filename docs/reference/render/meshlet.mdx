@@ -1,0 +1,107 @@
+---
+title: "Meshlet Clusters"
+description: "Fixed-size geometry clusters for GPU culling and mesh shading"
+slug: "reference-render-meshlet"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "meshlet", "gpu", "culling"]
+---
+
+## Location
+
+```
+include/mop/core/meshlet.h   — Cluster types + builder API
+src/core/meshlet.c           — Greedy builder + normal cones
+```
+
+## What Meshlets Are
+
+Geometry clusters of bounded size (up to 64 vertices, 124 triangles) with per-cluster bounding sphere and normal cone. GPU-friendly for:
+
+- **Frustum culling** at cluster granularity (orders of magnitude less work than per-triangle)
+- **Backface cone culling** (a whole cluster of back-facing triangles can be skipped in one test)
+- **Mesh shading pipelines** (`VK_EXT_mesh_shader`) — fixed-size clusters match the mesh-shader workgroup model
+
+MOP builds meshlets offline; the runtime uses them for Hi-Z + frustum culling on the Vulkan backend. CPU backend currently ignores meshlets.
+
+## Limits
+
+```c
+#define MOP_MESHLET_MAX_VERTICES   64
+#define MOP_MESHLET_MAX_TRIANGLES  124
+#define MOP_MESHLET_MAX_INDICES    (MOP_MESHLET_MAX_TRIANGLES * 3)
+```
+
+These match `VK_EXT_mesh_shader` recommendations.
+
+## Types
+
+### MopMeshlet (32 bytes, std430 layout)
+
+```c
+typedef struct MopMeshlet {
+    uint32_t vertex_offset;      /* into MopMeshletData.vertex_indices   */
+    uint32_t vertex_count;       /* unique vertex count (≤ 64)           */
+    uint32_t triangle_offset;    /* into MopMeshletData.prim_indices     */
+    uint32_t triangle_count;     /* triangle count (≤ 124)               */
+    float    center[3];          /* bounding sphere center, object space */
+    float    radius;
+} MopMeshlet;
+```
+
+### MopMeshletCone (32 bytes)
+
+```c
+typedef struct MopMeshletCone {
+    float axis[3];     /* average normal direction (unit) */
+    float cutoff;      /* cos(half-angle); negative = wide */
+    float apex[3];     /* cone apex, object space          */
+    float _pad;
+} MopMeshletCone;
+```
+
+Culling test: if `dot(normalize(view_dir), cone.axis) < cone.cutoff`, the entire cluster is back-facing and can be skipped.
+
+### MopMeshletData
+
+```c
+typedef struct MopMeshletData {
+    MopMeshlet     *meshlets;              uint32_t meshlet_count;
+    MopMeshletCone *cones;                 /* parallel array, same count */
+    uint32_t       *vertex_indices;        /* local → global vertex map  */
+    uint32_t        vertex_index_count;
+    uint8_t        *prim_indices;          /* packed triangles (3 × u8)  */
+    uint32_t        prim_index_count;      /* total u8 count             */
+} MopMeshletData;
+```
+
+## Functions
+
+```c
+bool     mop_meshlet_build         (const MopVertex *vertices, uint32_t vc,
+                                    const uint32_t *indices,   uint32_t ic,
+                                    MopMeshletData *out);
+void     mop_meshlet_free          (MopMeshletData *data);
+uint32_t mop_meshlet_count_estimate(uint32_t triangle_count);
+```
+
+- **build**: greedy clustering. Iterates triangles in order, packing into clusters while respecting the vertex / triangle limits. Bounding spheres use Ritter's algorithm (centroid initial, then max-distance radius). Normal cones are computed from the average face normal.
+- **free**: releases all four internal arrays.
+- **count_estimate**: safe upper bound (`ceil(tri / 124)`) for pre-allocation.
+
+## Usage
+
+```c
+MopMeshletData md;
+if (mop_meshlet_build(vertices, vc, indices, ic, &md)) {
+    /* upload md.meshlets / cones / vertex_indices / prim_indices
+     * as SSBOs for your GPU culling compute shader. */
+    mop_meshlet_free(&md);
+}
+```
+
+The runtime integration (upload + GPU cull compute shader) lives in the Vulkan backend; at the public API level you typically never need to build meshlets yourself — MOP will do it internally when `gpu_culling_enabled` is set on the device.
+
+## See Also
+
+- [Scene](reference-core-scene) · [Vulkan Backend](reference-render-backend-vulkan) · [Query](reference-query-query)

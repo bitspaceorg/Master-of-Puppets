@@ -3,41 +3,28 @@ title: "Reference"
 description: "Technical reference for every module, type, and function"
 slug: "reference"
 author: "rahulmnavneeth"
-date: "21 FEB 2026"
+date: "23 APR 2026"
 tags: ["reference", "overview"]
 ---
 
-Module-level technical reference for the Master of Puppets engine. Each page documents the contract, types, and implementation details for one subsystem.
+Module-level technical reference for the Master of Puppets engine. Grouped to mirror `include/mop/` — find things where you expect them to live.
 
-## Modules
+**New to MOP?** Start at the [Skill](skill) for a task-oriented entry point — this reference is the deep-dive.
 
-| Module                                      | Source                        | Description                                      |
-| ------------------------------------------- | ----------------------------- | ------------------------------------------------ |
-| [API Contracts](reference-api)              | `include/mop/**/*.h`          | Public function preconditions and postconditions |
-| [RHI](reference-rhi)                        | `src/rhi/`                    | Render hardware interface abstraction            |
-| [Math](reference-math)                      | `src/math/`                   | Vector and matrix operations                     |
-| [Viewport Core](reference-viewport)         | `src/core/`                   | Scene management and render orchestration        |
-| [Light System](reference-light)             | `src/core/light.c`            | Multi-light shading and light indicators         |
-| [Input / Events](reference-input)           | `src/interact/input.c`        | Interaction state machine and event system       |
-| [Gizmo](reference-gizmo)                    | `src/interact/gizmo.c`        | TRS manipulation handles                         |
-| [Camera](reference-camera)                  | `src/interact/camera.c`       | Orbit camera (pan, zoom, orbit, move)            |
-| [Camera Query](reference-camera-query)      | `src/query/camera_query.c`    | Camera state snapshot and ray generation         |
-| [Overlay](reference-overlay)                | `src/core/overlay.c`          | Built-in and custom rendering overlays           |
-| [Display](reference-display)                | `src/core/display.c`          | Wireframe, normals, bounds visualization         |
-| [Picking](reference-picking)                | (cross-cutting)               | Object-ID buffer picking system                  |
-| [Software Rasterizer](reference-rasterizer) | `src/rasterizer/`             | Shared software rasterization                    |
-| [CPU Backend](reference-backend-cpu)        | `src/backend/cpu/`            | CPU backend (delegates to rasterizer)            |
-| [OpenGL Backend](reference-backend-opengl)  | `src/backend/opengl/`         | OpenGL 3.3 core backend (contract)               |
-| [Vulkan Backend](reference-backend-vulkan)  | `src/backend/vulkan/`         | Vulkan 1.0 headless backend                      |
-| [Material System](reference-material)       | `include/mop/core/material.h` | PBR-inspired material descriptor                 |
-| [Vertex Format](reference-vertex-format)    | `src/core/vertex_format.c`    | Flexible vertex attributes                       |
-| [Loader](reference-loader)                  | `src/loader/`                 | OBJ and binary .mop mesh loading                 |
-| [Query](reference-query)                    | `src/query/query.c`           | Read-only mesh introspection                     |
-| [Snapshot](reference-snapshot)              | `src/query/snapshot.c`        | Zero-copy scene iteration                        |
-| [Spatial](reference-spatial)                | `src/query/spatial.c`         | AABB, frustum culling, raycasting                |
-| [Undo / Redo](reference-undo)               | `src/interact/undo.c`         | Transform history stack                          |
-| [Pipeline Hooks](reference-pipeline)        | `src/core/viewport.c`         | Custom render pass injection                     |
-| [Post-Processing](reference-postprocess)    | `src/render/postprocess.c`    | Gamma, tonemapping, vignette, fog                |
-| [Logging](reference-log)                    | `src/util/log.c`              | Log levels, callbacks, macros                    |
-| [Profiling](reference-profile)              | `src/util/profile.c`          | Frame timing statistics                          |
-| [Binary Format](reference-binary-format)    | `src/loader/mop_loader.c`     | .mop binary mesh format specification            |
+## Sections
+
+| Section                              | Covers                                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| [Core](reference-core)               | Viewport, scene, meshes, cameras, materials, lights, environment, textures, theme, display |
+| [Interaction](reference-interaction) | Input, gizmo, camera orbit, selection, mesh edit, undo, picking                            |
+| [Render](reference-render)           | RHI, backends, post-processing, overlays, shader plugins, decals, meshlets                 |
+| [Query](reference-query)             | Scene introspection, snapshot, camera state, spatial queries                               |
+| [I/O](reference-io)                  | OBJ / glTF / `.mop` loaders + exporters                                                    |
+| [Utility](reference-util)            | Logging, profiling                                                                         |
+
+## Cross-cutting
+
+| Page                           | Topic                                                               |
+| ------------------------------ | ------------------------------------------------------------------- |
+| [API Contracts](reference-api) | Public function preconditions and postconditions across all modules |
+| [Math](reference-math)         | Vector / matrix / transform primitives used everywhere              |

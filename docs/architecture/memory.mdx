@@ -54,3 +54,13 @@ Application                    Engine
 ## Leak Prevention
 
 `mop_viewport_destroy` walks the mesh array and destroys every active mesh's buffers before destroying the framebuffer and device. No leaks even if the application skips `mop_viewport_remove_mesh`.
+
+## Pointer Stability
+
+`MopMesh *` and `MopInstancedMesh *` returned by `mop_viewport_add_mesh` / `mop_viewport_add_instanced_mesh` are **stable for the entire lifetime of the mesh**. The internal scene pool heap-allocates each mesh struct individually and stores pointers in a growable array; growing the array never moves the structs themselves. Freed slots go on an O(1) free list and are reused on the next add.
+
+Consequences for application code:
+
+- Cache `MopMesh *` across frames and across add/remove of other meshes. No need to look up by `object_id` every frame.
+- The pointer is only invalidated by the matching `mop_viewport_remove_mesh` or by `mop_viewport_destroy`.
+- Every mesh stores its own `slot_index` and a back-pointer to its viewport, so `mop_mesh_set_position` / `set_rotation` / etc. can take the scene lock internally without the caller passing the viewport handle.

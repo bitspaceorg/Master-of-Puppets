@@ -1,0 +1,126 @@
+---
+title: "Selection"
+description: "Object and sub-element selection, edit modes"
+slug: "reference-interaction-selection"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "selection", "edit-mode"]
+---
+
+## Location
+
+```
+include/mop/interact/selection.h   — Public API
+src/interact/selection.c           — Storage + swap-remove logic
+```
+
+## Two Layers of Selection
+
+MOP separates **object-level** selection (which meshes are selected) from **sub-element** selection (which vertices / edges / faces inside a single mesh are selected).
+
+| Layer       | State                                   | Scope                |
+| ----------- | --------------------------------------- | -------------------- |
+| Object      | Set of `object_id` values               | Any number of meshes |
+| Sub-element | `MopSelection { mode, mesh, elements }` | One mesh at a time   |
+
+Sub-element selection is only active when that mesh is in edit mode.
+
+## Types
+
+### MopEditMode
+
+```c
+typedef enum MopEditMode {
+    MOP_EDIT_NONE   = 0,   /* object mode (default) */
+    MOP_EDIT_VERTEX = 1,
+    MOP_EDIT_EDGE   = 2,
+    MOP_EDIT_FACE   = 3,
+} MopEditMode;
+```
+
+### MopSelection
+
+```c
+typedef struct MopSelection {
+    MopEditMode  mode;
+    uint32_t     mesh_object_id;    /* which mesh is being edited */
+    uint32_t    *elements;
+    uint32_t     element_count;
+    uint32_t     element_capacity;
+} MopSelection;
+```
+
+## Functions
+
+### Edit mode
+
+```c
+void        mop_mesh_set_edit_mode(MopMesh *m, MopEditMode mode);
+MopEditMode mop_mesh_get_edit_mode(const MopMesh *m);
+```
+
+Entering edit mode on a mesh automatically retargets the viewport's sub-element selection to that mesh and clears any prior element set.
+
+### Sub-element
+
+```c
+const MopSelection *mop_viewport_get_selection  (const MopViewport *vp);
+void                mop_viewport_select_element (MopViewport *vp, uint32_t idx);
+void                mop_viewport_deselect_element(MopViewport *vp, uint32_t idx);
+void                mop_viewport_toggle_element (MopViewport *vp, uint32_t idx);
+void                mop_viewport_clear_selection(MopViewport *vp);
+```
+
+`element_index` is interpreted per the active edit mode: vertex index, edge index, or face index. Deselection is O(1) via swap-with-last.
+
+### Object
+
+```c
+void     mop_viewport_select_object    (MopViewport *vp, uint32_t id, bool additive);
+void     mop_viewport_deselect_object  (MopViewport *vp, uint32_t id);
+bool     mop_viewport_is_object_selected(const MopViewport *vp, uint32_t id);
+uint32_t mop_viewport_get_selected_count(const MopViewport *vp);
+```
+
+`additive = true` preserves existing selections (shift-click / ctrl-click semantics); `additive = false` replaces the selection with just this object.
+
+## Events
+
+Selection changes fire output events via `mop_viewport_poll_event`:
+
+| Type                           | Fields                        |
+| ------------------------------ | ----------------------------- |
+| `MOP_EVENT_SELECTED`           | `object_id`                   |
+| `MOP_EVENT_DESELECTED`         | `object_id`                   |
+| `MOP_EVENT_EDIT_MODE_CHANGED`  | `object_id` (mesh under edit) |
+| `MOP_EVENT_ELEMENT_SELECTED`   | `object_id = element_index`   |
+| `MOP_EVENT_ELEMENT_DESELECTED` | `object_id = element_index`   |
+
+## Usage
+
+```c
+/* Object selection driven by picking */
+MopPickResult p = mop_viewport_pick(vp, mouse_x, mouse_y);
+if (p.hit) {
+    bool additive = (modifiers & MOP_MOD_CTRL) != 0;
+    mop_viewport_select_object(vp, p.object_id, additive);
+} else {
+    mop_viewport_clear_selection(vp);  /* click in empty space */
+}
+
+/* Enter face edit mode on a specific mesh */
+mop_mesh_set_edit_mode(selected_mesh, MOP_EDIT_FACE);
+mop_viewport_select_element(vp, clicked_face_index);
+
+/* Iterate current sub-element selection */
+const MopSelection *sel = mop_viewport_get_selection(vp);
+for (uint32_t i = 0; i < sel->element_count; i++) {
+    uint32_t face = sel->elements[i];
+    /* ... */
+}
+```
+
+## See Also
+
+- [Mesh Edit](reference-interaction-mesh-edit) — topology ops operate on selected elements
+- [Input](reference-interaction-input) · [Gizmo](reference-interaction-gizmo) · [Picking](reference-interaction-picking)

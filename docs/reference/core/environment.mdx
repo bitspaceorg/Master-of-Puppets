@@ -1,0 +1,129 @@
+---
+title: "Environment"
+description: "HDRI, procedural sky, and image-based lighting"
+slug: "reference-core-environment"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "environment", "hdri", "ibl"]
+---
+
+## Location
+
+```
+include/mop/core/environment.h   — Public API
+src/core/environment.c           — HDRI loading, IBL precompute, sky model
+```
+
+## Types
+
+### MopEnvironmentType
+
+```c
+typedef enum MopEnvironmentType {
+    MOP_ENV_NONE            = 0,
+    MOP_ENV_GRADIENT        = 1,   /* default gradient background */
+    MOP_ENV_HDRI            = 2,   /* equirectangular .hdr / .exr */
+    MOP_ENV_PROCEDURAL_SKY  = 3,   /* analytical sky model */
+} MopEnvironmentType;
+```
+
+### MopEnvironmentDesc
+
+```c
+typedef struct MopEnvironmentDesc {
+    MopEnvironmentType type;
+    const char *hdr_path;    /* MOP_ENV_HDRI only; .hdr or .exr */
+    float rotation;          /* Y-axis rotation, radians */
+    float intensity;         /* brightness multiplier, default 1.0 */
+} MopEnvironmentDesc;
+```
+
+### MopProceduralSkyDesc
+
+```c
+typedef struct MopProceduralSkyDesc {
+    MopVec3 sun_direction;
+    float   turbidity;       /* atmospheric turbidity [2, 10] */
+    float   ground_albedo;   /* ground reflectivity [0, 1]    */
+} MopProceduralSkyDesc;
+```
+
+## Functions
+
+### mop_viewport_set_environment
+
+```c
+bool mop_viewport_set_environment(MopViewport *vp,
+                                  const MopEnvironmentDesc *desc);
+```
+
+Set the active environment. Returns `false` if the HDRI path cannot be loaded; in that case the viewport falls back to the gradient sky. The first frame after `set_environment` is slower because IBL maps are generated (see below).
+
+### mop_viewport_set_environment_rotation / \_intensity
+
+```c
+void mop_viewport_set_environment_rotation (MopViewport *vp, float rotation);
+void mop_viewport_set_environment_intensity(MopViewport *vp, float intensity);
+```
+
+Adjust rotation / brightness at runtime without regenerating IBL maps.
+
+### mop_viewport_set_environment_background
+
+```c
+void mop_viewport_set_environment_background(MopViewport *vp, bool show);
+```
+
+Toggle whether the HDRI is drawn as the skybox. When `false` the environment is still sampled for IBL but the background uses the theme gradient. Default: `false`.
+
+### mop_viewport_set_procedural_sky
+
+```c
+void mop_viewport_set_procedural_sky(MopViewport *vp,
+                                     const MopProceduralSkyDesc *desc);
+```
+
+Only meaningful when the active type is `MOP_ENV_PROCEDURAL_SKY`. Uses the Preetham analytical sky model rendered to a 512×256 equirectangular map, then fed through the same IBL convolution pipeline as HDRI.
+
+## IBL Precomputation
+
+On `MOP_ENV_HDRI` or `MOP_ENV_PROCEDURAL_SKY`, three maps are precomputed and uploaded:
+
+| Map                  | Size                   | Use                              |
+| -------------------- | ---------------------- | -------------------------------- |
+| Irradiance           | 64 × 32                | Diffuse IBL (cosine-weighted)    |
+| Prefiltered specular | 128 × 64, 5 mip levels | GGX specular IBL (per-roughness) |
+| BRDF LUT             | 256 × 256              | Split-sum approximation factor   |
+
+These maps are sampled on both CPU and Vulkan backends. GGX importance sampling is used for the specular map.
+
+## Auto-Exposure
+
+When an HDRI is loaded, MOP computes the log-average luminance of the image and auto-tunes `mop_viewport_set_exposure` so the mean maps to 0.18 (middle gray) after ACES tonemapping. Clamped to `[0.01, 16.0]`. Logged at INFO level. Override anytime with `mop_viewport_set_exposure`.
+
+## Usage
+
+```c
+mop_viewport_set_environment(vp, &(MopEnvironmentDesc){
+    .type      = MOP_ENV_HDRI,
+    .hdr_path  = "studio_sunset_4k.exr",
+    .rotation  = 0.0f,
+    .intensity = 1.0f,
+});
+mop_viewport_set_environment_background(vp, true);
+
+/* Procedural: */
+mop_viewport_set_environment(vp, &(MopEnvironmentDesc){
+    .type = MOP_ENV_PROCEDURAL_SKY, .intensity = 1.0f,
+});
+mop_viewport_set_procedural_sky(vp, &(MopProceduralSkyDesc){
+    .sun_direction = {0.3f, 0.8f, 0.5f},
+    .turbidity     = 3.0f,
+    .ground_albedo = 0.2f,
+});
+```
+
+## See Also
+
+- [Material](reference-core-material) — how IBL couples with roughness / metallic
+- [Post-processing](reference-render-postprocess) — tonemapping and exposure

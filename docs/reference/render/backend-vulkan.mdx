@@ -1,0 +1,176 @@
+---
+title: "Vulkan Backend"
+description: "Vulkan 1.2 headless backend — offscreen rendering with GPU acceleration, 4x MSAA, reverse-Z, cascade shadows, FXAA"
+slug: "reference-render-backend-vulkan"
+author: "rahulmnavneeth"
+date: "05 MAR 2026"
+tags: ["reference", "backend", "vulkan"]
+---
+
+## Location
+
+```
+src/backend/vulkan/
+  vulkan_backend.c    — RHI function table, device lifecycle, frame recording
+  vulkan_pipeline.c   — Pipeline creation, render pass, descriptor set layout
+  vulkan_memory.c     — Buffer and image allocation helpers
+  vulkan_internal.h   — Shared internal types and constants
+  vulkan_shaders.h    — Embedded SPIR-V bytecode
+  shaders/            — GLSL source for SPIR-V compilation
+```
+
+## Overview
+
+Fully implemented Vulkan 1.2 headless backend. Renders offscreen with no surface or swapchain — the application reads back RGBA8 pixels via `mop_viewport_read_color` and blits to its own window (e.g. SDL3 texture). Enable with `make MOP_ENABLE_VULKAN=1`.
+
+Key features:
+
+- **4x MSAA** — hardware multisampling with in-pass resolve (auto-detected, falls back to 1x)
+- **Reverse-Z depth** — near=1, far=0 with infinite far plane for superior depth precision
+- **Cascade shadow mapping** — 4-cascade directional shadow maps (2048x2048)
+- **HDR + ACES tonemap** — 16-bit float HDR rendering with filmic tonemapping and exposure control
+- **HDRI environment** — equirectangular HDR skybox background with IBL (irradiance + prefiltered specular)
+- **FXAA** — fast approximate anti-aliasing post-process pass
+- **SDF overlays** — GPU-rendered gizmo, navigator, light/camera indicators via signed-distance-field shader
+- **Analytical grid** — GPU fullscreen grid with depth testing and distance fade
+
+## Instance and Device
+
+Headless Vulkan — no surface or swapchain extensions required. The backend:
+
+1. Creates a `VkInstance` (API version 1.2, with validation layers if available)
+2. Selects the first discrete GPU, falling back to integrated
+3. Queries MSAA support (`framebufferColorSampleCounts ∩ framebufferDepthSampleCounts`) — uses 4x if supported, 1x otherwise
+4. Creates a single-queue `VkDevice` on the graphics queue family
+5. Enables reverse-Z depth buffer (clear=0.0, near=1.0, depth compare `GREATER_OR_EQUAL`)
+6. Allocates a command pool, descriptor pool, fence, and staging buffer
+
+## Render Pass
+
+### Without MSAA (1x)
+
+Three attachments:
+
+| Attachment | Format                    | Usage             |
+| ---------- | ------------------------- | ----------------- |
+| Color      | `VK_FORMAT_R8G8B8A8_SRGB` | sRGB color output |
+| Object ID  | `VK_FORMAT_R32_UINT`      | Picking buffer    |
+| Depth      | `VK_FORMAT_D32_SFLOAT`    | Depth testing     |
+
+### With MSAA (4x)
+
+Six attachments using `vkCreateRenderPass2` (Vulkan 1.2). All resolves happen in-pass — no manual `vkCmdResolveImage` calls.
+
+| Index | Image       | Samples | Format                    | Purpose                    |
+| ----- | ----------- | ------- | ------------------------- | -------------------------- |
+| 0     | msaa_color  | 4x      | `VK_FORMAT_R8G8B8A8_SRGB` | MSAA color render target   |
+| 1     | msaa_pick   | 4x      | `VK_FORMAT_R32_UINT`      | MSAA picking render target |
+| 2     | msaa_depth  | 4x      | `VK_FORMAT_D32_SFLOAT`    | MSAA depth render target   |
+| 3     | color_image | 1x      | `VK_FORMAT_R8G8B8A8_SRGB` | Color resolve target       |
+| 4     | pick_image  | 1x      | `VK_FORMAT_R32_UINT`      | Pick resolve (sample 0)    |
+| 5     | depth_image | 1x      | `VK_FORMAT_D32_SFLOAT`    | Depth resolve (sample 0)   |
+
+Depth resolve uses `VkSubpassDescriptionDepthStencilResolve` with `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`. Integer picking also resolves via sample 0. Readback code reads from the 1x resolve targets (unchanged).
+
+## Pipeline
+
+- Vertex input: position (vec3), normal (vec3), color (vec4), texcoord (vec2) — matching `MopVertex` layout
+- Flexible vertex stride: respects per-mesh `MopVertexFormat` stride
+- Push constants: MVP matrix (mat4), model matrix (mat4), object ID (uint), render flags
+- UBO: multi-light data (up to `MOP_MAX_LIGHTS`), camera position, ambient, shading mode
+- Polygon mode: `VK_POLYGON_MODE_FILL` or `VK_POLYGON_MODE_LINE`
+- Depth test: configurable per draw call (disabled for gizmo/light indicator overlays)
+- Backface culling: configurable per draw call (disabled for overlays and indicators)
+- Pipeline caching: pipelines are created on demand and cached by configuration hash
+
+## Command Recording
+
+Per-frame:
+
+1. `vkResetCommandBuffer` + `vkBeginCommandBuffer`
+2. `vkCmdBeginRenderPass` (clear all attachments — 3 or 6 depending on MSAA)
+3. Set viewport and scissor
+4. For each draw call: bind pipeline, push constants, bind vertex/index buffer, `vkCmdDrawIndexed`
+5. `vkCmdEndRenderPass` — MSAA resolves happen automatically via `pResolveAttachments` and `VkSubpassDescriptionDepthStencilResolve`
+6. Pipeline barrier for 1x resolve target images (transition to `TRANSFER_SRC_OPTIMAL`)
+7. `vkCmdCopyImageToBuffer` — color, depth, and object ID from 1x images to host-visible staging
+8. `vkEndCommandBuffer`
+9. `vkQueueSubmit` + fence wait
+
+## Readback
+
+Host-visible staging buffers are persistently mapped. After fence completion, the application reads RGBA8 color, float depth, and uint32 object ID directly from the mapped pointers. Zero-copy on the CPU side.
+
+## RHI Handle Mapping
+
+| RHI Handle          | Vulkan Concrete Type                                                            |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `MopRhiDevice`      | VkInstance, VkDevice, VkQueue, VkCommandPool, pipelines, UBO                    |
+| `MopRhiBuffer`      | VkBuffer + VkDeviceMemory (device-local)                                        |
+| `MopRhiFramebuffer` | VkFramebuffer + VkImage x 3 (+ 3 MSAA when 4x) + VkImageViews + staging buffers |
+| `MopRhiTexture`     | VkImage + VkImageView + VkDeviceMemory                                          |
+
+## Buffer Updates
+
+Vertex and index data are uploaded through a staging buffer (`MOP_VK_STAGING_SIZE`). The staging buffer is host-visible and persistently mapped. Data is copied to the staging buffer, then `vkCmdCopyBuffer` transfers it to device-local memory with a pipeline barrier for vertex/index access.
+
+## Runtime Selection
+
+```c
+MopViewport *vp = mop_viewport_create(&(MopViewportDesc){
+    .width = 800, .height = 600,
+    .backend = MOP_BACKEND_VULKAN
+});
+```
+
+Or via environment variable in the interactive viewport:
+
+```bash
+MOP_BACKEND=vulkan ./build/mop_viewport
+```
+
+## Reverse-Z Depth
+
+The Vulkan backend automatically enables reverse-Z depth buffering:
+
+- Depth buffer cleared to `0.0` (not `1.0`)
+- Near plane maps to `1.0`, far plane maps to `0.0`
+- Depth comparison uses `VK_COMPARE_OP_GREATER_OR_EQUAL`
+- Projection matrix uses `mop_mat4_perspective_reverse_z` with infinite far plane
+
+This provides significantly better depth precision at distance, virtually eliminating Z-fighting artifacts that are common with standard depth buffers.
+
+## MSAA
+
+4x multisampling is automatically enabled when the GPU supports it. The MSAA sample count is queried at device creation from `framebufferColorSampleCounts ∩ framebufferDepthSampleCounts`. All geometry pipelines use the detected sample count; shadow and post-process pipelines remain at 1x.
+
+MSAA images are created alongside the 1x resolve targets. All resolves (color, integer picking, depth) happen in-pass using Vulkan 1.2 render pass features — no manual `vkCmdResolveImage` calls. This is required because `vkCmdResolveImage` does not support integer formats (`R32_UINT`) or depth formats (`D32_SFLOAT`).
+
+## Cascade Shadow Mapping
+
+Four-cascade directional shadow maps (2048x2048 per cascade) with a dedicated shadow render pass and comparison sampler. Shadow cascades are split using practical split scheme and rendered from the directional light's perspective.
+
+## FXAA Post-Processing
+
+A full-screen FXAA (Fast Approximate Anti-Aliasing) pass runs after the main render pass, further smoothing edges. Controlled via the `MOP_POST_FXAA` post-effect flag. FXAA is enabled by default in the Vulkan backend.
+
+## HDR Tonemap
+
+The scene renders to a 16-bit float (`R16G16B16A16_SFLOAT`) HDR color attachment. A fullscreen tonemap pass converts HDR to LDR using the ACES Filmic curve with exposure control. Exposure is applied per-object in the solid fragment shader UBO, so the tonemap pass uses `exposure=1.0` to avoid double-application. The skybox multiplies `env_intensity * exposure` directly in its intensity uniform.
+
+## HDRI Environment
+
+Equirectangular HDR environment maps can be loaded for both image-based lighting (IBL) and optional skybox background rendering.
+
+- **IBL**: Irradiance and prefiltered specular cubemaps are generated from the HDR map for physically-based ambient lighting
+- **Skybox**: A fullscreen fragment shader reconstructs world-space ray directions from the inverse view-projection matrix and samples the equirectangular map
+- **Exposure**: The skybox responds to exposure changes (intensity scales with `env_intensity * exposure`)
+- **Background toggle**: `mop_viewport_set_environment_background(vp, true)` shows the HDRI as background; default is the gray gradient
+
+## SDF Overlays
+
+Gizmo handles, axis navigator, light indicators, and camera frustum wireframes are rendered via a GPU signed-distance-field overlay shader. Overlay functions push primitives (lines, filled circles, diamonds) into a command buffer. A fullscreen fragment shader reads the primitive array as an SSBO and computes SDF per pixel with `smoothstep` anti-aliasing — resolution-independent, always crisp. Single draw call for all overlays.
+
+## Analytical Grid
+
+The infinite ground grid is rendered by a dedicated fullscreen fragment shader. It reconstructs world position from the depth buffer, computes distance to grid lines analytically, and fades with camera distance. The grid respects scene depth — it renders behind objects using the resolved depth attachment as a sampled texture.

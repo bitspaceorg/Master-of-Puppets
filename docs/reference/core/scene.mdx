@@ -1,0 +1,198 @@
+---
+title: "Scene"
+description: "Pointer-stable mesh pool, transforms, hierarchy, instancing, LOD, skinning, morph"
+slug: "reference-core-scene"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "scene", "mesh"]
+---
+
+## Location
+
+```
+include/mop/core/scene.h   — Public mesh + scene API
+src/core/viewport.c        — Pointer-stable mesh pool + auto-lock setters
+```
+
+## The Pointer-Stable Mesh Pool
+
+`vp->meshes` is an **array of `MopMesh *`**, not an array of `MopMesh` structs. Each `MopMesh` is heap-allocated individually; growing the pointer array via `realloc` does not move the structs. Consequences:
+
+- `MopMesh *` returned from `mop_viewport_add_mesh` is **valid for the full lifetime of the mesh**. Cache it freely.
+- The pointer is only invalidated by a matching `mop_viewport_remove_mesh` or by `mop_viewport_destroy`.
+- Every mesh stores its own `slot_index` and a back-pointer to its viewport. Per-mesh setters (`mop_mesh_set_position` etc.) acquire the viewport's scene lock internally — you do not need to pass the viewport or wrap the call.
+- Freed slots go on an O(1) free list and are reused on the next `add_mesh`.
+
+The same design applies to `MopInstancedMesh *`.
+
+## Types
+
+### Handles
+
+```c
+typedef struct MopMesh          MopMesh;
+typedef struct MopInstancedMesh MopInstancedMesh;
+```
+
+### MopMeshDesc
+
+```c
+typedef struct MopMeshDesc {
+    const MopVertex      *vertices;
+    uint32_t              vertex_count;
+    const uint32_t       *indices;
+    uint32_t              index_count;
+    uint32_t              object_id;         /* 1 .. 0xFFFCFFFF */
+    const MopVertexFormat *vertex_format;    /* NULL = standard MopVertex */
+} MopMeshDesc;
+```
+
+### MopMeshDescEx
+
+Flexible-format variant — supply raw interleaved bytes plus an explicit format descriptor. Required for meshes with joints/weights or custom attribute layouts.
+
+```c
+typedef struct MopMeshDescEx {
+    const void           *vertex_data;
+    uint32_t              vertex_count;
+    const uint32_t       *indices;
+    uint32_t              index_count;
+    uint32_t              object_id;
+    const MopVertexFormat *vertex_format;    /* required */
+} MopMeshDescEx;
+```
+
+## Functions
+
+### Lifecycle
+
+```c
+MopMesh *mop_viewport_add_mesh   (MopViewport *vp, const MopMeshDesc *desc);
+MopMesh *mop_viewport_add_mesh_ex(MopViewport *vp, const MopMeshDescEx *desc);
+void     mop_viewport_remove_mesh(MopViewport *vp, MopMesh *mesh);
+void     mop_mesh_update_geometry(MopMesh *mesh, MopViewport *vp,
+                                  const MopVertex *v, uint32_t vc,
+                                  const uint32_t *idx, uint32_t ic);
+```
+
+Vertex / index data is copied on `add_mesh`; callers may free their arrays immediately. `update_geometry` re-uploads and reallocates GPU buffers if the counts changed.
+
+### Transform (TRS — preferred)
+
+```c
+void    mop_mesh_set_position(MopMesh *m, MopVec3 position);
+void    mop_mesh_set_rotation(MopMesh *m, MopVec3 rotation); /* euler rad, Rz*Ry*Rx */
+void    mop_mesh_set_scale   (MopMesh *m, MopVec3 scale);
+MopVec3 mop_mesh_get_position(const MopMesh *m);
+MopVec3 mop_mesh_get_rotation(const MopMesh *m);
+MopVec3 mop_mesh_get_scale   (const MopMesh *m);
+```
+
+### Transform (matrix — power user)
+
+```c
+void mop_mesh_set_transform(MopMesh *m, const MopMat4 *transform);
+```
+
+TRS is faster and integrates with the gizmo and undo system. Use the matrix form only when you have a transform that can't be decomposed cleanly.
+
+### Hierarchy
+
+```c
+void mop_mesh_set_parent  (MopMesh *m, MopMesh *parent, MopViewport *vp);
+void mop_mesh_clear_parent(MopMesh *m);
+```
+
+Cycles are rejected. Transforms propagate top-down in a single pass.
+
+### Opacity / blend
+
+```c
+void mop_mesh_set_opacity   (MopMesh *m, float opacity);      /* [0, 1]            */
+void mop_mesh_set_blend_mode(MopMesh *m, MopBlendMode mode);  /* OPAQUE / ALPHA /  */
+                                                              /* ADDITIVE / MULT.  */
+```
+
+### Textures
+
+```c
+MopTexture *mop_viewport_create_texture(MopViewport *vp, int w, int h,
+                                        const uint8_t *rgba_data);
+void        mop_viewport_destroy_texture(MopViewport *vp, MopTexture *t);
+void        mop_mesh_set_texture(MopMesh *m, MopTexture *tex);
+```
+
+For the richer streaming / compressed / async path, see [Texture Pipeline](reference-core-texture-pipeline).
+
+### Shading override
+
+```c
+void mop_mesh_set_shading(MopMesh *m, MopShadingMode mode); /* -1 = inherit */
+```
+
+### Skinning
+
+Requires a flexible vertex format with `MOP_ATTRIB_JOINTS` and `MOP_ATTRIB_WEIGHTS`.
+
+```c
+void mop_mesh_set_bone_hierarchy(MopMesh *m, const int32_t *parent_indices,
+                                 uint32_t bone_count);
+void mop_mesh_set_bone_matrices (MopMesh *m, MopViewport *vp,
+                                 const MopMat4 *matrices, uint32_t bone_count);
+```
+
+First `set_bone_matrices` call records the bind pose. Subsequent calls animate bind-relative.
+
+### Morph targets
+
+```c
+void mop_mesh_set_morph_targets(MopMesh *m, MopViewport *vp,
+                                const float *targets,   /* target_count * vc * 3 */
+                                const float *weights,   /* target_count floats   */
+                                uint32_t target_count);
+void mop_mesh_set_morph_weights(MopMesh *m,
+                                const float *weights, uint32_t target_count);
+```
+
+### Instanced meshes
+
+```c
+MopInstancedMesh *mop_viewport_add_instanced_mesh(MopViewport *vp,
+                                                  const MopMeshDesc *desc,
+                                                  const MopMat4 *transforms,
+                                                  uint32_t instance_count);
+void mop_instanced_mesh_update_transforms(MopInstancedMesh *m,
+                                          const MopMat4 *transforms,
+                                          uint32_t count);
+void mop_viewport_remove_instanced_mesh(MopViewport *vp, MopInstancedMesh *m);
+```
+
+### LOD
+
+```c
+#define MOP_MAX_LOD_LEVELS 8
+
+int32_t mop_mesh_add_lod(MopMesh *m, MopViewport *vp,
+                         const MopMeshDesc *desc, float screen_threshold);
+void    mop_viewport_set_lod_bias(MopViewport *vp, float bias);
+float   mop_viewport_get_lod_bias(const MopViewport *vp);
+```
+
+`screen_threshold` is the projected pixel diameter below which the next-lower LOD is selected. Higher bias ⇒ lower detail globally.
+
+### Debug visualization
+
+```c
+void       mop_viewport_set_debug_viz(MopViewport *vp, MopDebugViz mode);
+MopDebugViz mop_viewport_get_debug_viz(const MopViewport *vp);
+```
+
+Modes: `MOP_DEBUG_VIZ_NONE`, `OVERDRAW`, `SHADOW_CASCADES`, `LOD_LEVEL`, `CULL_RESULT`, `DEPTH`, `NORMALS`, `MIPMAP`.
+
+## Object IDs
+
+Application-defined `object_id` must be in `[1, 0xFFFCFFFF]`. The top range `[0xFFFD0000, 0xFFFFFFFF]` is reserved for chrome (gizmo handles, grid, lights). 0 indicates "no object" in the pick buffer.
+
+## See Also
+
+- [Material](reference-core-material) · [Vertex Format](reference-core-vertex-format) · [Loader](reference-io-loader) · [Query](reference-query-query) · [Picking](reference-interaction-picking) · [Display](reference-core-display)

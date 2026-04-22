@@ -1,0 +1,96 @@
+---
+title: "Mesh Edit"
+description: "Topology operations — move, merge, split, extrude, inset"
+slug: "reference-interaction-mesh-edit"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "mesh-edit", "topology"]
+---
+
+## Location
+
+```
+include/mop/interact/mesh_edit.h   — Public topology ops
+src/interact/mesh_edit.c           — Half-edge structure + ops
+```
+
+## Overview
+
+Mesh editing operates on raw index-buffer topology. An auxiliary half-edge structure is built on demand from the index buffer; O(n²) twin-finding is acceptable for interactive edit operations. Every op finishes by recomputing normals and calling `mop_mesh_update_geometry` internally, so CPU and GPU buffers stay in sync and the next `mop_viewport_render` sees the new mesh.
+
+These functions **do not push undo** themselves — wrap them in `mop_viewport_push_undo` on the calling side if you want undo.
+
+## Functions
+
+### Vertex ops
+
+```c
+void mop_mesh_move_vertices  (MopMesh *m, MopViewport *vp,
+                              const uint32_t *indices, uint32_t count,
+                              MopVec3 delta);
+void mop_mesh_delete_vertices(MopMesh *m, MopViewport *vp,
+                              const uint32_t *indices, uint32_t count);
+void mop_mesh_merge_vertices (MopMesh *m, MopViewport *vp,
+                              uint32_t v0, uint32_t v1);
+```
+
+- **move**: world-space `delta` added to each listed vertex; normals recomputed.
+- **delete**: removes listed vertices and any face that referenced them.
+- **merge**: welds `v1` into `v0`; index buffer is remapped and degenerate faces are dropped.
+
+### Edge ops
+
+```c
+void mop_mesh_split_edge   (MopMesh *m, MopViewport *vp,
+                            uint32_t edge_v0, uint32_t edge_v1);
+void mop_mesh_dissolve_edge(MopMesh *m, MopViewport *vp,
+                            uint32_t edge_v0, uint32_t edge_v1);
+```
+
+- **split**: inserts a midpoint vertex on the edge and rebuilds the adjacent triangles.
+- **dissolve**: removes the edge and merges the two adjacent faces into one.
+
+### Face ops
+
+```c
+void mop_mesh_extrude_faces(MopMesh *m, MopViewport *vp,
+                            const uint32_t *face_indices, uint32_t count,
+                            float distance);
+void mop_mesh_inset_faces  (MopMesh *m, MopViewport *vp,
+                            const uint32_t *face_indices, uint32_t count,
+                            float inset);
+void mop_mesh_delete_faces (MopMesh *m, MopViewport *vp,
+                            const uint32_t *face_indices, uint32_t count);
+void mop_mesh_flip_normals (MopMesh *m, MopViewport *vp,
+                            const uint32_t *face_indices, uint32_t count);
+```
+
+- **extrude**: push faces along their averaged normals by `distance`; add side-wall quads around the extruded boundary.
+- **inset**: shrink each face toward its centroid by `inset`; fill the surrounding ring with quads.
+- **delete**: remove faces but keep vertices.
+- **flip**: reverse winding for the listed faces (and re-recompute normals).
+
+## Notes
+
+- **Face index** is the triangle number: face `i` occupies indices `[i*3, i*3+3)` in the index buffer.
+- **Edge index** is specified by its two endpoint vertices, not a separate edge ID.
+- **Undo**: the input path (`MOP_INPUT_*` events that drive the gizmo, etc.) pushes undo entries for the wrapping "drag operation", not per topology call. If you invoke these ops directly, push your own undo.
+- **Selection does not auto-update**: deleting faces / vertices may invalidate indices in the sub-element selection. Call `mop_viewport_clear_selection` (or re-select) after destructive ops.
+
+## Usage
+
+Extrude the currently selected faces by 0.5 units along their normals:
+
+```c
+const MopSelection *sel = mop_viewport_get_selection(vp);
+if (sel->mode == MOP_EDIT_FACE && sel->element_count > 0) {
+    mop_viewport_push_undo(vp, selected_mesh);
+    mop_mesh_extrude_faces(selected_mesh, vp,
+                           sel->elements, sel->element_count, 0.5f);
+}
+```
+
+## See Also
+
+- [Selection](reference-interaction-selection) — sub-element state these ops consume
+- [Undo](reference-interaction-undo) · [Scene](reference-core-scene)

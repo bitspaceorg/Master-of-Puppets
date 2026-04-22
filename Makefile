@@ -155,7 +155,7 @@ LIB_OUT   := $(LIB_DIR)/libmop.a
 # -----------------------------------------------------------------------------
 # Default target — static library only
 # -----------------------------------------------------------------------------
-.PHONY: all lib clean install test torture tools shaders conformance conformance-tier1 conformance-tier2 conformance-tier3 conformance-tier4 conformance-update-golden
+.PHONY: all lib clean install test torture tools shaders conformance conformance-tier1 conformance-tier2 conformance-tier3 conformance-tier4 conformance-update-golden docs-check docs-check-links docs-check-code
 
 all: lib
 
@@ -290,3 +290,18 @@ shaders:
 # -----------------------------------------------------------------------------
 tools: lib
 	$(MAKE) -C tools
+
+# -----------------------------------------------------------------------------
+# Docs checks — see tools/docs/README.md
+#
+#   docs-check        run both checks (requires `make` first for code check)
+#   docs-check-links  verify every slug referenced in docs/ is declared
+#   docs-check-code   compile every fenced ```c block that has int main(
+# -----------------------------------------------------------------------------
+docs-check: docs-check-links docs-check-code
+
+docs-check-links:
+	python3 tools/docs/check_links.py
+
+docs-check-code: lib
+	python3 tools/docs/compile_blocks.py

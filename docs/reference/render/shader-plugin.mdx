@@ -1,0 +1,137 @@
+---
+title: "Shader Plugins"
+description: "Insert custom SPIR-V shaders + draw callbacks into the render graph"
+slug: "reference-render-shader-plugin"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "shader", "plugin", "gpu"]
+---
+
+## Location
+
+```
+include/mop/render/shader_plugin.h   — Plugin API
+src/render/shader_plugin.c           — Registration + dispatch
+```
+
+## Purpose
+
+Lets an application extend the MOP render graph without modifying core code. Register a plugin with SPIR-V bytecode plus a callback; MOP compiles the shaders, inserts the callback at the requested stage, and invokes it once per frame.
+
+Primary use cases:
+
+- Custom post-process passes (chromatic aberration, custom color grades)
+- Debug / dev overlays that need GPU rendering
+- Experimental material effects (hook at `POST_SCENE`)
+- Screen-space procedural pattern rendering
+
+Not suited for replacing the main PBR shader — use the [Material Graph](reference-core-material-graph) for that.
+
+## Types
+
+### MopShaderPluginStage
+
+```c
+typedef enum MopShaderPluginStage {
+    MOP_SHADER_PLUGIN_POST_OPAQUE  = 0,  /* after opaque, before transparent */
+    MOP_SHADER_PLUGIN_POST_SCENE   = 1,  /* after all scene geometry          */
+    MOP_SHADER_PLUGIN_POST_PROCESS = 2,  /* in the post-FX chain              */
+    MOP_SHADER_PLUGIN_OVERLAY      = 3,  /* during overlay pass               */
+    MOP_SHADER_PLUGIN_STAGE_COUNT,
+} MopShaderPluginStage;
+```
+
+### MopShaderDrawContext
+
+What the plugin's draw callback receives each frame:
+
+```c
+typedef struct MopShaderDrawContext {
+    MopMat4 view_matrix;
+    MopMat4 projection_matrix;
+    MopVec3 camera_eye;
+    MopVec3 camera_target;
+    int     width, height;
+    float   time;
+    float   delta_time;
+    void   *rhi_device;   /* backend device — NULL on CPU backend */
+} MopShaderDrawContext;
+
+typedef void (*MopShaderDrawFn)(const MopShaderDrawContext *ctx,
+                                void *user_data);
+```
+
+On the Vulkan backend, `rhi_device` is a `MopRhiDevice *` you can cast and use directly for recording commands into the current command buffer. On the CPU backend it is `NULL` — you can still use the callback for CPU-side work, but the SPIR-V is ignored.
+
+### MopShaderPluginDesc
+
+```c
+typedef struct MopShaderPluginDesc {
+    const char          *name;            /* copied internally */
+    MopShaderPluginStage stage;
+
+    const uint32_t *vertex_spirv;    size_t vertex_spirv_size;    /* bytes */
+    const uint32_t *fragment_spirv;  size_t fragment_spirv_size;
+    const uint32_t *compute_spirv;   size_t compute_spirv_size;   /* optional */
+
+    MopShaderDrawFn  draw;
+    void            *user_data;
+} MopShaderPluginDesc;
+
+typedef struct MopShaderPlugin MopShaderPlugin;
+```
+
+SPIR-V bytecode is consumed immediately during registration — the caller may free it as soon as `register` returns.
+
+## Functions
+
+```c
+MopShaderPlugin *mop_viewport_register_shader  (MopViewport *vp,
+                                                const MopShaderPluginDesc *desc);
+void             mop_viewport_unregister_shader(MopViewport *vp,
+                                                MopShaderPlugin *plugin);
+
+const char   *mop_shader_plugin_get_name    (const MopShaderPlugin *p);
+MopRhiShader *mop_shader_plugin_get_vertex  (const MopShaderPlugin *p);
+MopRhiShader *mop_shader_plugin_get_fragment(const MopShaderPlugin *p);
+MopRhiShader *mop_shader_plugin_get_compute (const MopShaderPlugin *p);
+```
+
+`register_shader` returns `NULL` on invalid descriptor, OOM, or shader compilation error. Check the return value.
+
+## Usage
+
+```c
+extern const uint32_t vs_bytecode[]; extern const size_t vs_bytes;
+extern const uint32_t fs_bytecode[]; extern const size_t fs_bytes;
+
+void my_draw(const MopShaderDrawContext *ctx, void *ud) {
+    if (!ctx->rhi_device) return;   /* CPU backend; no GPU work */
+    VkCommandBuffer cb = ((MopRhiDevice *)ctx->rhi_device)->cmd_buf;
+    /* record draw calls using the plugin's shader modules */
+}
+
+MopShaderPlugin *p = mop_viewport_register_shader(vp, &(MopShaderPluginDesc){
+    .name              = "chromatic_aberration",
+    .stage             = MOP_SHADER_PLUGIN_POST_PROCESS,
+    .vertex_spirv      = vs_bytecode,   .vertex_spirv_size   = vs_bytes,
+    .fragment_spirv    = fs_bytecode,   .fragment_spirv_size = fs_bytes,
+    .draw              = my_draw,
+    .user_data         = NULL,
+});
+
+/* ... later ... */
+mop_viewport_unregister_shader(vp, p);
+```
+
+## Notes
+
+- Plugins are dispatched in registration order within a stage.
+- Plugin shader modules live until `unregister_shader` or viewport destroy.
+- `user_data` is opaque to MOP — lifetime is the application's responsibility.
+- Vulkan-specific: the plugin's draw callback runs inside the viewport's main command buffer, between the pass transitions described in the frame lifecycle. Do not `vkBeginRenderPass` / `vkEndRenderPass` inside the callback unless you know MOP's current state.
+
+## See Also
+
+- [Frame Lifecycle](architecture-frame-lifecycle) — when each stage fires
+- [RHI](reference-render-rhi) · [Post-processing](reference-render-postprocess) · [Material Graph](reference-core-material-graph)

@@ -1,0 +1,137 @@
+---
+title: "Scene File (.mop v2)"
+description: "Full-viewport scene save / load format"
+slug: "reference-io-scene-file"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "loader", "scene-file"]
+---
+
+## Location
+
+```
+include/mop/loader/mop_scene.h   — MopSceneFile API
+src/loader/mop_scene.c           — Parser + writer + octahedral codec
+```
+
+Distinct from the single-mesh [Binary Format](reference-io-binary-format): `.mop` v2 is a **whole-scene** container that includes camera, lights, per-mesh transforms, and materials alongside mesh geometry.
+
+## Layout
+
+```
+┌──────────────────────────────┐
+│ 64-byte header               │  magic, version, section_count, ...
+├──────────────────────────────┤
+│ Section TOC                  │  (type, offset, size) × section_count
+├──────────────────────────────┤
+│ 8-byte-aligned section data  │
+└──────────────────────────────┘
+```
+
+Constants:
+
+```c
+#define MOP_SCENE_MAGIC     0x4D4F5002u    /* 'M' 'O' 'P' 0x02 */
+#define MOP_SCENE_VERSION   2u
+#define MOP_VTX_RAW         0x00           /* 48-byte MopVertex */
+#define MOP_VTX_QUANTIZED   0x01           /* 20-byte quantized  */
+#define MOP_SAVE_QUANTIZE   0x01           /* save() flag         */
+```
+
+### MopSectionType
+
+```c
+typedef enum MopSectionType {
+    MOP_SECTION_MESH      = 1,
+    MOP_SECTION_CAMERA    = 2,
+    MOP_SECTION_LIGHT     = 3,
+    MOP_SECTION_MATERIAL  = 4,
+    MOP_SECTION_TRANSFORM = 5,
+} MopSectionType;
+```
+
+## Quantized Vertex Format
+
+```c
+typedef struct MopQuantizedVertex {
+    uint16_t pos[3];     /* quantized to mesh bbox */
+    int16_t  nrm[2];     /* octahedral-encoded normal */
+    uint8_t  color[4];   /* RGBA8 */
+    uint16_t uv[2];      /* quantized [0, 65535] */
+} MopQuantizedVertex;    /* exactly 20 bytes */
+```
+
+- **Position** quantized to the per-mesh AABB (0.01 mm precision across a 650 m scene).
+- **Normal** uses octahedral encoding (Cigolle et al. 2014) for ~14-bit precision on the unit sphere; exact reconstruction for axis-aligned normals.
+- **Color** plain RGBA8.
+- **UV** linear quantization over `[0, 65535]`.
+
+Quantized encoding is 2.4× smaller than the 48-byte `MopVertex` and decodes on load; rendering performance is identical.
+
+## Functions
+
+```c
+MopSceneFile *mop_scene_load(const char *path);
+void          mop_scene_free(MopSceneFile *scene);
+int           mop_scene_save(const MopViewport *vp, const char *path,
+                             uint32_t flags);
+
+uint32_t      mop_scene_mesh_count(const MopSceneFile *s);
+bool          mop_scene_get_mesh  (const MopSceneFile *s, uint32_t idx,
+                                   MopLoadedMesh *out);
+bool          mop_scene_get_camera(const MopSceneFile *s,
+                                   MopVec3 *eye, MopVec3 *target,
+                                   MopVec3 *up, float *fov,
+                                   float *near_p, float *far_p);
+uint32_t      mop_scene_light_count(const MopSceneFile *s);
+```
+
+### mop_scene_load
+
+Uses `mmap` on POSIX for zero-copy demand-paged loading. Falls back to `malloc` + `fread` elsewhere. Returns `NULL` on magic / version mismatch or I/O failure.
+
+### mop_scene_save
+
+Writes a `.mop` v2 file from the current viewport state. Returns `0` on success, `-1` on failure.
+
+| Flag                | Effect                                                |
+| ------------------- | ----------------------------------------------------- |
+| `0`                 | Raw 48-byte vertices                                  |
+| `MOP_SAVE_QUANTIZE` | Quantized 20-byte vertices (recommended for shipping) |
+
+### mop_scene_get_mesh
+
+Fills a `MopLoadedMesh` view into a specific mesh section. Returns `false` if the index is out of range. The returned arrays are valid until `mop_scene_free`.
+
+## Usage
+
+```c
+/* Save the current scene */
+mop_scene_save(vp, "level.mop", MOP_SAVE_QUANTIZE);
+
+/* Load a saved scene into a fresh viewport */
+MopSceneFile *sf = mop_scene_load("level.mop");
+if (!sf) return 1;
+
+for (uint32_t i = 0; i < mop_scene_mesh_count(sf); i++) {
+    MopLoadedMesh m;
+    if (mop_scene_get_mesh(sf, i, &m)) {
+        mop_viewport_add_mesh(vp, &(MopMeshDesc){
+            .vertices = m.vertices, .vertex_count = m.vertex_count,
+            .indices  = m.indices,  .index_count  = m.index_count,
+            .object_id = 1000 + i,
+        });
+    }
+}
+
+MopVec3 eye, tgt, up;  float fov, np, fp;
+if (mop_scene_get_camera(sf, &eye, &tgt, &up, &fov, &np, &fp))
+    mop_viewport_set_camera(vp, eye, tgt, up, fov, np, fp);
+
+mop_scene_free(sf);
+```
+
+## See Also
+
+- [Binary Format](reference-io-binary-format) — mesh-only `.mop` v1 format
+- [Loader](reference-io-loader) · [Export](reference-io-export) · [glTF](reference-io-gltf)

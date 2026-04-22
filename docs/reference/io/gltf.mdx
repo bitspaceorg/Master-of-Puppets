@@ -1,0 +1,133 @@
+---
+title: "glTF 2.0 Loader"
+description: "Import .glb / .gltf scenes with materials, textures, skins"
+slug: "reference-io-gltf"
+author: "rahulmnavneeth"
+date: "22 APR 2026"
+tags: ["reference", "loader", "gltf"]
+---
+
+## Location
+
+```
+include/mop/loader/gltf.h   — glTF scene types + API
+src/loader/gltf_loader.c    — Minimal JSON parser + .glb reader
+```
+
+## Scope
+
+Supports both `.glb` (binary) and `.gltf` (JSON + external `.bin`/image files). The JSON parser is hand-rolled with no dependencies. Covers the core glTF 2.0 feature set:
+
+- Hierarchical node tree (TRS or matrix)
+- PBR metallic-roughness materials (MR texture convention: G = roughness, B = metallic)
+- Normal, occlusion, emissive textures
+- Skeletal skins (joints + weights + inverse bind matrices)
+- `KHR_materials_unlit` (emits an unlit material)
+- Authored tangents (preserved if present in the file)
+
+Not (yet) covered: morph targets on glTF import, KTX2 textures, `KHR_draco_mesh_compression`.
+
+## Types
+
+```c
+typedef struct MopGltfScene {
+    MopGltfMesh     *meshes;      uint32_t mesh_count;
+    MopGltfMaterial *materials;   uint32_t material_count;
+    MopGltfImage    *images;      uint32_t image_count;
+    MopGltfNode     *nodes;       uint32_t node_count;
+    MopGltfSkin     *skins;       uint32_t skin_count;
+
+    /* internal buffer storage — do not access directly */
+    uint8_t *_buffer_data;  uint32_t _buffer_size;
+    char    *_json_data;
+} MopGltfScene;
+
+typedef struct MopGltfMesh {
+    char              name[64];
+    MopGltfPrimitive *primitives;
+    uint32_t          primitive_count;
+} MopGltfMesh;
+
+typedef struct MopGltfPrimitive {
+    MopVertex *vertices;   uint32_t vertex_count;
+    uint32_t  *indices;    uint32_t index_count;
+    int32_t    material_index;      /* into scene.materials[] or -1 */
+    float     *tangents;            /* float4 per vertex, or NULL   */
+    uint8_t   *joints;              /* ubyte4 per vertex (skinned)  */
+    float     *weights;             /* float4 per vertex (skinned)  */
+    MopVec3    bbox_min, bbox_max;
+} MopGltfPrimitive;
+
+typedef struct MopGltfMaterial {
+    char   name[64];
+    float  base_color[4];           /* linear RGBA */
+    float  metallic, roughness;
+    float  emissive[3];
+    MopGltfTexRef base_color_tex;   /* albedo             */
+    MopGltfTexRef normal_tex;
+    MopGltfTexRef mr_tex;           /* G=roughness, B=metallic */
+    MopGltfTexRef occlusion_tex;    /* R channel          */
+    MopGltfTexRef emissive_tex;
+    bool   double_sided;
+    bool   unlit;                   /* KHR_materials_unlit */
+    float  alpha_cutoff;
+    enum { MOP_GLTF_ALPHA_OPAQUE, MOP_GLTF_ALPHA_MASK, MOP_GLTF_ALPHA_BLEND }
+           alpha_mode;
+} MopGltfMaterial;
+
+typedef struct MopGltfNode {
+    char     name[64];
+    int32_t  mesh_index;      /* -1 if none */
+    int32_t  skin_index;      /* -1 if none */
+    int32_t  parent_index;    /* -1 if root */
+    float    translation[3], scale[3];
+    float    rotation[4];     /* quat (x, y, z, w) */
+    float    matrix[16];      /* column-major 4x4  */
+    bool     has_matrix;      /* true: use matrix; false: use TRS */
+    int32_t *children;        /* node indices */
+    uint32_t child_count;
+} MopGltfNode;
+
+typedef struct MopGltfSkin {
+    char     name[64];
+    int32_t *joints;                  /* node indices */
+    uint32_t joint_count;
+    float   *inverse_bind_matrices;   /* 16 floats per joint, column-major */
+    int32_t  skeleton_root;           /* or -1 */
+} MopGltfSkin;
+```
+
+`MopGltfImage.data` points **into** `_buffer_data` — do not free it individually. Decode with `stb_image` (PNG / JPEG) from `mime_type` + `data` + `data_size`.
+
+## Functions
+
+```c
+bool     mop_gltf_load  (const char *path, MopGltfScene *out);
+void     mop_gltf_free  (MopGltfScene *scene);
+uint32_t mop_gltf_import(const MopGltfScene *scene, MopViewport *vp,
+                         uint32_t base_object_id);
+```
+
+### mop_gltf_load / mop_gltf_free
+
+`load` auto-detects `.glb` vs `.gltf` by extension. Returns `false` on parse failure, file not found, or schema errors. `free` releases all scene memory including backing buffers.
+
+### mop_gltf_import
+
+Convenience importer — walks the node tree, creates MOP meshes (one per glTF primitive), uploads textures via `mop_viewport_create_texture`, sets materials, and wires up bone hierarchies for skinned meshes. Returns the number of meshes created; they are numbered sequentially starting at `base_object_id`.
+
+```c
+MopGltfScene s;
+if (mop_gltf_load("hero.glb", &s)) {
+    uint32_t added = mop_gltf_import(&s, vp, /*base=*/ 100);
+    printf("imported %u meshes\n", added);
+    mop_gltf_free(&s);
+}
+```
+
+If you want to control mesh creation yourself (e.g. attach a custom material graph instead of the flat material, decode images through the streaming texture pipeline, or filter by node name), walk `scene.nodes` and build `MopMeshDesc` manually using each primitive's `vertices` / `indices` arrays.
+
+## See Also
+
+- [Loader](reference-io-loader) — generic `.obj` / `.mop` path
+- [Material](reference-core-material) · [Scene](reference-core-scene) · [Texture Pipeline](reference-core-texture-pipeline)

@@ -1,6 +1,7 @@
 stages:
   - build
   - test
+  - docs
   - conformance
 
 variables:
@@ -56,6 +57,17 @@ test:linux-clang:
     - nix develop .#ci --no-update-lock-file -c sh -c '
         make CC=clang &&
         make CC=clang test'
+
+# --- Docs ---
+#
+# Fast check: broken slug links + compile-test every ```c block that has
+# `int main(`.  See tools/docs/README.md.
+docs:check:
+  stage: docs
+  script:
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make CC=clang &&
+        make docs-check'
 
 # --- Conformance ---
 .conformance_template: &conformance_template

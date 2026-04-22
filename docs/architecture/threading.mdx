@@ -9,9 +9,25 @@ tags: ["architecture", "threading"]
 
 ## Current Guarantees
 
-### Single-Threaded Per Viewport
+### Scene Lock
 
-One viewport instance must be accessed from exactly one thread at a time. The engine provides no internal synchronization.
+Each viewport owns a non-recursive mutex covering its scene state (mesh pool, materials, lights, selection, undo stack). The render path acquires the lock for the duration of a frame. Application code that mutates from a non-render thread must wrap the mutation in `mop_viewport_scene_lock` / `mop_viewport_scene_unlock`.
+
+```c
+mop_viewport_scene_lock(vp);
+mop_mesh_set_position(mesh, new_pos);
+mop_mesh_set_material(mesh, &mat);
+mop_viewport_scene_unlock(vp);
+```
+
+Rules:
+
+- The lock is **non-recursive**. Do not call `scene_lock` twice on the same thread.
+- `mop_viewport_render` acquires the lock internally. Do not call render while the application already holds the lock.
+- Per-mesh setters (`mop_mesh_set_position`, `_rotation`, `_scale`, `_material`, etc.) take the lock internally using the mesh's back-pointer to its viewport, so they are safe to call from any thread at any time.
+- Read-only queries (`mop_viewport_mesh_at`, `mop_mesh_get_position`, snapshot iteration) are safe without the lock **only if** the application can guarantee no other thread is mutating.
+
+See `examples/showcase.c` for a worker thread animating the scene concurrent with the main render thread.
 
 ### No Global Mutable State
 
@@ -27,14 +43,15 @@ Each backend creates its own `MopRhiDevice`. There is no shared state between de
 
 ## Thread Safety Summary
 
-| Operation                                            | Thread-safe? |
-| ---------------------------------------------------- | ------------ |
-| Create two viewports on two threads                  | Yes          |
-| Render two viewports concurrently                    | Yes          |
-| Render and pick on the same viewport concurrently    | No           |
-| Create mesh and render concurrently on same viewport | No           |
-| Access different viewports from different threads    | Yes          |
-| Access same viewport from different threads          | No           |
+| Operation                                                            | Thread-safe?        |
+| -------------------------------------------------------------------- | ------------------- |
+| Create two viewports on two threads                                  | Yes                 |
+| Render two viewports concurrently                                    | Yes                 |
+| Render and pick on the same viewport concurrently                    | No                  |
+| Access same viewport from two threads without the scene lock         | No                  |
+| Mutate from a worker thread wrapped in `scene_lock` / `scene_unlock` | Yes                 |
+| Per-mesh setter (`mop_mesh_set_*`) from any thread                   | Yes (internal lock) |
+| Snapshot iteration without the lock while another thread mutates     | No                  |
 
 ## Future: Multi-Threaded Command Recording
 
