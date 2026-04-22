@@ -82,6 +82,200 @@ void mop_overlay_push_diamond(MopViewport *vp, float cx, float cy, float size,
 }
 
 /* -------------------------------------------------------------------------
+ * CPU rasterizer for overlay primitives
+ *
+ * Paints lines / filled circles / diamonds onto an RGBA8 buffer with
+ * the same AA rules as the CPU backend's draw_overlays path. Depth is
+ * intentionally ignored — overlays are drawn unconditionally on top of
+ * whatever's already in the buffer. Used by the post-frame path so the
+ * gizmo / chrome overlays reliably appear above the selection outline
+ * on every backend (see rg_post_frame_overlays in viewport.c).
+ * ------------------------------------------------------------------------- */
+
+void mop_overlay_rasterize_prims_cpu(uint8_t *rgba, int w, int h,
+                                     const MopOverlayPrim *prims,
+                                     uint32_t count, const float *depth_buf,
+                                     bool reverse_z, bool is_cpu_ndc) {
+  if (!rgba || !prims || count == 0 || w <= 0 || h <= 0)
+    return;
+
+  for (uint32_t i = 0; i < count; i++) {
+    const MopOverlayPrim *p = &prims[i];
+    float x0 = p->x0, y0 = p->y0, x1 = p->x1, y1 = p->y1;
+    float opacity = p->a;
+    float line_w = p->width, radius = p->radius;
+
+    /* depth < 0 is the "always on top" sentinel (gizmo). Skip depth test
+     * entirely. For positive depth values, we sample the scene depth per
+     * pixel inside the inner loop. */
+    bool depth_test = (p->depth >= 0.0f) && depth_buf != NULL;
+    float prim_depth = is_cpu_ndc ? (p->depth * 0.5f + 0.5f) : p->depth;
+    float geom_threshold = reverse_z ? 0.0001f : 0.9999f;
+
+    uint8_t r8 = (uint8_t)(p->r * 255.0f);
+    uint8_t g8 = (uint8_t)(p->g * 255.0f);
+    uint8_t b8 = (uint8_t)(p->b * 255.0f);
+
+    if (p->type == MOP_PRIM_LINE) {
+      float margin = line_w + 1.5f;
+      int bx0 = (int)fmaxf(0, fminf(x0, x1) - margin);
+      int by0 = (int)fmaxf(0, fminf(y0, y1) - margin);
+      int bx1 = (int)fminf((float)(w - 1), fmaxf(x0, x1) + margin);
+      int by1 = (int)fminf((float)(h - 1), fmaxf(y0, y1) + margin);
+      float dx = x1 - x0, dy = y1 - y0;
+      float seg_len = sqrtf(dx * dx + dy * dy);
+      if (seg_len < 0.5f)
+        continue;
+      float inv_len = 1.0f / seg_len;
+      float ux = dx * inv_len, uy = dy * inv_len;
+      float hw = line_w * 0.5f;
+      for (int py = by0; py <= by1; py++) {
+        for (int px = bx0; px <= bx1; px++) {
+          float fx = (float)px + 0.5f - x0;
+          float fy = (float)py + 0.5f - y0;
+          float along = fx * ux + fy * uy;
+          if (along < -1.0f || along > seg_len + 1.0f)
+            continue;
+          float perp = fabsf(fx * (-uy) + fy * ux);
+          float alpha;
+          if (perp <= hw - 0.5f)
+            alpha = 1.0f;
+          else if (perp >= hw + 0.5f)
+            continue;
+          else
+            alpha = 1.0f - (perp - (hw - 0.5f));
+          if (along < 0.0f)
+            alpha *= fmaxf(0.0f, 1.0f + along);
+          else if (along > seg_len)
+            alpha *= fmaxf(0.0f, 1.0f - (along - seg_len));
+          alpha *= opacity;
+          if (alpha < 0.004f)
+            continue;
+          if (depth_test) {
+            float sd = depth_buf[py * w + px];
+            bool has_geom =
+                reverse_z ? (sd > geom_threshold) : (sd < geom_threshold);
+            if (has_geom && (reverse_z ? (prim_depth < sd - 1e-5f)
+                                       : (prim_depth > sd + 1e-5f)))
+              continue;
+          }
+          int idx = (py * w + px) * 4;
+          rgba[idx + 0] =
+              (uint8_t)(rgba[idx + 0] * (1.0f - alpha) + r8 * alpha);
+          rgba[idx + 1] =
+              (uint8_t)(rgba[idx + 1] * (1.0f - alpha) + g8 * alpha);
+          rgba[idx + 2] =
+              (uint8_t)(rgba[idx + 2] * (1.0f - alpha) + b8 * alpha);
+        }
+      }
+    } else if (p->type == MOP_PRIM_FILLED_CIRCLE) {
+      int bx0 = (int)(x0 - radius - 1.5f);
+      int by0 = (int)(y0 - radius - 1.5f);
+      int bx1 = (int)(x0 + radius + 1.5f);
+      int by1 = (int)(y0 + radius + 1.5f);
+      if (bx0 < 0)
+        bx0 = 0;
+      if (by0 < 0)
+        by0 = 0;
+      if (bx1 >= w)
+        bx1 = w - 1;
+      if (by1 >= h)
+        by1 = h - 1;
+      for (int py = by0; py <= by1; py++) {
+        for (int px = bx0; px <= bx1; px++) {
+          float fx = (float)px + 0.5f - x0;
+          float fy = (float)py + 0.5f - y0;
+          float d = sqrtf(fx * fx + fy * fy);
+          float a = radius + 0.5f - d;
+          if (a <= 0.0f)
+            continue;
+          if (a > 1.0f)
+            a = 1.0f;
+          a *= opacity;
+          if (a < 0.004f)
+            continue;
+          if (depth_test) {
+            float sd = depth_buf[py * w + px];
+            bool has_geom =
+                reverse_z ? (sd > geom_threshold) : (sd < geom_threshold);
+            if (has_geom && (reverse_z ? (prim_depth < sd - 1e-5f)
+                                       : (prim_depth > sd + 1e-5f)))
+              continue;
+          }
+          int idx = (py * w + px) * 4;
+          float ia = 1.0f - a;
+          rgba[idx + 0] = (uint8_t)((float)rgba[idx + 0] * ia + (float)r8 * a);
+          rgba[idx + 1] = (uint8_t)((float)rgba[idx + 1] * ia + (float)g8 * a);
+          rgba[idx + 2] = (uint8_t)((float)rgba[idx + 2] * ia + (float)b8 * a);
+        }
+      }
+    } else {
+      /* DIAMOND: 4 lines forming a rotated square */
+      float cx = x0, cy = y0;
+      float r_d = radius;
+      float pts[4][2] = {
+          {cx, cy - r_d}, {cx + r_d, cy}, {cx, cy + r_d}, {cx - r_d, cy}};
+      for (int e = 0; e < 4; e++) {
+        int ne = (e + 1) % 4;
+        float lx0 = pts[e][0], ly0 = pts[e][1];
+        float lx1 = pts[ne][0], ly1 = pts[ne][1];
+        float margin = line_w + 1.5f;
+        int bbx0 = (int)fmaxf(0, fminf(lx0, lx1) - margin);
+        int bby0 = (int)fmaxf(0, fminf(ly0, ly1) - margin);
+        int bbx1 = (int)fminf((float)(w - 1), fmaxf(lx0, lx1) + margin);
+        int bby1 = (int)fminf((float)(h - 1), fmaxf(ly0, ly1) + margin);
+        float dx = lx1 - lx0, dy = ly1 - ly0;
+        float seg_len = sqrtf(dx * dx + dy * dy);
+        if (seg_len < 0.5f)
+          continue;
+        float inv_len = 1.0f / seg_len;
+        float eux = dx * inv_len, euy = dy * inv_len;
+        float hw = line_w * 0.5f;
+        for (int py = bby0; py <= bby1; py++) {
+          for (int px = bbx0; px <= bbx1; px++) {
+            float fx = (float)px + 0.5f - lx0;
+            float fy = (float)py + 0.5f - ly0;
+            float along = fx * eux + fy * euy;
+            if (along < -1.0f || along > seg_len + 1.0f)
+              continue;
+            float perp = fabsf(fx * (-euy) + fy * eux);
+            float alpha;
+            if (perp <= hw - 0.5f)
+              alpha = 1.0f;
+            else if (perp >= hw + 0.5f)
+              continue;
+            else
+              alpha = 1.0f - (perp - (hw - 0.5f));
+            if (along < 0.0f)
+              alpha *= fmaxf(0.0f, 1.0f + along);
+            else if (along > seg_len)
+              alpha *= fmaxf(0.0f, 1.0f - (along - seg_len));
+            alpha *= opacity;
+            if (alpha < 0.004f)
+              continue;
+            if (depth_test) {
+              float sd = depth_buf[py * w + px];
+              bool has_geom =
+                  reverse_z ? (sd > geom_threshold) : (sd < geom_threshold);
+              if (has_geom && (reverse_z ? (prim_depth < sd - 1e-5f)
+                                         : (prim_depth > sd + 1e-5f)))
+                continue;
+            }
+            int idx = (py * w + px) * 4;
+            rgba[idx + 0] =
+                (uint8_t)(rgba[idx + 0] * (1.0f - alpha) + r8 * alpha);
+            rgba[idx + 1] =
+                (uint8_t)(rgba[idx + 1] * (1.0f - alpha) + g8 * alpha);
+            rgba[idx + 2] =
+                (uint8_t)(rgba[idx + 2] * (1.0f - alpha) + b8 * alpha);
+          }
+        }
+      }
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------
  * RHI buffer data accessor
  *
  * The overlay code needs to read vertex data from RHI buffers.  Since
@@ -1076,11 +1270,15 @@ void mop_overlay_builtin_outline(MopViewport *vp, void *user_data) {
       float alpha = selected ? alpha_sel : alpha_unsel;
 
       if (selected) {
-        /* Thick outline: paint within radius around edge pixel */
+        /* Thick outline: paint within radius around edge pixel. Skip
+         * destination pixels that belong to chrome (gizmo, grid,
+         * lights) so the outline draws under them instead of over. */
         for (int dy = -radius_sel; dy <= radius_sel; dy++) {
           for (int dx = -radius_sel; dx <= radius_sel; dx++) {
             int px = x + dx, py = y + dy;
             if (px < 0 || px >= w || py < 0 || py >= h)
+              continue;
+            if (id_buf[py * w + px] >= 0xFFFD0000u)
               continue;
             int idx = (py * w + px) * 4;
             rgba[idx + 0] =
@@ -1747,9 +1945,17 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
   if (s < 0.3f)
     s = 0.3f;
 
-  float line_w = vp->theme.gizmo_line_width;
   float opacity = vp->theme.gizmo_opacity;
-  float ssaa = (float)vp->ssaa_factor;
+  /* Scale tip / label pixel sizes so they stay visible at high DPI / large
+   * framebuffers. Reference height 1080 → 1.33× at 1440p, 2× at 4K. Never
+   * shrinks below ssaa_factor. The shaft line width is deliberately not
+   * scaled: the theme value is treated as an exact pixel width so the
+   * shaft reads as a clean thin line (matching the corner axis navigator
+   * style) rather than a fat bar. */
+  float pix_scale = (float)(vp->height * vp->ssaa_factor) / 1080.0f;
+  if (pix_scale < (float)vp->ssaa_factor)
+    pix_scale = (float)vp->ssaa_factor;
+  float line_w = vp->theme.gizmo_line_width;
 
   MopMat4 view_rot = vp->view_matrix;
   view_rot.d[12] = 0.0f;
@@ -1826,7 +2032,7 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
         if (project_to_screen(tip, &vp_mat, w, h, &tx, &ty)) {
           tx = roundf(tx);
           ty = roundf(ty);
-          float ball_r = 7.0f * ssaa;
+          float ball_r = 7.0f * pix_scale;
 
           /* Shorten shaft to overlap into circle (hides seam) */
           float gdx = tx - ss_x, gdy = ty - ss_y;
@@ -1841,8 +2047,8 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
           mop_overlay_push_circle(vp, tx, ty, ball_r, c.r, c.g, c.b, ax_opacity,
                                   -1.0f);
           /* Axis letter */
-          float lsz = 3.0f * ssaa;
-          float llw = 1.2f * ssaa;
+          float lsz = 3.0f * pix_scale;
+          float llw = 1.2f * pix_scale;
           float dk = 15.0f / 255.0f;
           if (a == 0) {
             mop_overlay_push_line(vp, tx - lsz, ty - lsz, tx + lsz, ty + lsz,
@@ -1873,8 +2079,8 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
         /* Scale mode: shaft line + diamond at tip */
         mop_overlay_push_line(vp, ss_x, ss_y, se_x, se_y, c.r, c.g, c.b, line_w,
                               ax_opacity, -1.0f);
-        mop_overlay_push_diamond(vp, se_x, se_y, 4.0f * ssaa, c.r, c.g, c.b,
-                                 line_w, ax_opacity, -1.0f);
+        mop_overlay_push_diamond(vp, se_x, se_y, 4.0f * pix_scale, c.r, c.g,
+                                 c.b, line_w, ax_opacity, -1.0f);
       }
     } else {
       /* Rotate mode: circle segments as lines */
@@ -1918,7 +2124,7 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
   if (project_to_screen(pos, &vp_mat, w, h, &csx, &csy)) {
     csx = roundf(csx);
     csy = roundf(csy);
-    mop_overlay_push_circle(vp, csx, csy, 3.5f * ssaa, cc.r, cc.g, cc.b,
+    mop_overlay_push_circle(vp, csx, csy, 3.5f * pix_scale, cc.r, cc.g, cc.b,
                             opacity * 0.85f, -1.0f);
   }
 }
@@ -2124,8 +2330,11 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
 
   float cx = roundf(0.09f * (float)w);
   float cy = roundf(0.89f * (float)h);
-  float scale = fminf((float)w, (float)h) * 0.06f;
-  float ssaa = (float)vp->ssaa_factor;
+  float scale = fminf((float)w, (float)h) * 0.065f;
+  /* At native-resolution rendering (ssaa=1 on a high-DPI drawable)
+   * the old "8px × ssaa" numbers become visually tiny. Tie ball radii
+   * and stroke widths to the viewport-proportional scale instead. */
+  float base_r = scale * 0.17f;
 
   /* Background color (sRGB [0,1]) */
   float bg_col[3] = {sqrtf(vp->theme.bg_bottom.r), sqrtf(vp->theme.bg_bottom.g),
@@ -2164,7 +2373,7 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
     lerp_color(axes[a].col, bg_col, axis_col[a], fade_t);
 
     float size_scale = (depth_pos + 1.0f) * 0.08f + 0.92f;
-    axes[a].ball_r = 8.0f * ssaa * size_scale;
+    axes[a].ball_r = base_r * size_scale;
 
     float depth_neg = -rot.z;
     axes[a + 3].sx = roundf(cx - rot.x * scale);
@@ -2177,7 +2386,7 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
     lerp_color(axes[a + 3].col, bg_col, axis_col[a], fade_t_neg);
 
     float size_scale_neg = (depth_neg + 1.0f) * 0.08f + 0.92f;
-    axes[a + 3].ball_r = 8.0f * ssaa * size_scale_neg;
+    axes[a + 3].ball_r = base_r * size_scale_neg;
   }
 
   /* Depth sort back-to-front */
@@ -2198,7 +2407,9 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
     float fr = fminf(1.0f, fmaxf(0.0f, axes[ai].col[0]));
     float fg = fminf(1.0f, fmaxf(0.0f, axes[ai].col[1]));
     float fb = fminf(1.0f, fmaxf(0.0f, axes[ai].col[2]));
-    float lw = axes[ai].positive ? 6.0f : 5.0f;
+    float lw_pos = base_r * 0.38f;
+    float lw_neg = base_r * 0.31f;
+    float lw = axes[ai].positive ? lw_pos : lw_neg;
 
     /* Shorten shaft so it stops inside the circle (overlap hides the seam) */
     float sdx = axes[ai].sx - cx;
@@ -2217,8 +2428,8 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
                               fg, fb, 1.0f, -1.0f);
 
       /* Stroke-based letter label (dark text on colored disc) */
-      float letter_sz = 3.4f * ssaa;
-      float letter_lw = 1.4f * ssaa;
+      float letter_sz = base_r * 0.42f;
+      float letter_lw = base_r * 0.18f;
       float dk = 15.0f / 255.0f;
       /* X letter: two diagonal lines */
       if (axes[ai].axis == 0) {

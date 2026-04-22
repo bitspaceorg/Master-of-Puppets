@@ -6,44 +6,60 @@ stages:
 variables:
   GIT_DEPTH: 1
 
+# Nix-based CI. The toolchain is pinned by flake.lock, so every job gets
+# byte-identical gcc/clang/lua regardless of which runner picks it up.
+default:
+  image: nixos/nix:2.25.2
+  before_script:
+    - mkdir -p /etc/nix
+    - |
+      cat >> /etc/nix/nix.conf <<'EOF'
+      experimental-features = nix-command flakes
+      accept-flake-config = true
+      sandbox = false
+      EOF
+    - nix --version
+    # Warm the flake so timing later reflects the real work, not eval.
+    - nix develop .#ci --no-update-lock-file -c true
+
+# --- Build ---
 .build_template: &build_template
   stage: build
-  script:
-    - make
-    - make RELEASE=1
 
-.test_template: &test_template
-  stage: test
-  script:
-    - make
-    - make test
-
-# --- Linux (GCC) ---
 build:linux-gcc:
   <<: *build_template
-  image: gcc:latest
+  script:
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make CC=gcc &&
+        make clean &&
+        make RELEASE=1 CC=gcc'
 
-test:linux-gcc:
-  <<: *test_template
-  image: gcc:latest
-
-# --- Linux (Clang) ---
 build:linux-clang:
   <<: *build_template
-  image: silkeh/clang:latest
+  script:
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make CC=clang &&
+        make clean &&
+        make RELEASE=1 CC=clang'
+
+# --- Test ---
+test:linux-gcc:
+  stage: test
+  script:
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make CC=gcc &&
+        make CC=gcc test'
 
 test:linux-clang:
-  <<: *test_template
-  image: silkeh/clang:latest
+  stage: test
+  script:
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make CC=clang &&
+        make CC=clang test'
 
 # --- Conformance ---
 .conformance_template: &conformance_template
   stage: conformance
-  image: gcc:latest
-  before_script:
-    - apt-get update && apt-get install -y liblua5.4-dev
-    - make lib RELEASE=1
-    - make conformance RELEASE=1
   artifacts:
     when: always
     paths:
@@ -56,7 +72,10 @@ conformance:tier1:
     - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   script:
-    - ./build/conformance_runner --tier=1 --width=640 --height=480 --output=conformance/results
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make lib RELEASE=1 &&
+        make conformance RELEASE=1 &&
+        ./build/conformance_runner --tier=1 --width=640 --height=480 --output=conformance/results'
 
 conformance:tier2:
   <<: *conformance_template
@@ -64,7 +83,10 @@ conformance:tier2:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
   script:
-    - ./build/conformance_runner --tier=2 --width=1920 --height=1080 --output=conformance/results
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make lib RELEASE=1 &&
+        make conformance RELEASE=1 &&
+        ./build/conformance_runner --tier=2 --width=1920 --height=1080 --output=conformance/results'
 
 conformance:tier3:
   <<: *conformance_template
@@ -72,4 +94,7 @@ conformance:tier3:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
   script:
-    - ./build/conformance_runner --tier=3 --width=1920 --height=1080 --output=conformance/results --golden=conformance/baselines
+    - nix develop .#ci --no-update-lock-file -c sh -c '
+        make lib RELEASE=1 &&
+        make conformance RELEASE=1 &&
+        ./build/conformance_runner --tier=3 --width=1920 --height=1080 --output=conformance/results --golden=conformance/baselines'

@@ -378,7 +378,10 @@ static void gen_scale_handle(MopVertex *v, uint32_t *idx, int axis, float cr,
 
 static void gen_rotate_handle(MopVertex *v, uint32_t *idx, int axis, float cr,
                               float cg, float cb) {
-  gen_torus(v, idx, axis, 1.0f, 0.006f, cr, cg, cb);
+  /* Minor radius 0.025 (was 0.006): thicker tube so edge-on views of
+   * the ring remain visible as a clear arc instead of a broken
+   * one-pixel line. */
+  gen_torus(v, idx, axis, 1.0f, 0.025f, cr, cg, cb);
 }
 
 /* -------------------------------------------------------------------------

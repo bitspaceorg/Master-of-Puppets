@@ -26,5 +26,18 @@
                     echo "  Examples:       cd examples && nix develop"
                 '';
             };
+
+            # Minimal shell used by GitLab CI: build/test matrix (gcc + clang)
+            # plus lua for the conformance runner. No treefmt / pre-commit.
+            devShells.ci = pkgs.mkShell {
+                nativeBuildInputs =
+                    mop-deps.nativeBuildInputs
+                    ++ (with pkgs; [
+                        gcc
+                        clang
+                        lua5_4
+                    ]);
+                buildInputs = mop-deps.buildInputs;
+            };
         };
 }

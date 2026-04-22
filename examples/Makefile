@@ -18,6 +18,9 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
   LDFLAGS += -lc++
 else
+  # Linux / glibc: expose POSIX/BSD/GNU symbols under strict -std=c11
+  # (usleep, sched_yield, pthread_mutexattr_settype). Darwin is permissive.
+  CFLAGS  += -D_GNU_SOURCE
   LDFLAGS += -lstdc++
 endif
 
@@ -45,6 +48,15 @@ endif
 BUILD := ../build/examples
 EXAMPLES := showcase
 
+# Interactive example depends on SDL2. If pkg-config finds it, we build
+# it; otherwise we skip silently so `make` still succeeds on minimal
+# systems.
+SDL2_CFLAGS  := $(shell pkg-config --cflags sdl2 2>/dev/null)
+SDL2_LDFLAGS := $(shell pkg-config --libs sdl2 2>/dev/null)
+ifneq ($(SDL2_LDFLAGS),)
+  EXAMPLES += interactive
+endif
+
 .PHONY: all clean $(EXAMPLES)
 
 all: $(EXAMPLES)
@@ -53,6 +65,10 @@ $(BUILD):
 	@mkdir -p $@
 
 showcase: $(BUILD)/showcase
+interactive: $(BUILD)/interactive
+
+$(BUILD)/interactive: interactive.c | $(BUILD)
+	$(CC) $(CFLAGS) $(SDL2_CFLAGS) $< $(LDFLAGS) $(SDL2_LDFLAGS) -o $@
 
 $(BUILD)/%: %.c | $(BUILD)
 	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@

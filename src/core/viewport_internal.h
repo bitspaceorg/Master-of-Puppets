@@ -655,4 +655,25 @@ void mop_overlay_push_diamond(MopViewport *vp, float cx, float cy, float size,
                               float r, float g, float b, float width,
                               float opacity, float depth);
 
+/* CPU-rasterize overlay primitives onto an RGBA8 buffer.
+ *
+ * Used in the post-readback path so 2D screen-space chrome (gizmo, axis
+ * indicator, light / camera indicators) reliably draws on top of the
+ * outline in the buffer the host actually displays. On Vulkan the GPU
+ * overlay render targets an image that only becomes visible one frame
+ * later, so the CPU paint on readback is what the user sees this frame.
+ *
+ * If depth_buf is non-NULL, primitives with depth >= 0 are depth-tested
+ * against the scene depth buffer so indicators behind geometry are
+ * correctly occluded. Primitives with depth < 0 are drawn on top
+ * unconditionally (gizmo convention).
+ *   - reverse_z: scene depth uses reverse-Z convention (closer = larger).
+ *   - is_cpu_ndc: prim depth is raw NDC z in [-1, 1] (CPU / GL) and needs
+ *     remapping to [0, 1] before comparison; false means already [0, 1].
+ */
+void mop_overlay_rasterize_prims_cpu(uint8_t *rgba, int w, int h,
+                                     const MopOverlayPrim *prims,
+                                     uint32_t count, const float *depth_buf,
+                                     bool reverse_z, bool is_cpu_ndc);
+
 #endif /* MOP_VIEWPORT_INTERNAL_H */

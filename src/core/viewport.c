@@ -2746,12 +2746,43 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
     }
   }
 
-  /* Dispatch accumulated overlay primitives to backend */
-  if ((vp->overlay_prim_count > 0 || gp) && vp->rhi->draw_overlays) {
-    int w = vp->width * vp->ssaa_factor;
-    int h = vp->height * vp->ssaa_factor;
-    vp->rhi->draw_overlays(vp->device, vp->framebuffer, vp->overlay_prims,
-                           vp->overlay_prim_count, gp, w, h);
+  int w = vp->width * vp->ssaa_factor;
+  int h = vp->height * vp->ssaa_factor;
+
+  /* CPU-rasterize the screen-space chrome overlays (gizmo, light / camera
+   * indicators, axis navigator) directly onto the readback color buffer.
+   * This guarantees they draw on top of the selection outline — which is
+   * also painted on readback above — regardless of backend. On Vulkan the
+   * GPU overlay path targets an image whose contents only surface to the
+   * host one frame later, so painting here is what the user actually sees
+   * this frame. */
+  if (vp->overlay_prim_count > 0 && vp->rhi->framebuffer_read_color) {
+    int cw = 0, ch = 0;
+    const uint8_t *color_ro =
+        vp->rhi->framebuffer_read_color(vp->device, vp->framebuffer, &cw, &ch);
+    if (color_ro && cw == w && ch == h) {
+      const float *depth_buf = NULL;
+      if (vp->rhi->framebuffer_read_depth) {
+        int dw = 0, dh = 0;
+        depth_buf = vp->rhi->framebuffer_read_depth(vp->device, vp->framebuffer,
+                                                    &dw, &dh);
+        if (!depth_buf || dw != w || dh != h)
+          depth_buf = NULL;
+      }
+      bool is_cpu_ndc = (vp->backend_type == MOP_BACKEND_CPU);
+      mop_overlay_rasterize_prims_cpu((uint8_t *)(uintptr_t)color_ro, cw, ch,
+                                      vp->overlay_prims, vp->overlay_prim_count,
+                                      depth_buf, vp->reverse_z, is_cpu_ndc);
+    }
+  }
+
+  /* Dispatch grid (if any) to backend. Prim count is zeroed because we
+   * already painted them via the CPU path above; letting the backend
+   * paint them again would ghost on Vulkan (one-frame-stale copy) and
+   * double-blend AA edges on CPU. */
+  if (gp && vp->rhi->draw_overlays) {
+    vp->rhi->draw_overlays(vp->device, vp->framebuffer, vp->overlay_prims, 0,
+                           gp, w, h);
   }
 }
 
@@ -3810,10 +3841,14 @@ int mop_viewport_pick_axis_indicator(MopViewport *vp, float mx, float my) {
   if (w <= 0 || h <= 0)
     return 0;
 
-  /* Same layout as axis indicator overlay — uniform scale from min(w,h) */
+  /* Must match axis indicator overlay exactly — same cx/cy/scale so
+   * hit test lines up with the rendered ball positions. Scaling the
+   * visuals without scaling the hit radii used to leave the click box
+   * the original 8-16px around each ball center. */
   float cx = roundf(0.09f * (float)w);
   float cy = roundf(0.89f * (float)h);
-  float scale = fminf((float)w, (float)h) * 0.06f;
+  float scale = fminf((float)w, (float)h) * 0.065f;
+  float base_r = scale * 0.17f;
 
   /* View rotation only (strip translation) */
   MopMat4 view_rot = vp->view_matrix;
@@ -3830,7 +3865,8 @@ int mop_viewport_pick_axis_indicator(MopViewport *vp, float mx, float my) {
   static const int pos_view[] = {2, 4, 1}; /* MOP_VIEW_RIGHT, TOP, BACK */
   static const int neg_view[] = {3, 5, 0}; /* MOP_VIEW_LEFT, BOTTOM, FRONT */
 
-  float hit_radius = 16.0f * (float)vp->ssaa_factor;
+  /* Slightly bigger than the visual ball for forgiving clicks. */
+  float hit_radius = base_r * 1.25f;
   float best_dist = hit_radius * hit_radius;
   int best_hit = 0;
 

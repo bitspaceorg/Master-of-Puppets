@@ -58,7 +58,10 @@ ifeq ($(UNAME_S),Darwin)
   CFLAGS += -DMOP_PLATFORM_MACOS=1
 endif
 ifeq ($(UNAME_S),Linux)
-  CFLAGS += -DMOP_PLATFORM_LINUX=1
+  # _GNU_SOURCE exposes POSIX/BSD/GNU symbols (strdup, usleep, sched_yield,
+  # pthread_mutexattr_settype) under strict -std=c11 on glibc. Darwin
+  # headers are permissive by default; glibc isn't.
+  CFLAGS += -DMOP_PLATFORM_LINUX=1 -D_GNU_SOURCE
 endif
 
 # -----------------------------------------------------------------------------
