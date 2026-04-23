@@ -155,7 +155,7 @@ LIB_OUT   := $(LIB_DIR)/libmop.a
 # -----------------------------------------------------------------------------
 # Default target — static library only
 # -----------------------------------------------------------------------------
-.PHONY: all lib clean install test torture tools shaders conformance conformance-run docs-check docs-check-code
+.PHONY: all lib clean install test torture tools shaders conformance conformance-run docs-check docs-check-code ci-linux
 
 all: lib
 
@@ -303,3 +303,30 @@ docs-check: docs-check-code
 
 docs-check-code: lib
 	python3 tools/docs/compile_blocks.py
+
+# -----------------------------------------------------------------------------
+# Reproduce a CI job locally in the same nixos/nix docker image CI uses.
+#
+# Usage:
+#   make ci-linux                  # defaults to CI_JOB=test-gcc
+#   make ci-linux CI_JOB=test-gcc
+#   make ci-linux CI_JOB=test-clang
+#   make ci-linux CI_JOB=build-gcc
+#   make ci-linux CI_JOB=build-clang
+#   make ci-linux CI_JOB=docs
+#   make ci-linux CI_JOB=conformance
+#
+# Requires docker.  First run pulls the image (~100 MB) and builds a nix
+# store cache inside a named volume (mop-ci-nix) — slow once, fast after.
+# -----------------------------------------------------------------------------
+CI_JOB ?= test-gcc
+CI_IMAGE := nixos/nix:2.25.2
+CI_NIX_STORE_VOLUME := mop-ci-nix
+
+ci-linux:
+	docker run --rm -t \
+	  -v "$(CURDIR)":/src -w /src \
+	  -v $(CI_NIX_STORE_VOLUME):/nix \
+	  -e NIX_CONFIG="experimental-features = nix-command flakes\naccept-flake-config = true\nsandbox = false" \
+	  $(CI_IMAGE) \
+	  sh ci/linux.sh $(CI_JOB)

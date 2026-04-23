@@ -4,9 +4,8 @@ stages:
   - docs
   - conformance
 
-# Conformance runs against a live viewport and asserts: no Vulkan validation
-# errors, no sync hazards, no NaN pixels, CPU byte-level determinism, valid
-# pick results.  See conformance/runner.c.
+# Every job delegates to ci/linux.sh.  Run `make ci-linux CI_JOB=<name>`
+# locally (on any OS with docker) to reproduce byte-identically.
 
 variables:
   GIT_DEPTH: 1
@@ -24,61 +23,37 @@ default:
       sandbox = false
       EOF
     - nix --version
-    # Warm the flake so timing later reflects the real work, not eval.
-    - nix develop .#ci --no-update-lock-file -c true
 
 # --- Build ---
-.build_template: &build_template
-  stage: build
-
 build:linux-gcc:
-  <<: *build_template
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make CC=gcc &&
-        make clean &&
-        make RELEASE=1 CC=gcc'
+  stage: build
+  script: ["sh ci/linux.sh build-gcc"]
 
 build:linux-clang:
-  <<: *build_template
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make CC=clang &&
-        make clean &&
-        make RELEASE=1 CC=clang'
+  stage: build
+  script: ["sh ci/linux.sh build-clang"]
 
 # --- Test ---
 test:linux-gcc:
   stage: test
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make CC=gcc &&
-        make CC=gcc test'
+  script: ["sh ci/linux.sh test-gcc"]
 
 test:linux-clang:
   stage: test
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make CC=clang &&
-        make CC=clang test'
+  script: ["sh ci/linux.sh test-clang"]
 
 # --- Docs ---
-#
-# Fast check: broken slug links + compile-test every ```c block that has
-# `int main(`.  See tools/docs/README.md.
+# Broken slug links + compile-test every fenced ```c block with int main(.
+# See tools/docs/README.md.
 docs:check:
   stage: docs
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make CC=clang &&
-        make docs-check'
+  script: ["sh ci/linux.sh docs"]
 
 # --- Conformance ---
+# Live-viewport render health: no Vulkan validation errors, no sync hazards,
+# no NaN pixels, CPU byte-level determinism, valid pick results.  See
+# conformance/runner.c.
 conformance:check:
   stage: conformance
   timeout: 5 minutes
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make lib RELEASE=1 &&
-        make conformance RELEASE=1 &&
-        ./build/conformance_runner --verbose'
+  script: ["sh ci/linux.sh conformance"]
