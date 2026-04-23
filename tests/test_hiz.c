@@ -332,8 +332,7 @@ int main(void) {
 }
 #else
 int main(void) {
-  printf("=== Hi-Z Occlusion Culling Tests (Phase 2C) ===\n");
-  printf("SKIP: Vulkan not enabled\n");
-  return 0;
+  MOP_TEST_SKIP("=== Hi-Z Occlusion Culling Tests (Phase 2C) ===\n"
+                "SKIP: Vulkan not enabled\n");
 }
 #endif

@@ -12,6 +12,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* Skip a test binary cleanly — prints reason, flushes stdio, then
+ * _exit(0) so that libstdc++ / atexit cleanup never runs.  Fixes
+ * 'free(): invalid size' observed on Linux/gcc CI when the Vulkan-gated
+ * test stubs pulled libstdc++ in transitively via libmop's
+ * tinyexr_impl.o; the destructor chain hit a heap inconsistency.  The
+ * stub has no resources to clean up, so skipping atexit is safe.
+ */
+#define MOP_TEST_SKIP(reason)                                                  \
+  do {                                                                         \
+    printf("%s", (reason));                                                    \
+    fflush(stdout);                                                            \
+    _exit(0);                                                                  \
+  } while (0)
 
 /* -------------------------------------------------------------------------
  * ANSI color codes

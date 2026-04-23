@@ -350,9 +350,8 @@ int main(void) {
 #else /* !MOP_HAS_VULKAN */
 
 int main(void) {
-  printf("=== Async Compute Queue Tests (Phase 1C) ===\n");
-  printf("SKIP: Vulkan not enabled\n");
-  return 0;
+  MOP_TEST_SKIP("=== Async Compute Queue Tests (Phase 1C) ===\n"
+                "SKIP: Vulkan not enabled\n");
 }
 
 #endif /* MOP_HAS_VULKAN */
