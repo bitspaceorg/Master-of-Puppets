@@ -304,7 +304,9 @@ static void test_meshlet_single_triangle(void) {
 
 static void test_meshlet_invalid_input(void) {
   TEST_BEGIN("meshlet_invalid_input");
-  MopVertex v[3];
+  /* Zero-init: builder must reject on index_count alone; contents are
+   * never read.  Satisfies gcc -Wmaybe-uninitialized. */
+  MopVertex v[3] = {0};
   uint32_t idx[] = {0, 1, 2, 3}; /* 4 indices, not multiple of 3 */
 
   MopMeshletData data;
