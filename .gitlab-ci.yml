@@ -4,6 +4,10 @@ stages:
   - docs
   - conformance
 
+# Conformance runs against a live viewport and asserts: no Vulkan validation
+# errors, no sync hazards, no NaN pixels, CPU byte-level determinism, valid
+# pick results.  See conformance/runner.c.
+
 variables:
   GIT_DEPTH: 1
 
@@ -61,7 +65,7 @@ test:linux-clang:
 # --- Docs ---
 #
 # Fast check: broken slug links + compile-test every ```c block that has
-# `int main(`.  See tools/docs/README.md.
+# `int main(`.  See utils/docs/README.md.
 docs:check:
   stage: docs
   script:
@@ -70,43 +74,11 @@ docs:check:
         make docs-check'
 
 # --- Conformance ---
-.conformance_template: &conformance_template
+conformance:check:
   stage: conformance
-  artifacts:
-    when: always
-    paths:
-      - conformance/results/
-
-conformance:tier1:
-  <<: *conformance_template
   timeout: 5 minutes
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "push"
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   script:
     - nix develop .#ci --no-update-lock-file -c sh -c '
         make lib RELEASE=1 &&
         make conformance RELEASE=1 &&
-        ./build/conformance_runner --tier=1 --width=640 --height=480 --output=conformance/results'
-
-conformance:tier2:
-  <<: *conformance_template
-  timeout: 15 minutes
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make lib RELEASE=1 &&
-        make conformance RELEASE=1 &&
-        ./build/conformance_runner --tier=2 --width=1920 --height=1080 --output=conformance/results'
-
-conformance:tier3:
-  <<: *conformance_template
-  timeout: 60 minutes
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-  script:
-    - nix develop .#ci --no-update-lock-file -c sh -c '
-        make lib RELEASE=1 &&
-        make conformance RELEASE=1 &&
-        ./build/conformance_runner --tier=3 --width=1920 --height=1080 --output=conformance/results --golden=conformance/baselines'
+        ./build/conformance_runner --verbose'

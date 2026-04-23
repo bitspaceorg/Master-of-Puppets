@@ -155,7 +155,7 @@ LIB_OUT   := $(LIB_DIR)/libmop.a
 # -----------------------------------------------------------------------------
 # Default target — static library only
 # -----------------------------------------------------------------------------
-.PHONY: all lib clean install test torture tools shaders conformance conformance-tier1 conformance-tier2 conformance-tier3 conformance-tier4 conformance-update-golden docs-check docs-check-links docs-check-code
+.PHONY: all lib clean install test torture tools shaders conformance conformance-run docs-check docs-check-code
 
 all: lib
 
@@ -255,27 +255,18 @@ torture: $(TORTURE_BINS)
 	if [ $$failed -ne 0 ]; then exit 1; fi
 
 # -----------------------------------------------------------------------------
-# Conformance framework
+# Conformance — render health check (see conformance/runner.c).
+#
+# Runs against a live viewport and asserts: no Vulkan validation errors,
+# no sync hazards, no NaN pixels, CPU backend byte-level determinism,
+# valid pick results. Completes in seconds; runs on every CI push.
 # -----------------------------------------------------------------------------
 conformance: lib
-	$(MAKE) -C conformance
+	$(MAKE) -C conformance MOP_ENABLE_VULKAN=$(MOP_ENABLE_VULKAN) \
+	                       MOP_ENABLE_OPENGL=$(MOP_ENABLE_OPENGL)
 
-conformance-tier1: conformance
-	./build/conformance_runner --tier=1
-
-conformance-tier2: conformance
-	./build/conformance_runner --tier=2
-
-conformance-tier3: conformance
-	./build/conformance_runner --tier=3
-
-conformance-tier4: conformance
-	./build/conformance_runner --tier=4
-
-conformance-update-golden: conformance
-	python3 conformance/render_oracle.py --scene=torture --output=conformance/baselines --export-only
-	@echo "Golden baseline scene/camera exported to conformance/baselines/"
-	@echo "Run your reference renderer to generate frame PNGs."
+conformance-run: conformance
+	./build/conformance_runner --verbose
 
 # -----------------------------------------------------------------------------
 # Shader compilation (Vulkan GLSL -> SPIR-V -> embedded C arrays)
@@ -292,16 +283,18 @@ tools: lib
 	$(MAKE) -C tools
 
 # -----------------------------------------------------------------------------
-# Docs checks — see tools/docs/README.md
+# Docs checks
 #
-#   docs-check        run both checks (requires `make` first for code check)
-#   docs-check-links  verify every slug referenced in docs/ is declared
-#   docs-check-code   compile every fenced ```c block that has int main(
+# Link validation + slug / frontmatter / path-vs-slug consistency lives in
+# utils/docs/validate.py (also runs in the `docs-build` pre-commit hook
+# wired by nix/utils/precommit.nix).  The code-block check is additive: it
+# compiles every fenced ```c block that has int main( against libmop.a.
+#
+#   docs-check       both (requires `make` first for the code check)
+#   docs-check-code  compile every fenced ```c block with int main(
 # -----------------------------------------------------------------------------
-docs-check: docs-check-links docs-check-code
-
-docs-check-links:
-	python3 tools/docs/check_links.py
+docs-check: docs-check-code
+	python3 utils/docs/validate.py
 
 docs-check-code: lib
-	python3 tools/docs/compile_blocks.py
+	python3 utils/docs/compile_blocks.py

@@ -1,6 +1,8 @@
-# Master of Puppets — Conformance Framework Build
+# Master of Puppets — Render Health Check Build
 #
-# Builds the conformance runner binary that links against libmop.a.
+# Builds a single binary that exercises MOP's public API against a live
+# viewport and asserts: no Vulkan validation errors, no sync hazards,
+# no NaN pixels, CPU backend determinism, valid pick results.
 #
 # Usage:
 #   make -C conformance              Build the runner
@@ -8,15 +10,13 @@
 #
 # From root:
 #   make conformance                 Build library + runner
-#   make conformance-tier1           Build + run tier 1
-#   make conformance-tier2           Build + run tier 2
+#   make conformance-run             Build and run
 
-# Inherit toolchain from parent
 CC       ?= cc
 CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -Wno-unused-parameter -Wno-missing-field-initializers \
             -fno-common \
-            -I../include -I../src -I../third_party/stb -I.
+            -I../include -I../src
 
 ifdef RELEASE
   CFLAGS += -O2 -DNDEBUG
@@ -24,16 +24,16 @@ else
   CFLAGS += -Og -g
 endif
 
-# Platform detection
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
   CFLAGS += -DMOP_PLATFORM_MACOS=1
+  LDFLAGS += -lc++
 endif
 ifeq ($(UNAME_S),Linux)
-  CFLAGS += -DMOP_PLATFORM_LINUX=1
+  CFLAGS += -DMOP_PLATFORM_LINUX=1 -D_GNU_SOURCE
+  LDFLAGS += -lstdc++
 endif
 
-# Optional backends (passed through from root Makefile)
 ifdef MOP_ENABLE_VULKAN
   CFLAGS += -DMOP_HAS_VULKAN=1
   VK_CFLAGS  := $(shell pkg-config --cflags vulkan 2>/dev/null)
@@ -51,50 +51,21 @@ ifdef MOP_ENABLE_OPENGL
   endif
 endif
 
-# Lua support (auto-detect, same as root)
-ifndef MOP_DISABLE_LUA
-  LUA_CFLAGS  := $(shell pkg-config --cflags lua5.4 2>/dev/null || \
-                          pkg-config --cflags luajit 2>/dev/null || \
-                          pkg-config --cflags lua 2>/dev/null)
-  LUA_LDFLAGS := $(shell pkg-config --libs lua5.4 2>/dev/null || \
-                          pkg-config --libs luajit 2>/dev/null || \
-                          pkg-config --libs lua 2>/dev/null)
-  HAS_LUA     := $(if $(LUA_LDFLAGS),1,)
-  ifeq ($(HAS_LUA),1)
-    CFLAGS  += -DMOP_HAS_LUA=1 $(LUA_CFLAGS)
-    LDFLAGS += $(LUA_LDFLAGS)
-  endif
-endif
-
-# Paths
 BUILD_DIR  := ../build
 LIB_DIR    := $(BUILD_DIR)/lib
 OBJ_DIR    := $(BUILD_DIR)/conformance
 BIN_OUT    := $(BUILD_DIR)/conformance_runner
 
-# Sources
-SRCS := runner.c \
-        scene_gen.c \
-        camera_paths.c \
-        metrics.c \
-        validator.c \
-        stability.c \
-        report.c \
-        perf_baseline.c
-
-OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(SRCS))
-
 LDFLAGS += -L$(LIB_DIR) -lmop -lm -lpthread
 
-# Default target
 .PHONY: all clean
 
 all: $(BIN_OUT)
 
-$(BIN_OUT): $(OBJS) $(LIB_DIR)/libmop.a
-	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
+$(BIN_OUT): $(OBJ_DIR)/runner.o $(LIB_DIR)/libmop.a
+	$(CC) $(CFLAGS) $(OBJ_DIR)/runner.o $(LDFLAGS) -o $@
 
-$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
+$(OBJ_DIR)/runner.o: runner.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJ_DIR):

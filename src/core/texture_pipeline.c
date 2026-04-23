@@ -39,6 +39,12 @@ static uint64_t fnv1a_hash(const uint8_t *data, size_t len) {
 
 static uint8_t *generate_mips_rgba8(const uint8_t *mip0, int w, int h,
                                     size_t *out_total_size, int *out_levels) {
+  /* Public callers already guard this, but keep the check here too — gcc's
+   * -Wstringop-overflow can't prove w/h > 0 when this helper is inlined,
+   * and `malloc(0)` + memcpy into the result would be UB. */
+  if (w <= 0 || h <= 0)
+    return NULL;
+
   /* Count mip levels */
   int levels = 1;
   {
