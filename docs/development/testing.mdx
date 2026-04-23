@@ -3,9 +3,19 @@ title: "Testing"
 description: "Test framework, test organization, and running tests"
 slug: "development-testing"
 author: "rahulmnavneeth"
-date: "20 FEB 2026"
+date: "23 APR 2026"
 tags: ["development", "testing"]
 ---
+
+MOP has three layers of automated checks:
+
+| Layer       | Scope                                                                                                                                   | Entry                  |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| Unit tests  | Per-module public API behaviour, math invariants, struct layout                                                                         | `make test`            |
+| Conformance | Live-viewport render health — no Vulkan validation errors / sync hazards, no NaN pixels, CPU byte-level determinism, valid pick results | `make conformance-run` |
+| Docs checks | Slug / frontmatter / link validity + compile every fenced `c` block with `int main(`                                                    | `make docs-check`      |
+
+All three run on every CI push (see [CI reproduction](#ci-reproduction) below).
 
 ## Running Tests
 
@@ -13,7 +23,7 @@ tags: ["development", "testing"]
 make test
 ```
 
-This builds all test binaries in `build/tests/` and runs them sequentially. The exit code is non-zero if any test fails.
+This builds all test binaries in `build/tests/` and runs them sequentially. The exit code is non-zero if any test fails. The suite currently covers ~50 modules — run `ls tests/` for the full list.
 
 ## Test Framework
 
@@ -68,34 +78,53 @@ int main(void) {
 
 ## Test Organization
 
-Each test file covers one module:
+One test file per module. The Makefile auto-discovers `tests/test_*.c` via `$(wildcard)`; no explicit registration. Fixtures live in `tests/fixtures/`.
 
-```
-tests/
-  test_harness.h       — Framework (header-only)
-  test_math.c          — Vec3/Mat4 operations, column-major layout
-  test_rhi.c           — Backend resolution, device lifecycle
-  test_viewport.c      — Viewport lifecycle, mesh management, picking
-  test_camera.c        — Camera defaults, orbit, pan, zoom, bounds
-  test_loader.c        — OBJ loading, AABB verification, error handling
-  test_gizmo.c         — Gizmo lifecycle, mode switching, handle IDs
-  test_input.c         — Event queue, state transitions
-  fixtures/
-    cube.obj           — Minimal test OBJ (8 vertices, 12 triangles)
-```
+Tests that exercise Vulkan-only features are wrapped in `#if defined(MOP_HAS_VULKAN)` and fall through to a `printf + return 0` stub on CPU-only builds, so every test builds regardless of the backend flag.
 
 ## Adding a New Test
 
-1. Create `tests/test_mymodule.c` following the pattern above
-2. The Makefile automatically discovers `tests/test_*.c` files via wildcard
-3. Run `make test` to build and execute
+1. Create `tests/test_mymodule.c` following the pattern above.
+2. Run `make test` — the new file is picked up automatically.
+3. If it depends on Vulkan, wrap the body in `#if defined(MOP_HAS_VULKAN) ... #else int main(void) { printf("SKIP: Vulkan not enabled\n"); return 0; } #endif`.
+
+## Conformance
+
+`make conformance-run` builds and runs `build/conformance_runner`. It creates a live viewport on each available backend (CPU always, Vulkan if built in) and asserts:
+
+- No Vulkan validation-layer errors (hook into `mop_vk_on_validation_error`)
+- No Vulkan sync hazards
+- No NaN in any rendered pixel across 60 frames
+- CPU byte-level determinism (FNV-1a hash of two independent runs must match)
+- Pick invariants (object_id never 0 when `hit == true`)
+
+Finishes in seconds. See `conformance/runner.c` for the full check list.
+
+## CI Reproduction
+
+CI runs each job inside `nixos/nix:2.25.2` on Linux. To reproduce byte-identically on any machine with docker:
+
+```bash
+make ci-linux                      # defaults to CI_JOB=test-gcc
+make ci-linux CI_JOB=test-clang
+make ci-linux CI_JOB=build-gcc
+make ci-linux CI_JOB=build-clang
+make ci-linux CI_JOB=docs
+make ci-linux CI_JOB=conformance
+```
+
+The wrapper spawns the same docker image and runs `ci/linux.sh <job>` — the exact command every CI job uses. Same glibc, same libstdc++, same gcc/clang versions.
+
+First run pulls the image (~100 MB) and populates a nix-store named volume (`mop-ci-nix`). Subsequent runs are fast.
+
+Use this before pushing whenever you suspect Linux-specific behaviour (gcc `-Wstringop-overflow`, glibc malloc checks, libstdc++ cleanup) — cheaper than a round-trip through CI.
 
 ## Build Integration
 
-Tests link against `build/lib/libmop.a` with flags `-lm -lpthread`. Each test is a standalone binary — no shared test state between files.
+Tests link against `build/lib/libmop.a` with `-lm -lpthread` plus the platform C++ runtime (`-lc++` on Darwin, `-lstdc++` on Linux — wrapped in `-Wl,--as-needed` so the linker drops it for C-only tests that would otherwise trigger libstdc++ destructor cleanup on exit).
 
 ```makefile
 # From the root Makefile
 $(TEST_BIN)/%: $(TEST_DIR)/%.c $(LIB_OUT) | $(TEST_BIN)
-	$(CC) $(CFLAGS) -I$(TEST_DIR) $< -L$(LIB_DIR) -lmop $(TEST_LDFLAGS) -o $@
+	$(CC) $(CFLAGS) -I$(TEST_DIR) $< -L$(LIB_DIR) -lmop $(TEST_LDFLAGS) $(LDFLAGS) -o $@
 ```

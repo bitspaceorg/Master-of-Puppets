@@ -3,7 +3,7 @@ title: "Build System"
 description: "Make + Nix build instructions for Master of Puppets"
 slug: "development-build"
 author: "rahulmnavneeth"
-date: "19 FEB 2026"
+date: "23 APR 2026"
 tags: ["development", "build"]
 ---
 
@@ -44,28 +44,34 @@ make CC=clang        # Or CC=gcc
 
 ## Make Targets
 
-| Target         | Effect                                     |
-| -------------- | ------------------------------------------ |
-| `make`         | Build the static library (`libmop.a`)      |
-| `make lib`     | Same as `make`                             |
-| `make test`    | Build and run all tests                    |
-| `make clean`   | Remove `build/` directory                  |
-| `make install` | Install to `PREFIX` (default `/usr/local`) |
+| Target                 | Effect                                                              |
+| ---------------------- | ------------------------------------------------------------------- |
+| `make`                 | Build the static library (`libmop.a`)                               |
+| `make lib`             | Same as `make`                                                      |
+| `make test`            | Build and run all unit tests                                        |
+| `make torture`         | Run only the adversarial / long-running subset                      |
+| `make conformance`     | Build the conformance runner                                        |
+| `make conformance-run` | Build + run the render-health conformance check                     |
+| `make docs-check`      | Validate docs slugs / links + compile-test every `c main` block     |
+| `make ci-linux`        | Reproduce a Linux CI job locally via docker (see Testing → CI)      |
+| `make tools`           | Build CLI tools (e.g. `mop_convert`)                                |
+| `make shaders`         | Recompile Vulkan GLSL → SPIR-V → embedded C arrays (requires glslc) |
+| `make clean`           | Remove `build/` directory                                           |
+| `make install`         | Install to `PREFIX` (default `/usr/local`)                          |
 
 ## Optional Features
 
-| Flag                  | Effect                                          |
-| --------------------- | ----------------------------------------------- |
-| `MOP_ENABLE_VULKAN=1` | Compile Vulkan backend (`src/backend/vulkan/`)  |
-| `MOP_ENABLE_OPENGL=1` | Compile OpenGL backend (`src/backend/opengl/`)  |
-| `MOP_ENABLE_LUA=1`    | Enable Lua configuration system (`src/config/`) |
+| Flag                  | Effect                                         |
+| --------------------- | ---------------------------------------------- |
+| `MOP_ENABLE_VULKAN=1` | Compile Vulkan backend (`src/backend/vulkan/`) |
+| `MOP_ENABLE_OPENGL=1` | Compile OpenGL backend (`src/backend/opengl/`) |
 
 ```bash
 make MOP_ENABLE_VULKAN=1              # Build with Vulkan
-make test                             # Run tests (rebuild lib without Vulkan first)
+make MOP_ENABLE_VULKAN=1 test         # Tests auto-adapt when Vulkan is enabled
 ```
 
-Note: tests link against `libmop.a` without `-lvulkan`, so build the library without `MOP_ENABLE_VULKAN=1` when running tests. The Vulkan backend is tested via the examples.
+Vulkan-gated tests compile on CPU-only builds too — they fall through to a `printf + return 0` stub when `MOP_HAS_VULKAN` is undefined. See [Testing](development-testing) for details.
 
 ## Build Outputs
 
@@ -83,7 +89,7 @@ build/
 -Wno-unused-parameter -Wno-missing-field-initializers
 ```
 
-Debug mode (default): `-O0 -g`
+Debug mode (default): `-Og -g` — preserves debuggability without `-O0`'s catastrophic slowdown on math-heavy paths (GGX, inverse, ...).
 Release mode: `-O2 -DNDEBUG` (set `RELEASE=1`)
 
 ## Nix Flake Structure
@@ -100,10 +106,14 @@ The core library has zero platform-specific dependencies beyond a C11 compiler.
 Examples live in `examples/` with their own `Makefile` and `flake.nix`.
 
 ```bash
-cd examples && nix develop    # SDL3 + pkg-config
-make                          # Build all examples
-make run                      # Run interactive viewport
-make run-headless             # Run headless PPM exporter
+cd examples
+nix run .#showcase            # 60 frames → /tmp/mop-showcase-out/
+nix run .#interactive         # Live SDL2 window, Vulkan, HDRI skybox
+
+# Or manually:
+nix develop                   # SDL2 + pkg-config + Vulkan loader
+make MOP_ENABLE_VULKAN=1 interactive
+./build/examples/interactive --vulkan --hdri path/to/env.exr
 ```
 
 See `examples/Makefile` for all targets.
