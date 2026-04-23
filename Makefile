@@ -222,12 +222,17 @@ TEST_BIN    := $(BUILD_DIR)/tests
 TEST_SRCS   := $(wildcard $(TEST_DIR)/test_*.c)
 TEST_BINS   := $(patsubst $(TEST_DIR)/%.c,$(TEST_BIN)/%,$(TEST_SRCS))
 
-# Platform-specific test link flags
+# Platform-specific test link flags.
+# Linux: --as-needed around -lstdc++ so the linker drops libstdc++ for tests
+# that don't actually reference any C++ symbols (the Vulkan-gated stubs).
+# Otherwise libstdc++'s static destructors run at exit inside a pure-C
+# binary and have been observed to trip glibc's malloc check ('free():
+# invalid size') on CI.
 TEST_LDFLAGS := -lm -lpthread
 ifeq ($(UNAME_S),Darwin)
   TEST_LDFLAGS += -lc++
 else
-  TEST_LDFLAGS += -lstdc++
+  TEST_LDFLAGS += -Wl,--as-needed -lstdc++ -Wl,--no-as-needed
 endif
 
 $(TEST_BIN):
