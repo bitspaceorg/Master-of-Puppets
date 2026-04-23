@@ -286,7 +286,7 @@ tools: lib
 # Docs checks
 #
 # Link validation + slug / frontmatter / path-vs-slug consistency lives in
-# utils/docs/validate.py (also runs in the `docs-build` pre-commit hook
+# tools/docs/validate.py (also runs in the `docs-build` pre-commit hook
 # wired by nix/utils/precommit.nix).  The code-block check is additive: it
 # compiles every fenced ```c block that has int main( against libmop.a.
 #
@@ -294,7 +294,7 @@ tools: lib
 #   docs-check-code  compile every fenced ```c block with int main(
 # -----------------------------------------------------------------------------
 docs-check: docs-check-code
-	python3 utils/docs/validate.py
+	python3 tools/docs/validate.py
 
 docs-check-code: lib
-	python3 utils/docs/compile_blocks.py
+	python3 tools/docs/compile_blocks.py

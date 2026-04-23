@@ -65,7 +65,7 @@ test:linux-clang:
 # --- Docs ---
 #
 # Fast check: broken slug links + compile-test every ```c block that has
-# `int main(`.  See utils/docs/README.md.
+# `int main(`.  See tools/docs/README.md.
 docs:check:
   stage: docs
   script:

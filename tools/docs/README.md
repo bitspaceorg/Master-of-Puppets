@@ -14,8 +14,8 @@ All docs automation lives here.
 
 ```bash
 make docs-check                      # both validators
-python3 utils/docs/validate.py       # link + slug + frontmatter alone
-python3 utils/docs/compile_blocks.py # code-block compile alone
+python3 tools/docs/validate.py       # link + slug + frontmatter alone
+python3 tools/docs/compile_blocks.py # code-block compile alone
 ```
 
 `compile_blocks.py` requires `build/lib/libmop.a` — run `make` first. On Vulkan-enabled builds the linker command auto-adds `-lvulkan`.

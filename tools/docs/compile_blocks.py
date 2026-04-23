@@ -14,7 +14,7 @@ when available — if not, the block is skipped with a warning.
 
 Exit non-zero if any compilable block fails to compile.
 
-Usage:  python3 utils/docs/compile_blocks.py
+Usage:  python3 tools/docs/compile_blocks.py
         [--cc <compiler>] [--verbose]
 """
 

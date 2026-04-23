@@ -18,8 +18,8 @@
             hook-script = pkgs.writeShellScript "docs-build-hook" ''
                 set -euo pipefail
                 cd "$(${pkgs.git}/bin/git rev-parse --show-toplevel)"
-                ${python}/bin/python utils/docs/validate.py
-                ${python}/bin/python utils/docs/build_index.py
+                ${python}/bin/python tools/docs/validate.py
+                ${python}/bin/python tools/docs/build_index.py
                 ${pkgs.git}/bin/git add docs/data.json
             '';
         in
