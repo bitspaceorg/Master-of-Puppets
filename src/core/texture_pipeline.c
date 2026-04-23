@@ -39,11 +39,14 @@ static uint64_t fnv1a_hash(const uint8_t *data, size_t len) {
 
 static uint8_t *generate_mips_rgba8(const uint8_t *mip0, int w, int h,
                                     size_t *out_total_size, int *out_levels) {
-  /* Public callers already guard this, but keep the check here too — gcc's
-   * -Wstringop-overflow can't prove w/h > 0 when this helper is inlined,
-   * and `malloc(0)` + memcpy into the result would be UB. */
+  /* Public callers already guard this; repeat so gcc -O2's
+   * -Wstringop-overflow inliner doesn't assume w/h could be <= 0. */
   if (w <= 0 || h <= 0)
     return NULL;
+
+  /* Size of mip 0 — computed up front so we can use it as a lower bound on
+   * the total allocation. */
+  size_t mip0_size = (size_t)w * (size_t)h * 4;
 
   /* Count mip levels */
   int levels = 1;
@@ -67,12 +70,19 @@ static uint8_t *generate_mips_rgba8(const uint8_t *mip0, int w, int h,
     }
   }
 
+  /* total must be at least mip0_size (we always walk at least one level).
+   * The explicit check makes this fact visible to gcc -O2, whose inliner
+   * can't otherwise connect the two-loop computation and would assume
+   * malloc(total) could be a zero-byte region when inlined at the
+   * caller. */
+  if (total < mip0_size)
+    return NULL;
+
   uint8_t *buf = malloc(total);
   if (!buf)
     return NULL;
 
   /* Copy mip 0 */
-  size_t mip0_size = (size_t)w * (size_t)h * 4;
   memcpy(buf, mip0, mip0_size);
 
   /* Generate subsequent mips via 2x2 box filter */
