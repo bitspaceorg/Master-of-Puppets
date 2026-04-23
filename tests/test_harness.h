@@ -24,14 +24,26 @@
 
 /* -------------------------------------------------------------------------
  * Global test state
+ *
+ * Marked unused so CPU-only builds of conditionally-compiled Vulkan tests
+ * (main() is a printf stub when MOP_HAS_VULKAN is undefined) don't trip
+ * -Werror=unused-variable on gcc.  Both gcc and clang accept the
+ * attribute; tests that actually use these still benefit from dead-store
+ * warnings unrelated to the declaration itself.
  * ------------------------------------------------------------------------- */
 
-static int mop_tests_run = 0;
-static int mop_tests_passed = 0;
-static int mop_tests_failed = 0;
+#if defined(__GNUC__) || defined(__clang__)
+#define MOP_TEST_UNUSED __attribute__((unused))
+#else
+#define MOP_TEST_UNUSED
+#endif
+
+static int mop_tests_run MOP_TEST_UNUSED = 0;
+static int mop_tests_passed MOP_TEST_UNUSED = 0;
+static int mop_tests_failed MOP_TEST_UNUSED = 0;
 
 /* Per-test failure tracking */
-static int mop_current_test_failed = 0;
+static int mop_current_test_failed MOP_TEST_UNUSED = 0;
 
 /* -------------------------------------------------------------------------
  * Core macros
