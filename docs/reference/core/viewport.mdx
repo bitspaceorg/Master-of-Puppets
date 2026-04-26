@@ -126,6 +126,61 @@ Each `MopMesh` carries a `slot_index` (for O(1) removal) and a `viewport` back-p
 7. **Post-processing** — gamma, tonemapping, vignette, fog
 8. **Frame end** — finalize and make framebuffer readable
 
+## Design-language Chrome
+
+The viewport drives MOP's first-party chrome — corner axis
+navigator, transform gizmo, selection outline, HUD/label text —
+through a couple of pieces of state.
+
+### `grid_plane_axis`
+
+```c
+int grid_plane_axis;   /* 0 = X-normal (YZ), 1 = Y-normal (XZ),
+                          2 = Z-normal (XY).  Default 1 (XZ ground). */
+```
+
+Which world axis is normal to the analytical grid. **Only changes
+on a navigator-axis click**; free-orbit preserves whatever plane
+was last set, so the grid never disappears mid-drag.
+
+| Navigator click   | `grid_plane_axis` | Plane     |
+| ----------------- | ----------------- | --------- |
+| Top / Bottom (+Y) | `1`               | XZ ground |
+| Front / Back (+Z) | `2`               | XY wall   |
+| Left / Right (+X) | `0`               | YZ wall   |
+
+### Frame-on-axis-click
+
+Clicking an axis ball in the corner navigator does both an
+orientation snap and a frame-all centered on world origin:
+
+1. `mop_orbit_camera_snap_to_view` sets yaw / pitch.
+2. `vp->camera.target` ← `(0, 0, 0)` so the grid (laid out around
+   origin) sits in the middle of the viewport — 3DS Max / Maya
+   feel.
+3. `vp->camera.distance` is sized from the **farthest mesh corner
+   from origin** (not the scene centroid) with a 4-unit floor and
+   a 1.30× margin, so meshes stay visible without recentering.
+
+After a snap the user can free-orbit normally; the next click
+re-anchors.
+
+### Per-frame text queue
+
+The viewport carries a heap-allocated `MopTextPrim *text_prims`
+queue populated by `mop_text_draw_2d` / `mop_text_draw_label`. The
+post-readback composite path rasterizes it on top of the overlay
+prims, then drains the queue. See [Text](reference-core-text) for
+submission semantics; the lifecycle is:
+
+1. Host calls `mop_text_draw_*` zero or more times.
+2. `mop_viewport_render` walks the queue, projects label anchors,
+   runs greedy push-up stacking, blits glyphs.
+3. Queue resets to empty for the next frame.
+
+Strings are owned by the queue (`malloc` copies on submission),
+freed at frame end and on viewport destroy.
+
 ## Object ID Ranges
 
 | Range                       | Usage                                         |

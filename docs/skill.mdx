@@ -658,6 +658,54 @@ mop_viewport_set_theme(vp, &t);
 Outline color is `theme.accent` (not `selection_outline` — that one is the
 post-process outline shader's stroke color).
 
+### Design-language text & chrome
+
+MOP ships a built-in design language: **JetBrains Mono** as the
+default font, **dark JBM letters on coloured discs** for the corner
+axis navigator and transform-gizmo arrow tips, **selection
+callouts** as labels above selected meshes, and a **selection
+highlight** colour driven by `theme.accent`. The whole thing is
+opt-out — every example chrome path falls back gracefully when no
+font is baked.
+
+```c
+/* HUD breadcrumb top-left, frame stats below.  font = NULL falls
+ * back to mop_font_hud() (JetBrains Mono). */
+mop_text_draw_2d(vp, NULL, "SCENE \xe2\x80\xba INTERACTIVE \xe2\x80\xba 4K",
+                 16, 12,
+                 (MopTextStyle){.color = MOP_COLOR_BONE,
+                                .px_size = 12.0f, .weight = 0.18f});
+
+/* Selection callout — black-on-pink pill above the selected mesh. */
+mop_text_draw_label(vp, NULL, mesh, "CUBE",
+                    MOP_LABEL_TOP_CENTER, MOP_LABEL_ALWAYS_ON_TOP,
+                    (MopTextStyle){
+                        .color      = (MopColor){0, 0, 0, 1},
+                        .px_size    = 13.0f,
+                        .weight     = 0.22f,
+                        .bg_color   = (MopColor){1.0, 0.0062, 0.332, 1}, /* #FF1493 linear */
+                        .bg_padding = 6.0f,
+                    });
+```
+
+To enable the embedded HUD font: drop
+`assets/fonts/JetBrainsMono-Regular.ttf` (OFL — github.com/JetBrains/JetBrainsMono),
+then `make fonts && make MOP_ENABLE_VULKAN=1`. See
+[Font](reference-core-font) for the `.mfa` format and
+[Text](reference-core-text) for the full drawing API.
+
+### Navigator & grid
+
+Clicking an axis on the **corner navigator** (bottom-left widget)
+does three things:
+
+1. Snaps the camera orientation (Top / Bottom / Front / Back / Left / Right).
+2. Targets world origin so the grid stays centred.
+3. Anchors the analytical grid to a plane perpendicular to that
+   axis (`vp->grid_plane_axis`), so an orthographic side view never
+   shows the grid edge-on. Free-orbit afterwards keeps the same
+   plane until the next click.
+
 ### Internal overlay pipeline (why it matters)
 
 MOP rasterizes 2D chrome (gizmo, light indicators, camera icons, axis

@@ -752,6 +752,7 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
 
   /* Chrome defaults to visible */
   vp->show_chrome = true;
+  vp->grid_plane_axis = 1; /* Y-normal → XZ ground plane (DCC default) */
 
   /* Reversed-Z depth — always enabled for Vulkan (hardware support) */
   vp->reverse_z =
@@ -902,6 +903,7 @@ void mop_viewport_destroy(MopViewport *viewport) {
   }
 
   free(viewport->overlay_prims);
+  mop_text_queue_destroy(viewport);
   free(viewport->ssaa_color_buf);
   free(viewport->trans_sort_idx);
   free(viewport->trans_sort_dist);
@@ -2675,7 +2677,10 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
   if (vp->overlay_enabled[MOP_OVERLAY_OUTLINE])
     mop_overlay_builtin_outline(vp, NULL);
 
-  /* Grid: GPU shader path or CPU fallback */
+  /* Grid: GPU shader path or CPU fallback.  The GPU shader writes
+   * gl_FragDepth at the floor's projected depth so the outline
+   * depth-test correctly suppresses outline pixels where a grid
+   * line is in front of the selected mesh's silhouette. */
   bool gpu_grid = (vp->backend_type != MOP_BACKEND_CPU);
   if (vp->show_chrome && !gpu_grid)
     mop_overlay_builtin_grid(vp, NULL);
@@ -2697,21 +2702,35 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
     mop_overlay_builtin_axis_indicator_2d(vp, NULL);
   }
 
-  /* Compute GPU grid params if needed */
+  /* Compute GPU grid params if needed.
+   *
+   * Grid plane is fixed (vp->grid_plane_axis) and only changes when
+   * the user explicitly clicks an axis on the corner navigator —
+   * free orbit keeps whatever plane was last selected.  Default
+   * Y-normal = XZ ground.  This matches DCC convention (3DS Max,
+   * Maya): orthographic side views snap to a perpendicular grid;
+   * perspective and free orbit retain the last anchored plane. */
   MopGridParams grid_params;
   MopGridParams *gp = NULL;
   if (vp->show_chrome && gpu_grid) {
     MopMat4 VPm = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+    int plane = vp->grid_plane_axis;
+    if (plane < 0 || plane > 2)
+      plane = 1;
+    /* Skip column `plane` (X=0/Y=1/Z=2) of VP and use the other two
+     * columns + W column to build the homography H. */
+    int c1 = (plane == 0) ? 1 : 0; /* first remaining world axis  */
+    int c2 = (plane == 2) ? 1 : 2; /* second remaining world axis */
 
     float H[9];
-    H[0] = VPm.d[0];
-    H[1] = VPm.d[8];
+    H[0] = VPm.d[c1 * 4 + 0]; /* clip.x = H · (wA, wB, 1) */
+    H[1] = VPm.d[c2 * 4 + 0];
     H[2] = VPm.d[12];
-    H[3] = VPm.d[1];
-    H[4] = VPm.d[9];
+    H[3] = VPm.d[c1 * 4 + 1]; /* clip.y */
+    H[4] = VPm.d[c2 * 4 + 1];
     H[5] = VPm.d[13];
-    H[6] = VPm.d[3];
-    H[7] = VPm.d[11];
+    H[6] = VPm.d[c1 * 4 + 3]; /* clip.w */
+    H[7] = VPm.d[c2 * 4 + 3];
     H[8] = VPm.d[15];
 
     float det = H[0] * (H[4] * H[8] - H[5] * H[7]) -
@@ -2729,11 +2748,14 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
       grid_params.Hi[7] = (H[1] * H[6] - H[0] * H[7]) * idet;
       grid_params.Hi[8] = (H[0] * H[4] - H[1] * H[3]) * idet;
 
-      grid_params.vp_z0 = VPm.d[2];
-      grid_params.vp_z2 = VPm.d[10];
+      /* Depth row uses VP row 2 (clip.z) of the two remaining
+       * columns; constant from W column.  vp_w_* mirror clip.w
+       * for the divide. */
+      grid_params.vp_z0 = VPm.d[c1 * 4 + 2];
+      grid_params.vp_z2 = VPm.d[c2 * 4 + 2];
       grid_params.vp_z3 = VPm.d[14];
-      grid_params.vp_w0 = VPm.d[3];
-      grid_params.vp_w2 = VPm.d[11];
+      grid_params.vp_w0 = VPm.d[c1 * 4 + 3];
+      grid_params.vp_w2 = VPm.d[c2 * 4 + 3];
       grid_params.vp_w3 = VPm.d[15];
       grid_params.grid_half = 8.0f;
       grid_params.reverse_z = vp->reverse_z;
@@ -2756,7 +2778,8 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
    * GPU overlay path targets an image whose contents only surface to the
    * host one frame later, so painting here is what the user actually sees
    * this frame. */
-  if (vp->overlay_prim_count > 0 && vp->rhi->framebuffer_read_color) {
+  if ((vp->overlay_prim_count > 0 || vp->text_prim_count > 0) &&
+      vp->rhi->framebuffer_read_color) {
     int cw = 0, ch = 0;
     const uint8_t *color_ro =
         vp->rhi->framebuffer_read_color(vp->device, vp->framebuffer, &cw, &ch);
@@ -2770,11 +2793,25 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
           depth_buf = NULL;
       }
       bool is_cpu_ndc = (vp->backend_type == MOP_BACKEND_CPU);
-      mop_overlay_rasterize_prims_cpu((uint8_t *)(uintptr_t)color_ro, cw, ch,
-                                      vp->overlay_prims, vp->overlay_prim_count,
-                                      depth_buf, vp->reverse_z, is_cpu_ndc);
+      uint8_t *color_rw = (uint8_t *)(uintptr_t)color_ro;
+      mop_overlay_rasterize_prims_cpu(color_rw, cw, ch, vp->overlay_prims,
+                                      vp->overlay_prim_count, depth_buf,
+                                      vp->reverse_z, is_cpu_ndc);
+      /* Text composites on top of overlays — labels and HUD should
+       * never be occluded by gizmo / indicator chrome.
+       *
+       * Hosts submit in presentation-size pixels, but the FB we
+       * paint into is the internal SSAA buffer (cw × ch).  Scale
+       * positions and sizes by ssaa_factor so text lands where the
+       * caller asked it to once the buffer is downsampled. */
+      mop_text_rasterize_cpu(vp, color_rw, cw, ch, vp->text_prims,
+                             vp->text_prim_count, (float)vp->ssaa_factor);
     }
   }
+  /* Drain the text queue once consumed.  Host submissions for the
+   * next frame must start from empty; otherwise per-frame text
+   * accumulates indefinitely. */
+  mop_text_queue_reset(vp);
 
   /* Dispatch grid (if any) to backend. Prim count is zeroed because we
    * already painted them via the CPU path above; letting the backend

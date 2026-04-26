@@ -248,6 +248,20 @@ int main(int argc, char **argv) {
   }
   mkdir(outdir, 0755);
 
+  /* --- Optional: load the design-language font ---------------------------
+   * MOP ships a pre-baked HUD font (JetBrains Mono Regular SDF atlas)
+   * when the build was produced with `make fonts`.  If it isn't
+   * embedded, we try to load the file emitted by `make fonts` — and
+   * if that fails, we skip the on-screen text overlay so the showcase
+   * still runs in a fresh checkout. */
+  const MopFont *hud_font = mop_font_hud();
+  MopFont *loaded_font = NULL;
+  if (!hud_font) {
+    loaded_font = mop_font_load("build/fonts/jbm_regular.mfa");
+    if (loaded_font)
+      hud_font = loaded_font;
+  }
+
   /* --- 1. Create a viewport ---------------------------------------------
    * The default ssaa_factor (2x) supersamples the internal framebuffer
    * for smooth edges; the RTT blit (step 5) downsamples on the way out
@@ -382,6 +396,44 @@ int main(int argc, char **argv) {
   for (int i = 0; i < FRAME_COUNT; i++) {
     atomic_store(&sim.current_frame, i);
 
+    /* MOP design-language HUD — navigator-style breadcrumb at the
+     * top-left, frame stats just below.  Submitted before render so
+     * the rasterizer picks it up during readback compositing. */
+    if (hud_font) {
+      char frame_line[64];
+      snprintf(frame_line, sizeof(frame_line), "frame %03d · %s", i,
+               backend == MOP_BACKEND_VULKAN ? "vulkan" : "cpu");
+      mop_text_draw_2d(vp, hud_font,
+                       "scene \xe2\x80\xba showcase \xe2\x80\xba cube", 12.0f,
+                       10.0f,
+                       (MopTextStyle){
+                           .color = MOP_COLOR_BONE,
+                           .px_size = 12.0f,
+                       });
+      mop_text_draw_2d(vp, hud_font, frame_line, 12.0f, 26.0f,
+                       (MopTextStyle){
+                           .color = MOP_COLOR_BONE_DIM,
+                           .px_size = 11.0f,
+                       });
+
+      /* Selection-callout style label following the cube as it
+       * rotates under the turntable camera.  The label tracks the
+       * mesh's world AABB top-center each frame; gel-red signals
+       * "this is the selected primary." */
+      mop_text_draw_label(vp, hud_font, cube, "cube", MOP_LABEL_TOP_CENTER,
+                          MOP_LABEL_ALWAYS_ON_TOP,
+                          (MopTextStyle){
+                              .color = MOP_COLOR_GEL_RED,
+                              .px_size = 13.0f,
+                          });
+      mop_text_draw_label(vp, hud_font, sphere, "sphere", MOP_LABEL_TOP_CENTER,
+                          MOP_LABEL_ALWAYS_ON_TOP,
+                          (MopTextStyle){
+                              .color = MOP_COLOR_BONE,
+                              .px_size = 13.0f,
+                          });
+    }
+
     if (mop_viewport_render(vp) != MOP_RENDER_OK) {
       fprintf(stderr, "render failed on frame %d: %s\n", i,
               mop_viewport_get_last_error(vp));
@@ -416,6 +468,8 @@ int main(int argc, char **argv) {
 
   free(readback);
   mop_viewport_destroy(vp);
+  if (loaded_font)
+    mop_font_free(loaded_font);
 
   printf("showcase: done — %d frames in %s/\n", FRAME_COUNT, outdir);
   return 0;

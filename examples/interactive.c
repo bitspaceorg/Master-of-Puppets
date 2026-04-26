@@ -222,6 +222,16 @@ int main(int argc, char **argv) {
       width = atoi(argv[++i]);
     else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc)
       height = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--4k") == 0) {
+      width = 3840;
+      height = 2160;
+    } else if (strcmp(argv[i], "--2k") == 0) {
+      width = 2560;
+      height = 1440;
+    } else if (strcmp(argv[i], "--1080p") == 0) {
+      width = 1920;
+      height = 1080;
+    }
   }
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -254,10 +264,15 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  /* MOP renders at drawable (physical pixel) size, not logical window
-   * size. On Retina that's typically 2× the window dimensions. Mouse
-   * events come in logical units and are scaled up to drawable units
-   * before being fed to MOP. */
+  /* Render at the actual drawable resolution — matches the window's
+   * aspect 1:1 so the image never gets squished when the user
+   * resizes.  HiDPI multipliers are honoured (Retina drawable is
+   * 2× the logical window size).  `--4k` opens the window at 4K
+   * logical, so the drawable lands at the device's max resolution
+   * for the requested window size; on a smaller display the
+   * window is OS-clamped and the drawable matches that.  Either
+   * way, `draw_w × draw_h` is exactly what we render and what SDL
+   * presents — no scaling, no squishing. */
   int draw_w = width, draw_h = height;
   SDL_GetRendererOutputSize(renderer, &draw_w, &draw_h);
   float dpi_x = (float)draw_w / (float)width;
@@ -290,10 +305,13 @@ int main(int argc, char **argv) {
 
   /* Theme tweaks: the outline painter reads theme.accent (not
    * selection_outline), so accent is the color to change for the
-   * selected-object halo. We set accent to the gizmo-X red so the
-   * selection color matches the red axis. */
+   * selected-object halo.  Highlight color #FF1493 (hot pink) —
+   * vivid against dark navy, distinct from the red X-axis and
+   * the orange cube material.  Overlay primitives composite
+   * without gamma, so values are sRGB-fraction direct. */
   MopTheme theme = mop_theme_default();
-  MopColor outline_color = {1.0f, 1.0f, 1.0f, 1.0f}; /* white */
+  MopColor outline_color = {255.0f / 255.0f, 20.0f / 255.0f, 147.0f / 255.0f,
+                            1.0f}; /* #FF1493 — hot pink */
   theme.accent = outline_color;
   theme.selection_outline = outline_color;
   theme.selection_outline_width = 2.0f;
@@ -377,6 +395,27 @@ int main(int argc, char **argv) {
                   "Right=pan, Two-finger=orbit, W/E/R=gizmo, 1/2/3=shading, "
                   "F=reset, Esc=quit\n");
 
+  /* MOP design-language text — embedded HUD font when libmop was
+   * built with `make fonts && make`, otherwise we fall back to
+   * loading the .mfa from disk.  Both code paths produce the same
+   * MopFont*; hud_font is NULL only when neither is available, in
+   * which case we silently skip every text submission. */
+  const MopFont *hud_font = mop_font_hud();
+  MopFont *loaded_font = NULL;
+  if (!hud_font) {
+    loaded_font = mop_font_load("build/fonts/jbm_regular.mfa");
+    if (!loaded_font)
+      loaded_font = mop_font_load("../build/fonts/jbm_regular.mfa");
+    if (loaded_font)
+      hud_font = loaded_font;
+  }
+
+  /* Resolution-adaptive sizing — 12 px @ 720p reads the same as
+   * 36 px @ 4K.  px_size is in framebuffer (drawable) pixels. */
+  float ui_scale = (float)draw_h / 720.0f;
+  if (ui_scale < 1.0f)
+    ui_scale = 1.0f;
+
   bool running = true;
   uint64_t last_ticks = SDL_GetPerformanceCounter();
   double ticks_per_ms = (double)SDL_GetPerformanceFrequency() / 1000.0;
@@ -396,6 +435,9 @@ int main(int argc, char **argv) {
 
       case SDL_WINDOWEVENT:
         if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+          /* Re-aspect: render at the new drawable resolution so the
+           * scene never gets squished.  Update mouse scaling, MOP
+           * viewport, and the SDL streaming texture together. */
           int nw = ev.window.data1, nh = ev.window.data2;
           if (nw > 0 && nh > 0 && (nw != width || nh != height)) {
             width = nw;
@@ -516,6 +558,72 @@ int main(int argc, char **argv) {
                 oe.object_id);
     }
 
+    /* MOP design-language overlay — submitted before render so the
+     * rasterizer picks it up during readback compositing.  Three
+     * pieces:
+     *   1. Top-left navigator breadcrumb
+     *   2. Frame stats (current FPS bucket)
+     *   3. Selection callout label tracking whichever mesh the user
+     *      most recently clicked — gel-red so the brand accent
+     *      doubles as the selection signal. */
+    if (hud_font) {
+      char hud_line[96];
+      snprintf(
+          hud_line, sizeof(hud_line),
+          "SCENE \xe2\x80\xba INTERACTIVE \xe2\x80\xba %dx%d \xe2\x80\xba %s",
+          draw_w, draw_h, backend == MOP_BACKEND_VULKAN ? "VULKAN" : "CPU");
+      mop_text_draw_2d(vp, hud_font, hud_line, 16.0f * ui_scale,
+                       12.0f * ui_scale,
+                       (MopTextStyle){
+                           .color = MOP_COLOR_BONE,
+                           .px_size = 12.0f * ui_scale,
+                           .weight = 0.18f,
+                       });
+
+      char stats[96];
+      double fps = (frames > 0 && accum_ms > 0)
+                       ? 1000.0 * (double)frames / accum_ms
+                       : 0.0;
+      snprintf(stats, sizeof(stats), "FRAME %.1f MS \xc2\xb7 %.0f FPS",
+               (frames > 0) ? accum_ms / (double)frames : 0.0, fps);
+      mop_text_draw_2d(vp, hud_font, stats, 16.0f * ui_scale, 30.0f * ui_scale,
+                       (MopTextStyle){
+                           .color = MOP_COLOR_BONE_DIM,
+                           .px_size = 11.0f * ui_scale,
+                           .weight = 0.15f,
+                       });
+
+      /* Selection callout — black-on-#FF1493 pill, ALL CAPS.  The
+       * pill matches the selection outline color so the callout
+       * visually ties to the highlight.  Note: the text rasterizer
+       * gamma-encodes (sqrt) at composite, so we pass *linear*
+       * values that map to sRGB (255,20,147) on the framebuffer:
+       * linear = (byte/255)^2 ≈ (1.0, 0.0062, 0.332).              */
+      const MopColor pink = {1.0f, 0.0062f, 0.332f, 1.0f};
+      const MopColor black = {0.0f, 0.0f, 0.0f, 1.0f};
+      uint32_t selected_id = mop_viewport_get_selected(vp);
+      if (selected_id == 1)
+        mop_text_draw_label(vp, hud_font, cube, "CUBE", MOP_LABEL_TOP_CENTER,
+                            MOP_LABEL_ALWAYS_ON_TOP,
+                            (MopTextStyle){
+                                .color = black,
+                                .px_size = 13.0f * ui_scale,
+                                .weight = 0.22f,
+                                .bg_color = pink,
+                                .bg_padding = 6.0f * ui_scale,
+                            });
+      else if (selected_id == 2)
+        mop_text_draw_label(vp, hud_font, sphere, "SPHERE",
+                            MOP_LABEL_TOP_CENTER, MOP_LABEL_ALWAYS_ON_TOP,
+                            (MopTextStyle){
+                                .color = black,
+                                .px_size = 13.0f * ui_scale,
+                                .weight = 0.22f,
+                                .bg_color = pink,
+                                .bg_padding = 6.0f * ui_scale,
+                            });
+    }
+
     mop_viewport_render(vp);
 
     int rw = 0, rh = 0;
@@ -540,6 +648,8 @@ int main(int argc, char **argv) {
   }
 
   mop_viewport_destroy(vp);
+  if (loaded_font)
+    mop_font_free(loaded_font);
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);

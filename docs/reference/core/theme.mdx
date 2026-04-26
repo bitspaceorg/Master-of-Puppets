@@ -85,6 +85,7 @@ The theme struct is copied on `set_theme`; callers may free their copy afterward
 - Background: mid-gray (`#10101b` linear)
 - Accent: white — selection outline and indicator color
 - Gizmo X / Y / Z: bright saturated red / green / blue; hover tint is the theme accent
+- **Grid axis lines (X / Z): neutral gray `(0.70, 0.70, 0.70)`** — the corner navigator and transform gizmo already carry the X/Y/Z color coding, so a saturated red/blue axis line competed with those signals at oblique angles. Override per-viewport with `grid_axis_x` / `grid_axis_z` if your host wants the older saturated look.
 - Face selection fill: derived mid-shade `(0.35, 0.35, 0.35)` at `face_select_opacity = 0.4`
 
 ## Outline Color Gotcha
@@ -97,6 +98,34 @@ t.accent = (MopColor){1, 1, 1, 1};   /* white silhouette outline */
 mop_viewport_set_theme(vp, &t);
 ```
 
+### Selection-chrome example: hot-pink highlight
+
+The `interactive` example sets `theme.accent` to **#FF1493** so the
+silhouette outline pops against any scene, and uses the same color
+as the `bg_color` of the selection callout pill. Note the
+gamma-space difference: overlay primitives composite without gamma
+(values are sRGB-fraction-direct), while the text rasterizer
+applies a gamma-2.0 sqrt at composite (linear values needed):
+
+```c
+/* Overlay path — sRGB-fraction values directly. */
+const MopColor outline = {255/255.0f, 20/255.0f, 147/255.0f, 1.0f};
+theme.accent           = outline;
+theme.selection_outline = outline;
+
+/* Text-pill path — gamma-2.0-encoded counterpart of the same color. */
+const MopColor pill_bg_linear = {1.0f, 0.0062f, 0.332f, 1.0f};
+mop_text_draw_label(vp, NULL, mesh, "CUBE",
+                    MOP_LABEL_TOP_CENTER, MOP_LABEL_ALWAYS_ON_TOP,
+                    (MopTextStyle){
+                        .color      = (MopColor){0, 0, 0, 1},
+                        .px_size    = 13.0f,
+                        .weight     = 0.22f,
+                        .bg_color   = pill_bg_linear,
+                        .bg_padding = 6.0f,
+                    });
+```
+
 ## DPI Note
 
 `gizmo_line_width` is in literal framebuffer pixels and is **not scaled** with DPI or framebuffer height. The shaft stays thin at high resolutions — matching the corner axis navigator style. Tip balls, axis letters, and diamond handles do scale with framebuffer height (reference 1080p → 1× at 1080, 1.33× at 1440p, 2× at 4K) so they remain readable.
@@ -105,3 +134,7 @@ mop_viewport_set_theme(vp, &t);
 
 - [Overlay](reference-render-overlay) — how the theme feeds the 2D chrome rasterizer
 - [Gizmo](reference-interaction-gizmo) · [Display](reference-core-display)
+- [Text](reference-core-text) — `MopTextStyle` brand color tokens
+  and selection-callout styling
+- [Font](reference-core-font) — JetBrains Mono is the default font
+  for everything in the design language

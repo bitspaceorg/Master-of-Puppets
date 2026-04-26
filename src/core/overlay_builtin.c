@@ -81,6 +81,34 @@ void mop_overlay_push_diamond(MopViewport *vp, float cx, float cy, float size,
   p->depth = depth;
 }
 
+void mop_overlay_push_text(MopViewport *vp, float fb_x, float fb_y, float r,
+                           float g, float b, float a, float fb_px_size,
+                           float weight, const char *text) {
+  if (!vp || !vp->overlay_prims || !text ||
+      vp->overlay_prim_count >= MOP_MAX_OVERLAY_PRIMS)
+    return;
+  MopOverlayPrim *p = &vp->overlay_prims[vp->overlay_prim_count++];
+  p->x0 = fb_x;
+  p->y0 = fb_y;
+  p->x1 = 0.0f;
+  p->y1 = 0.0f;
+  p->r = r;
+  p->g = g;
+  p->b = b;
+  p->a = a;
+  p->width = weight;
+  p->radius = fb_px_size;
+  p->type = MOP_PRIM_TEXT;
+  p->depth = -1.0f; /* text is always-on-top relative to depth tests
+                       — z-ordering between balls and letters comes
+                       from submission order, not scene depth */
+  /* Truncate-and-NUL-terminate so even oversized inputs land safely. */
+  size_t i = 0;
+  for (; i < sizeof(p->text_inline) - 1 && text[i]; i++)
+    p->text_inline[i] = text[i];
+  p->text_inline[i] = '\0';
+}
+
 /* -------------------------------------------------------------------------
  * CPU rasterizer for overlay primitives
  *
@@ -209,7 +237,7 @@ void mop_overlay_rasterize_prims_cpu(uint8_t *rgba, int w, int h,
           rgba[idx + 2] = (uint8_t)((float)rgba[idx + 2] * ia + (float)b8 * a);
         }
       }
-    } else {
+    } else if (p->type == MOP_PRIM_DIAMOND) {
       /* DIAMOND: 4 lines forming a rotated square */
       float cx = x0, cy = y0;
       float r_d = radius;
@@ -271,6 +299,15 @@ void mop_overlay_rasterize_prims_cpu(uint8_t *rgba, int w, int h,
           }
         }
       }
+    } else if (p->type == MOP_PRIM_TEXT) {
+      /* Inline text — z-ordered with the surrounding overlay prims
+       * via submission order.  Coordinates are framebuffer pixels;
+       * fb_px_size is in radius, weight in width.  The text
+       * rasterizer falls back to the embedded HUD font when font is
+       * NULL, which is what the navigator / gizmo paths use. */
+      MopColor c = {p->r, p->g, p->b, p->a};
+      mop_text_rasterize_inline(rgba, w, h, NULL, p->text_inline, p->x0, p->y0,
+                                p->radius, c, p->width);
     }
   }
 }
@@ -1270,9 +1307,10 @@ void mop_overlay_builtin_outline(MopViewport *vp, void *user_data) {
       float alpha = selected ? alpha_sel : alpha_unsel;
 
       if (selected) {
-        /* Thick outline: paint within radius around edge pixel. Skip
-         * destination pixels that belong to chrome (gizmo, grid,
-         * lights) so the outline draws under them instead of over. */
+        /* Thick outline: paint within radius around edge pixel.
+         * Skip destination pixels that belong to chrome (gizmo,
+         * grid, lights) so the outline draws under them instead
+         * of over. */
         for (int dy = -radius_sel; dy <= radius_sel; dy++) {
           for (int dx = -radius_sel; dx <= radius_sel; dx++) {
             int px = x + dx, py = y + dy;
@@ -1290,7 +1328,7 @@ void mop_overlay_builtin_outline(MopViewport *vp, void *user_data) {
           }
         }
       } else {
-        /* Thin 1px outline */
+        /* Thin 1px outline drawn AT the edge pixel. */
         int idx = (y * w + x) * 4;
         rgba[idx + 0] = (uint8_t)(rgba[idx + 0] * (1.0f - alpha) + ar * alpha);
         rgba[idx + 1] = (uint8_t)(rgba[idx + 1] * (1.0f - alpha) + ag * alpha);
@@ -2046,29 +2084,26 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
 
           mop_overlay_push_circle(vp, tx, ty, ball_r, c.r, c.g, c.b, ax_opacity,
                                   -1.0f);
-          /* Axis letter */
-          float lsz = 3.0f * pix_scale;
-          float llw = 1.2f * pix_scale;
-          float dk = 15.0f / 255.0f;
-          if (a == 0) {
-            mop_overlay_push_line(vp, tx - lsz, ty - lsz, tx + lsz, ty + lsz,
-                                  dk, dk, dk, llw, ax_opacity * 0.9f, -1.0f);
-            mop_overlay_push_line(vp, tx + lsz, ty - lsz, tx - lsz, ty + lsz,
-                                  dk, dk, dk, llw, ax_opacity * 0.9f, -1.0f);
-          } else if (a == 1) {
-            mop_overlay_push_line(vp, tx - lsz, ty - lsz, tx, ty, dk, dk, dk,
-                                  llw, ax_opacity * 0.9f, -1.0f);
-            mop_overlay_push_line(vp, tx + lsz, ty - lsz, tx, ty, dk, dk, dk,
-                                  llw, ax_opacity * 0.9f, -1.0f);
-            mop_overlay_push_line(vp, tx, ty, tx, ty + lsz, dk, dk, dk, llw,
-                                  ax_opacity * 0.9f, -1.0f);
-          } else {
-            mop_overlay_push_line(vp, tx - lsz, ty - lsz, tx + lsz, ty - lsz,
-                                  dk, dk, dk, llw, ax_opacity * 0.9f, -1.0f);
-            mop_overlay_push_line(vp, tx + lsz, ty - lsz, tx - lsz, ty + lsz,
-                                  dk, dk, dk, llw, ax_opacity * 0.9f, -1.0f);
-            mop_overlay_push_line(vp, tx - lsz, ty + lsz, tx + lsz, ty + lsz,
-                                  dk, dk, dk, llw, ax_opacity * 0.9f, -1.0f);
+
+          /* Axis letter — JetBrains Mono via the same z-ordered
+           * MOP_PRIM_TEXT path the corner navigator uses, so the
+           * transform gizmo's arrow-tip letters match the navigator's
+           * font and weight exactly.  Cap height ~= 0.55 × disc
+           * diameter; cap-height vertical centering. */
+          {
+            const MopFont *gz_font = mop_font_hud();
+            if (gz_font) {
+              static const char *gl[3] = {"X", "Y", "Z"};
+              const float CAP_EM = 0.72f;
+              MopFontMetrics gm = mop_font_metrics(gz_font);
+              float vcenter_em = gm.ascent - CAP_EM * 0.5f;
+              float letter_px = (ball_r * 1.10f) / CAP_EM;
+              float text_w = mop_text_measure(gz_font, gl[a], letter_px);
+              mop_overlay_push_text(vp, tx - text_w * 0.5f,
+                                    ty - vcenter_em * letter_px, 15.0f / 255.0f,
+                                    15.0f / 255.0f, 15.0f / 255.0f, ax_opacity,
+                                    letter_px, 0.18f, gl[a]);
+            }
           }
         } else {
           /* Tip projection failed — draw full shaft */
@@ -2127,6 +2162,13 @@ void mop_overlay_builtin_gizmo_2d(MopViewport *vp, void *user_data) {
     mop_overlay_push_circle(vp, csx, csy, 3.5f * pix_scale, cc.r, cc.g, cc.b,
                             opacity * 0.85f, -1.0f);
   }
+
+  /* Transform-gizmo arrow-tip X/Y/Z labels were intentionally
+   * removed — they collided with the corner axis navigator's dark
+   * letters when the gizmo projected near the navigator widget,
+   * and the bare arrow + center handle reads cleanly enough on
+   * its own.  The navigator (mop_overlay_builtin_axis_indicator_2d)
+   * is the single source of axis lettering in the design language. */
 }
 
 /* =========================================================================
@@ -2422,55 +2464,29 @@ void mop_overlay_builtin_axis_indicator_2d(MopViewport *vp, void *user_data) {
     mop_overlay_push_line(vp, cx, cy, sx_end, sy_end, fr, fg, fb, lw, 1.0f,
                           -1.0f);
 
-    if (axes[ai].positive) {
-      /* Filled circle at tip */
-      mop_overlay_push_circle(vp, axes[ai].sx, axes[ai].sy, axes[ai].ball_r, fr,
-                              fg, fb, 1.0f, -1.0f);
+    /* Filled circle at the tip — same call regardless of sign; the
+     * positive arms get a letter on top in the SAME prim queue
+     * iteration so the glyph is z-ordered with the discs:
+     * back-disc → back-letter → front-disc (overpaints back-letter)
+     * → front-letter. */
+    mop_overlay_push_circle(vp, axes[ai].sx, axes[ai].sy, axes[ai].ball_r, fr,
+                            fg, fb, 1.0f, -1.0f);
 
-      /* Stroke-based letter label (dark text on colored disc) */
-      float letter_sz = base_r * 0.42f;
-      float letter_lw = base_r * 0.18f;
-      float dk = 15.0f / 255.0f;
-      /* X letter: two diagonal lines */
-      if (axes[ai].axis == 0) {
-        mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
-                              axes[ai].sy - letter_sz, axes[ai].sx + letter_sz,
-                              axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              1.0f, -1.0f);
-        mop_overlay_push_line(vp, axes[ai].sx + letter_sz,
-                              axes[ai].sy - letter_sz, axes[ai].sx - letter_sz,
-                              axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              1.0f, -1.0f);
-      } else if (axes[ai].axis == 1) {
-        /* Y letter */
-        mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
-                              axes[ai].sy - letter_sz, axes[ai].sx, axes[ai].sy,
-                              dk, dk, dk, letter_lw, 1.0f, -1.0f);
-        mop_overlay_push_line(vp, axes[ai].sx + letter_sz,
-                              axes[ai].sy - letter_sz, axes[ai].sx, axes[ai].sy,
-                              dk, dk, dk, letter_lw, 1.0f, -1.0f);
-        mop_overlay_push_line(vp, axes[ai].sx, axes[ai].sy, axes[ai].sx,
-                              axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              1.0f, -1.0f);
-      } else {
-        /* Z letter */
-        mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
-                              axes[ai].sy - letter_sz, axes[ai].sx + letter_sz,
-                              axes[ai].sy - letter_sz, dk, dk, dk, letter_lw,
-                              1.0f, -1.0f);
-        mop_overlay_push_line(vp, axes[ai].sx + letter_sz,
-                              axes[ai].sy - letter_sz, axes[ai].sx - letter_sz,
-                              axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              1.0f, -1.0f);
-        mop_overlay_push_line(vp, axes[ai].sx - letter_sz,
-                              axes[ai].sy + letter_sz, axes[ai].sx + letter_sz,
-                              axes[ai].sy + letter_sz, dk, dk, dk, letter_lw,
-                              1.0f, -1.0f);
+    if (axes[ai].positive) {
+      const MopFont *nav_font = mop_font_hud();
+      if (nav_font) {
+        static const char *labels[3] = {"X", "Y", "Z"};
+        const float CAP_EM = 0.72f;
+        MopFontMetrics m = mop_font_metrics(nav_font);
+        float vcenter_em = m.ascent - CAP_EM * 0.5f;
+        float letter_px = (axes[ai].ball_r * 1.10f) / CAP_EM;
+        const char *lbl = labels[axes[ai].axis];
+        float text_w = mop_text_measure(nav_font, lbl, letter_px);
+        float fb_x = axes[ai].sx - text_w * 0.5f;
+        float fb_y = axes[ai].sy - vcenter_em * letter_px;
+        mop_overlay_push_text(vp, fb_x, fb_y, 15.0f / 255.0f, 15.0f / 255.0f,
+                              15.0f / 255.0f, 1.0f, letter_px, 0.18f, lbl);
       }
-    } else {
-      /* Filled circle at negative tip */
-      mop_overlay_push_circle(vp, axes[ai].sx, axes[ai].sy, axes[ai].ball_r, fr,
-                              fg, fb, 1.0f, -1.0f);
     }
   }
 }

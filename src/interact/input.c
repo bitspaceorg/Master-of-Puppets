@@ -12,7 +12,9 @@
 #include "core/viewport_internal.h"
 #include <mop/interact/camera.h>
 #include <mop/mop.h>
+#include <mop/query/spatial.h>
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -214,7 +216,66 @@ void mop_viewport_input(MopViewport *vp, const MopInputEvent *event) {
       /* Check axis indicator click — highest priority, snaps camera */
       int axis_hit = mop_viewport_pick_axis_indicator(vp, event->x, event->y);
       if (axis_hit > 0) {
-        mop_orbit_camera_snap_to_view(&vp->camera, (MopViewAxis)(axis_hit - 1));
+        MopViewAxis snapped = (MopViewAxis)(axis_hit - 1);
+        mop_orbit_camera_snap_to_view(&vp->camera, snapped);
+
+        /* Re-anchor the analytical grid to a plane perpendicular to
+         * the camera so the side view doesn't show an edge-on grid.
+         * Plane axis matches the camera's primary look direction:
+         *   TOP / BOTTOM   → look along Y → grid on XZ (axis = 1)
+         *   FRONT / BACK   → look along Z → grid on XY (axis = 2)
+         *   LEFT / RIGHT   → look along X → grid on YZ (axis = 0)
+         * Free orbit afterwards preserves this until the next snap. */
+        switch (snapped) {
+        case MOP_VIEW_TOP:
+        case MOP_VIEW_BOTTOM:
+          vp->grid_plane_axis = 1;
+          break;
+        case MOP_VIEW_FRONT:
+        case MOP_VIEW_BACK:
+          vp->grid_plane_axis = 2;
+          break;
+        case MOP_VIEW_LEFT:
+        case MOP_VIEW_RIGHT:
+          vp->grid_plane_axis = 0;
+          break;
+        }
+
+        /* Frame the world centered on the origin so the analytical
+         * grid (which is laid out around (0,0,0)) sits in the
+         * middle of the viewport — same look as 3DS Max / Maya
+         * orthographic snap.  Distance is sized to fit the union
+         * of {scene AABB, a default 4-unit box around origin} so
+         * the meshes stay visible even when they're off-center. */
+        MopAABB scene_box = mop_viewport_get_scene_aabb(vp);
+        float radius = 4.0f;
+        MopVec3 ext = mop_aabb_extents(scene_box);
+        if (ext.x > 0.0f || ext.y > 0.0f || ext.z > 0.0f) {
+          /* Use the farthest mesh corner from world origin to size
+           * the frame, not the scene's centroid — keeps origin in
+           * the middle while still showing every mesh. */
+          float r2 = 0.0f;
+          MopVec3 corners[2] = {scene_box.min, scene_box.max};
+          for (int i = 0; i < 2; i++) {
+            float d2 = corners[i].x * corners[i].x +
+                       corners[i].y * corners[i].y +
+                       corners[i].z * corners[i].z;
+            if (d2 > r2)
+              r2 = d2;
+          }
+          float scene_radius = sqrtf(r2);
+          if (scene_radius > radius)
+            radius = scene_radius;
+        }
+        float fov_rad = vp->camera.fov_degrees * (3.14159265f / 180.0f);
+        float half_fov = fov_rad * 0.5f;
+        float sin_half = sinf(half_fov);
+        float dist = (sin_half > 1e-4f) ? radius / sin_half : radius * 4.0f;
+        dist *= 1.30f; /* breathing room */
+        vp->camera.target = (MopVec3){0.0f, 0.0f, 0.0f};
+        vp->camera.distance = dist;
+        vp->camera.target_distance = dist;
+
         vp->interact_state = MOP_INTERACT_IDLE;
         vp->drag_axis = MOP_GIZMO_AXIS_NONE;
         break;

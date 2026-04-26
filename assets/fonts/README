@@ -1,0 +1,25 @@
+MOP fonts
+=========
+
+Drop OFL-licensed font files in this directory.  The build system
+bakes them into MOP's runtime atlas format (.mfa) and, for the HUD,
+embeds the result directly into libmop.
+
+Required for the embedded HUD font:
+
+  JetBrainsMono-Regular.ttf
+
+Fetch from upstream (OFL):
+
+  https://github.com/JetBrains/JetBrainsMono/releases
+
+The repository does not vendor the TTF — drop it here, then:
+
+  make fonts          # bake → build/fonts/jbm_regular.mfa
+                      # also emits build/fonts/jbm_regular.mfa.c
+  make                # relink libmop with the embedded HUD font
+
+After that, mop_font_hud() returns a usable font pointer with no
+disk I/O.  Without the TTF, mop_font_hud() returns NULL and host
+code is expected to fall back to mop_font_load() against an
+on-disk .mfa.

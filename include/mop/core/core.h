@@ -11,6 +11,7 @@
 #include <mop/core/camera_object.h>
 #include <mop/core/display.h>
 #include <mop/core/environment.h>
+#include <mop/core/font.h>
 #include <mop/core/light.h>
 #include <mop/core/material.h>
 #include <mop/core/material_graph.h>
@@ -18,6 +19,7 @@
 #include <mop/core/overlay.h>
 #include <mop/core/pipeline.h>
 #include <mop/core/scene.h>
+#include <mop/core/text.h>
 #include <mop/core/texture_pipeline.h>
 #include <mop/core/theme.h>
 #include <mop/core/vertex_format.h>

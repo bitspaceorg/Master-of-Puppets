@@ -254,15 +254,26 @@ typedef enum MopOverlayPrimType {
   MOP_PRIM_LINE = 0,
   MOP_PRIM_FILLED_CIRCLE = 1,
   MOP_PRIM_DIAMOND = 2,
+  /* Inline text primitive — rasterized in submission order alongside
+   * line / circle / diamond, so a labeled disc that gets covered by a
+   * later (closer-to-camera) disc is naturally overpainted.  The
+   * companion text rasterizer (text.c) services this prim by reading
+   * `text_inline`, `radius` (px_size), `width` (weight), and rgba.    */
+  MOP_PRIM_TEXT = 3,
 } MopOverlayPrimType;
 
 typedef struct MopOverlayPrim {
-  float x0, y0, x1, y1; /* line: endpoints, circle/diamond: center+unused */
-  float r, g, b, a;     /* color + opacity */
-  float width;          /* line width or ring width */
-  float radius;         /* circle/diamond radius */
-  int32_t type;         /* MopOverlayPrimType */
-  float depth;          /* NDC depth for depth-tested overlays (-1=no test) */
+  float x0, y0, x1, y1; /* line: endpoints, circle/diamond/text: pos +unused */
+  float r, g, b, a;     /* color + opacity                                   */
+  float width;          /* line width / ring width / text weight             */
+  float radius;         /* circle/diamond radius / text px_size              */
+  int32_t type;         /* MopOverlayPrimType                                */
+  float depth;          /* NDC depth for depth-tested overlays (-1 = no test)*/
+  /* Short inline string used by MOP_PRIM_TEXT.  Sized for short
+   * labels (X / Y / Z, axis tags) — anything longer should still go
+   * through the regular text queue, which doesn't share the overlay
+   * z-order. */
+  char text_inline[8];
 } MopOverlayPrim;
 
 #define MOP_MAX_OVERLAY_PRIMS 2048
@@ -495,6 +506,17 @@ struct MopViewport {
   /* Chrome visibility (grid, axis indicator, background, gizmo) */
   bool show_chrome; /* true by default */
 
+  /* Grid plane axis — which world axis is normal to the analytical
+   * grid.  Only changes when the user clicks an axis on the corner
+   * navigator (so a side-on view doesn't have an edge-on grid).
+   * Free orbit preserves whatever plane was last set; default Y=1
+   * = XZ ground plane.
+   *
+   *   0 → grid on YZ plane (normal = X) — Left/Right snap views
+   *   1 → grid on XZ plane (normal = Y) — Top/Bottom snap views
+   *   2 → grid on XY plane (normal = Z) — Front/Back snap views */
+  int grid_plane_axis;
+
   /* HDR exposure multiplier (default 1.0) */
   float exposure;
 
@@ -533,6 +555,18 @@ struct MopViewport {
   /* GPU overlay command buffer (SDF primitives) */
   MopOverlayPrim *overlay_prims;
   uint32_t overlay_prim_count;
+
+  /* Per-frame text command queue — populated by mop_text_draw_2d
+   * and consumed by the CPU text rasterizer during the readback
+   * composite (alongside mop_overlay_rasterize_prims_cpu).
+   *
+   * Each entry owns a malloc'd UTF-8 copy so callers may mutate or
+   * free their source string immediately after submission.  All
+   * strings are freed at frame start (when count is reset) and at
+   * viewport destroy. */
+  struct MopTextPrim *text_prims;
+  uint32_t text_prim_count;
+  uint32_t text_prim_capacity;
 
   /* Pre-allocated transparent sort arrays (reused across frames) */
   uint32_t *trans_sort_idx;
@@ -654,6 +688,79 @@ void mop_overlay_push_circle(MopViewport *vp, float cx, float cy, float radius,
 void mop_overlay_push_diamond(MopViewport *vp, float cx, float cy, float size,
                               float r, float g, float b, float width,
                               float opacity, float depth);
+
+/* -------------------------------------------------------------------------
+ * Text primitive — submission entry consumed by the readback-time
+ * rasterizer.  See src/core/text.c.
+ * ------------------------------------------------------------------------- */
+
+struct MopTextPrim {
+  const struct MopFont *font; /* not owned                                  */
+  char *utf8;                 /* owned malloc copy                          */
+  float x, y;                 /* 2D: top-left in fb px.  Label: pixel offset
+                                 from projected anchor (e.g., x=0, y=-12
+                                 means 12px above anchor).                  */
+  float px_size;              /* em height in framebuffer px                */
+  MopColor color;
+  uint32_t flags; /* reserved                                   */
+  float weight;   /* SDF threshold offset (see MopTextStyle)    */
+
+  /* Optional background pill — drawn before the glyphs.  Skipped
+   * when bg_color.a <= 0.0f. */
+  MopColor bg_color;
+  float bg_padding;
+
+  /* Label fields — populated only by mop_text_draw_label.  When
+   * `target` is NULL, this is a 2D screen-pinned prim and the
+   * fields below are ignored. */
+  struct MopMesh *target;
+  int anchor;     /* MopLabelAnchor                                         */
+  int depth_mode; /* MopLabelDepth                                          */
+};
+
+/* Free every queued text string and reset the queue count.  Called
+ * at frame start (alongside overlay_prim_count = 0) and from
+ * mop_viewport_destroy. */
+void mop_text_queue_reset(struct MopViewport *vp);
+
+/* Free the queue's heap allocation entirely (called from destroy). */
+void mop_text_queue_destroy(struct MopViewport *vp);
+
+/* CPU-rasterize the queued text primitives onto an RGBA8 buffer.
+ * Same contract as mop_overlay_rasterize_prims_cpu — invoked on the
+ * post-readback color buffer with framebuffer dimensions in pixels.
+ *
+ * `pixel_scale` is the supersampling factor of the destination buffer
+ * relative to the presentation size the host submitted in.  For an
+ * ssaa=2 viewport this is 2.0; for raw 1:1 it's 1.0.  Positions and
+ * px_size are multiplied by this before rasterization so that
+ * text-at-(12, 10) lands at (12, 10) in the downsampled output.
+ *
+ * Pass `vp` so the rasterizer can resolve label anchors against the
+ * viewport's view+projection matrices and per-mesh transforms. */
+void mop_text_rasterize_cpu(struct MopViewport *vp, uint8_t *rgba, int w, int h,
+                            const struct MopTextPrim *prims, uint32_t count,
+                            float pixel_scale);
+
+/* Inline text rasterization — drives a single string with no queue
+ * involvement and no ssaa scaling.  Used by the overlay rasterizer
+ * to service MOP_PRIM_TEXT primitives, so labels are drawn in
+ * submission order with the surrounding line/circle/diamond prims
+ * (back-to-front discs naturally overpaint back letters).
+ *
+ * Coordinates are framebuffer pixels — caller has already applied
+ * any ssaa scaling.  font may be NULL to fall back to mop_font_hud(). */
+void mop_text_rasterize_inline(uint8_t *rgba, int fb_w, int fb_h,
+                               const struct MopFont *font, const char *utf8,
+                               float fb_x, float fb_y, float fb_px_size,
+                               MopColor color, float weight);
+
+/* Push a MOP_PRIM_TEXT into the overlay queue.  fb_x/fb_y/fb_px_size
+ * are framebuffer pixels — same coordinate space as
+ * mop_overlay_push_circle.  Truncates `text` to 7 chars + NUL. */
+void mop_overlay_push_text(MopViewport *vp, float fb_x, float fb_y, float r,
+                           float g, float b, float a, float fb_px_size,
+                           float weight, const char *text);
 
 /* CPU-rasterize overlay primitives onto an RGBA8 buffer.
  *

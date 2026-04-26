@@ -69,6 +69,55 @@ Grouped by effort. Check items off here as they land.
 
 - [ ] **Fine-grained locking.** Current one-mutex design serializes all mutations. Options: per-mesh locks, seqlock for readers, epoch-based reclamation (EBR).
 
+### Design language — landed this round
+
+- [x] **Font system (`.mfa`).** Pre-baked SDF atlases — runtime
+      never rasterizes. `tools/mop_font_bake` (vendor stb_truetype),
+      `mop_font_load` / `mop_font_hud`, `make fonts` flow. JetBrains
+      Mono is the default font; embedded into libmop via a generated
+      `.mfa.c` when `assets/fonts/JetBrainsMono-Regular.ttf` is
+      present. See [reference-core-font](reference-core-font).
+- [x] **Text drawing (`mop_text_draw_2d`, `mop_text_draw_label`).**
+      `MopTextStyle` with `weight` (SDF iso-contour bias), `bg_color`
+      / `bg_padding` for filled pills, multi-selection greedy push-up
+      stacking. `MOP_PRIM_TEXT` overlay primitive — z-ordered with
+      lines / circles / diamonds so navigator letters interleave
+      correctly with their discs. See [reference-core-text](reference-core-text).
+- [x] **Built-in chrome wired to JBM.** Corner navigator letters,
+      transform gizmo arrow-tip letters, HUD breadcrumb, selection
+      callouts.
+- [x] **Selection highlight = `theme.accent` / `theme.selection_outline`.**
+      Default white; examples use `#FF1493` hot pink (outline) and
+      its linear counterpart on the callout pill.
+- [x] **Grid axis lines defaulted gray** instead of saturated red /
+      blue — the navigator + gizmo carry the X/Y/Z color coding now.
+- [x] **`vp->grid_plane_axis` + navigator-click anchoring.** Grid
+      plane only re-anchors on an explicit navigator click
+      (Top→XZ, Front→XY, Left→YZ); free-orbit preserves it. Camera
+      `target` snaps to world origin and distance fits the farthest
+      mesh corner with a 4-unit floor — 3DS Max-style frame-all.
+
+### Design language — carry-over
+
+- [ ] **Real Bold variant** (bake `JetBrainsMono-Bold.ttf` and select
+      via `MopFont*` rather than the SDF-weight bias approximation).
+- [ ] **MSDF upgrade.** Runtime is already MSDF-compatible (channel
+      count is in the header). Bake-tool change only — switch
+      `mop_font_bake` from `stbtt_GetGlyphSDF` to a 3-channel
+      msdfgen output; sharper corners, especially at small sizes.
+- [ ] **`mop_text_draw_3d` (world-embedded, depth-tested).** Text
+      that lives in the scene as a flat 3D object. Stub reserved in
+      `mop/core/text.h`; not wired through.
+- [ ] **`MOP_LABEL_FADE_OCCLUDED` / `MOP_LABEL_DEPTH_TEST` modes.**
+      Today only `MOP_LABEL_ALWAYS_ON_TOP` is honored — the others
+      are accepted for forward-compat but render the same.
+- [ ] **Vulkan grid-vs-outline depth.** The overlay render pass has
+      no depth attachment, so writing `gl_FragDepth` from
+      `mop_grid.frag` is a no-op. Adding depth means a render-pass
+      refactor (new attachment, framebuffer binding, every other
+      overlay pipeline state checked). Until then, `outline` can
+      occasionally appear over a grid line.
+
 ### Out of scope (separate engineering)
 
 - Ray tracing (`VK_KHR_acceleration_structure`).

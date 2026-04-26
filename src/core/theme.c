@@ -30,11 +30,15 @@ MopTheme mop_theme_default(void) {
       .bg_top = {bg.r + 0.012f, bg.g + 0.012f, bg.b + 0.012f, 1.0f},
       .bg_bottom = bg,
 
-      /* Grid: visible gray lines on brighter bg, saturated center axes */
+      /* Grid: visible gray lines.  The world-origin axes are also gray
+       * (slightly brighter than grid_major) instead of saturated red/blue
+       * — the corner navigator + transform gizmo already carry the X/Y/Z
+       * color coding, and a colored grid axis competes with those signals
+       * at oblique camera angles. */
       .grid_minor = {0.30f, 0.30f, 0.30f, 1.0f},
       .grid_major = {0.45f, 0.45f, 0.45f, 1.0f},
-      .grid_axis_x = {0.93f, 0.27f, 0.27f, 1.0f},
-      .grid_axis_z = {0.30f, 0.45f, 0.93f, 1.0f},
+      .grid_axis_x = {0.70f, 0.70f, 0.70f, 1.0f},
+      .grid_axis_z = {0.70f, 0.70f, 0.70f, 1.0f},
       .grid_line_width_minor = 1.0f,
       .grid_line_width_major = 1.0f,
       .grid_line_width_axis = 4.0f,

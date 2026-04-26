@@ -54,8 +54,9 @@ make CC=clang        # Or CC=gcc
 | `make conformance-run` | Build + run the render-health conformance check                     |
 | `make docs-check`      | Validate docs slugs / links + compile-test every `c main` block     |
 | `make ci-linux`        | Reproduce a Linux CI job locally via docker (see Testing → CI)      |
-| `make tools`           | Build CLI tools (e.g. `mop_convert`)                                |
+| `make tools`           | Build CLI tools (`mop_convert`, `mop_font_bake`)                    |
 | `make shaders`         | Recompile Vulkan GLSL → SPIR-V → embedded C arrays (requires glslc) |
+| `make fonts`           | Bake `assets/fonts/JetBrainsMono-Regular.ttf` → SDF atlas           |
 | `make clean`           | Remove `build/` directory                                           |
 | `make install`         | Install to `PREFIX` (default `/usr/local`)                          |
 
@@ -100,6 +101,29 @@ The `flake.nix` provides:
 - `devShells.default` — Development shell with compiler, make, clang-tools
 
 The core library has zero platform-specific dependencies beyond a C11 compiler.
+
+## Embedded HUD font
+
+MOP's design language ships JetBrains Mono (OFL) as the canonical
+font for HUD chrome, navigator labels, gizmo axis tags, and
+selection callouts. The TTF isn't vendored — drop it in and bake:
+
+```bash
+# 1. Fetch the OFL TTF from upstream (github.com/JetBrains/JetBrainsMono).
+cp JetBrainsMono-Regular.ttf assets/fonts/
+
+# 2. Bake → build/fonts/jbm_regular.{mfa, mfa.c}
+make fonts
+
+# 3. Re-link libmop with the embedded font.
+make MOP_ENABLE_VULKAN=1
+```
+
+After step 3, `mop_font_hud()` returns the embedded atlas with no
+disk I/O. Without the TTF, `mop_font_hud()` returns NULL and host
+code can fall back to `mop_font_load("path/to/file.mfa")`. See
+[Font](reference-core-font) for the `.mfa` format and the
+`mop_font_bake` CLI.
 
 ## Examples
 

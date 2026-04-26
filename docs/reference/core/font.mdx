@@ -1,0 +1,216 @@
+---
+title: "Font"
+description: "Pre-baked SDF font atlases — runtime never rasterizes glyphs"
+slug: "reference-core-font"
+author: "rahulmnavneeth"
+date: "26 APR 2026"
+tags: ["reference", "font", "text", "design-language"]
+---
+
+## Location
+
+```
+include/mop/core/font.h     — Public API: MopFont, metrics, measure
+src/core/font_internal.h    — .mfa binary layout (shared with bake tool)
+src/core/font.c             — mmap loader, glyph + kerning lookup
+tools/mop_font_bake.c       — TTF → .mfa baker (vendor stb_truetype)
+third_party/stb/stb_truetype.h
+```
+
+## Why pre-bake
+
+MOP fonts are pre-baked at asset-build time into the **.mfa** binary
+format (MOP Font Atlas). At runtime the font is just an atlas
+texture + a metrics table — there is **no runtime TTF parsing or
+glyph rasterization**, so a font that loads will never produce a
+blurry, missing, or partially-rendered glyph at draw time. This is
+the "battle-built" promise: clarity is a build-time property.
+
+## Public API
+
+```c
+typedef struct MopFont MopFont;   /* opaque handle */
+
+typedef enum MopFontAtlasType {
+    MOP_FONT_ATLAS_SDF    = 0,    /* single-channel SDF       (default) */
+    MOP_FONT_ATLAS_MSDF   = 1,    /* three-channel MSDF       (later)   */
+    MOP_FONT_ATLAS_BITMAP = 2,    /* raw alpha (no scaling)   (later)   */
+} MopFontAtlasType;
+
+typedef struct MopFontMetrics {
+    float    ascent, descent, line_gap, line_height;  /* em units    */
+    float    em_size;       /* source em size used at bake (info)    */
+    float    px_range;      /* SDF range in atlas pixels (shader uniform) */
+    uint32_t glyph_count;
+    uint32_t kerning_count;
+} MopFontMetrics;
+
+MopFont *mop_font_load(const char *path);
+MopFont *mop_font_load_memory(const void *data, size_t size);
+void     mop_font_free(MopFont *font);
+
+MopFontMetrics    mop_font_metrics(const MopFont *font);
+MopFontAtlasType  mop_font_atlas_type(const MopFont *font);
+
+/* String width in pixels at px_size; includes kerning. */
+float mop_text_measure(const MopFont *font, const char *utf8, float px_size);
+
+/* The embedded HUD font (JetBrains Mono Regular).
+ * NULL only if the build was produced without `make fonts`. */
+const MopFont *mop_font_hud(void);
+```
+
+## Default font
+
+JetBrains Mono is **MOP's de facto default font**. Every
+`mop_text_draw_*` call that passes `font = NULL` resolves to
+`mop_font_hud()`, which returns a singleton pointing at the
+embedded SDF atlas. No host setup, no disk I/O.
+
+## .mfa binary layout
+
+Single file, mmap-friendly. One file = one weight.
+
+```
+[ Header — 128 bytes, _Static_assert-locked ]
+  magic[4]          "MFA\x01"
+  version           u32
+  atlas_type        u32   // SDF / MSDF / BITMAP
+  atlas_channels    u32   // 1 (SDF, BITMAP) or 3 (MSDF)
+  atlas_width/height u32 × 2
+  px_range          f32   // SDF range in atlas pixels
+  em_size           f32
+  ascent / descent / line_gap   f32 × 3
+  glyph_count       u32
+  kerning_count     u32
+  glyph_table_offset    u64
+  kerning_table_offset  u64
+  atlas_offset      u64
+  reserved[48]
+
+[ Glyph table — 32 B × glyph_count, sorted by codepoint ]
+  codepoint                u32
+  atlas_uv_min/max         u16 × 4   (atlas pixels)
+  plane_min/max            f32 × 4   (em units, baseline-relative, Y-up)
+  advance                  f32       (em units)
+
+[ Kerning table — 8 B × kerning_count, sorted by (left, right) glyph index ]
+  left, right              u16 × 2   (glyph indices, NOT codepoints)
+  offset                   f32       (em units)
+
+[ Atlas pixels — raw R8 (SDF/BITMAP) or RGB8 (MSDF) ]
+```
+
+Codepoint lookup is binary search on the sorted glyph table.
+Kerning lookup is binary search on the (left, right) pair.
+
+## Baking — `tools/mop_font_bake`
+
+Pure C; vendor-only deps (stb_truetype).
+
+```bash
+mop_font_bake INPUT.ttf --out OUT.mfa
+              [--glyphs ascii|ascii+latin1]
+              [--size 64]      # source glyph height in pixels
+              [--padding 4]    # SDF range in pixels
+              [--name SYMBOL]  # also emit OUT.mfa.c
+```
+
+`--name SYMBOL` triggers an extra emission: a generated C source
+file (`OUT.mfa.c`) defining
+
+```c
+const uint8_t mop_embedded_<SYMBOL>[]    = { … };
+const size_t  mop_embedded_<SYMBOL>_size = N;
+```
+
+This is how the HUD font lands inside libmop — the generated `.c`
+gets compiled into the static archive with
+`-DMOP_HAS_EMBEDDED_HUD_FONT=1`, and `mop_font_hud()` calls
+`mop_font_load_memory(mop_embedded_hud_font, …)` once and caches the
+result.
+
+## Build flow — `make fonts`
+
+```bash
+# 1. Drop the OFL TTF (fetch from JetBrains/JetBrainsMono on GitHub).
+cp JetBrainsMono-Regular.ttf assets/fonts/
+
+# 2. Bake.  Produces:
+#      build/fonts/jbm_regular.mfa     — runtime atlas
+#      build/fonts/jbm_regular.mfa.c   — embed-ready source
+make fonts
+
+# 3. Re-link libmop with the embedded font.
+make MOP_ENABLE_VULKAN=1
+```
+
+The Makefile detects the generated `.mfa.c` via `wildcard` and
+auto-adds it to `CORE_OBJS` with `-DMOP_HAS_EMBEDDED_HUD_FONT=1`.
+After step 3, `mop_font_hud()` returns non-NULL with no further
+host work.
+
+If the TTF isn't dropped in, `make fonts` errors out (no source
+rule); `make` still produces a libmop, and `mop_font_hud()` returns
+NULL — host code falls back to `mop_font_load("path/to/file.mfa")`.
+
+## Loading at runtime
+
+```c
+/* Disk: mmap'd, zero-copy on POSIX. */
+MopFont *f = mop_font_load("assets/fonts/jbm_regular.mfa");
+if (!f) abort();
+
+/* Memory blob: caller-owned, must outlive the MopFont*. */
+extern const uint8_t my_blob[];
+extern const size_t  my_blob_size;
+MopFont *g = mop_font_load_memory(my_blob, my_blob_size);
+
+/* Same atlas the engine uses — fastest path, no I/O. */
+const MopFont *hud = mop_font_hud();   /* do NOT free this */
+
+mop_font_free(f);
+```
+
+## Measuring text
+
+```c
+MopFontMetrics m  = mop_font_metrics(hud);
+float line_h_px   = m.line_height * 12.0f;       /* 12-px line     */
+float row_w_px    = mop_text_measure(hud, "frame 16.4ms", 12.0f);
+```
+
+Kerning is included. Newlines reset horizontal advance and skip a
+line in `line_height` units. Missing glyphs consume `0.5 em` so the
+layout doesn't collapse.
+
+## Cap-height vs line-height centering
+
+Uppercase glyphs occupy roughly the **upper 0.72 em** of the cell.
+Centering a single-line label using `line_height * 0.5` pushes the
+glyph visually low. Use **cap-height** centering instead:
+
+```c
+const float CAP_EM = 0.72f;
+float vcenter_em  = m.ascent - CAP_EM * 0.5f;
+float pixel_y     = anchor_y - vcenter_em * px_size;
+```
+
+The corner navigator and transform gizmo letters use this formula.
+
+## Defensive contracts
+
+- All offsets in the header are validated against `file_size` at
+  load. Truncated files are rejected, not segfaulted.
+- A bad magic / unsupported version logs `MOP_ERROR` and returns
+  NULL — no abort.
+- `mop_font_free(NULL)` is a no-op.
+- Missing glyphs (codepoint not in the atlas) advance the cursor
+  by `0.5 em` — never zero, so a runaway non-Latin string doesn't
+  leave the pen pinned at zero forever.
+
+## See Also
+
+- [Text](reference-core-text) — the drawing API on top of this loader
+- [Theme](reference-core-theme) — brand color tokens used as
+  `MopTextStyle.color` defaults

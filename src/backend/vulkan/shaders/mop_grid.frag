@@ -104,7 +104,16 @@ void main() {
     if (a_sub < 0.01 && a_maj < 0.01 && a_ax < 0.01) discard;
 
     /* Depth occlusion: discard grid where scene geometry exists,
-     * except at the Y=0 intersection (depths within tolerance). */
+     * except at the Y=0 intersection (depths within tolerance).
+     *
+     * Bias is *clamped* to a small absolute value.  The previous
+     * `fwidth(grid_d) * 2.0` formulation blew up at grazing angles
+     * (the Z axis disappearing into the distance, world-axis lines
+     * sweeping across screen) — bias became so large that the
+     * "scene clearly in front" test never fired and the grid lines
+     * leaked over selected meshes' bodies.  A small fixed cap keeps
+     * intersection z-fighting hidden while letting clearly-in-front
+     * geometry properly occlude. */
     {
         float scene_d = texture(u_depth, v_uv).r;
         bool has_geometry = (pc.reverse_z != 0u)
@@ -114,9 +123,7 @@ void main() {
             float grid_clip_z = pc.vp_z0 * wx + pc.vp_z2 * wz + pc.vp_z3;
             float grid_clip_w = pc.vp_w0 * wx + pc.vp_w2 * wz + pc.vp_w3;
             float grid_d = grid_clip_z / grid_clip_w;
-            /* Scale bias by screen-space depth derivative — adapts to
-             * viewing angle: small at steep angles, larger at grazing. */
-            float bias = max(1e-6, fwidth(grid_d) * 2.0);
+            float bias = clamp(fwidth(grid_d) * 2.0, 1e-6, 1e-3);
             bool occluded = (pc.reverse_z != 0u)
                 ? (scene_d > grid_d + bias)
                 : (scene_d < grid_d - bias);

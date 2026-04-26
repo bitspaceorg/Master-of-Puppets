@@ -1,0 +1,204 @@
+---
+title: "Text"
+description: "Screen-pinned and world-anchored text drawing primitives"
+slug: "reference-core-text"
+author: "rahulmnavneeth"
+date: "26 APR 2026"
+tags: ["reference", "text", "ui", "design-language"]
+---
+
+## Location
+
+```
+include/mop/core/text.h     — Public API: MopTextStyle, draw_2d, draw_label
+src/core/text.c             — Per-frame queue + CPU SDF rasterizer
+src/core/font.c             — Underlying font / metrics layer
+```
+
+## Why this exists
+
+Text in MOP is **immediate-mode**: every frame you submit the
+strings you want; the viewport queues them and rasterizes once at
+the post-readback composite stage. There are no retained text
+objects, no caches the host has to invalidate.
+
+Two modes today:
+
+| Mode                  | Anchor                | Use case                             |
+| --------------------- | --------------------- | ------------------------------------ |
+| `mop_text_draw_2d`    | Screen pixels         | HUD, navigator, breadcrumb, status   |
+| `mop_text_draw_label` | World point on a mesh | Selection callouts, gizmo arrow tips |
+
+A third mode (`mop_text_draw_3d` — world-embedded, depth-tested)
+is reserved for a later slice; the label mode covers most "text
+near a 3D object" needs.
+
+## Style
+
+```c
+typedef struct MopTextStyle {
+    MopColor  color;        /* linear RGBA — gamma-encoded at composite */
+    float     px_size;      /* em height in framebuffer pixels         */
+    uint32_t  flags;        /* reserved                                 */
+
+    /* SDF iso-contour bias — bolder strokes from a single Regular
+     * atlas.  0.00 Regular / 0.10 Medium / 0.18 Semibold / 0.30 Bold. */
+    float     weight;
+
+    /* Optional filled background pill.  bg_color.a = 0 disables. */
+    MopColor  bg_color;
+    float     bg_padding;   /* presentation pixels around text bbox    */
+} MopTextStyle;
+```
+
+### Standard sizes
+
+| Pixel size | Use case                       |
+| ---------- | ------------------------------ |
+| 10         | Axis labels, dense list rows   |
+| 11–12      | Navigator rows, breadcrumb     |
+| 13         | Selection callout primary line |
+| 16+        | Emphasized body                |
+
+### Brand color tokens
+
+```c
+#define MOP_COLOR_BONE        ((MopColor){0.93, 0.92, 0.88, 1.0}) /* warm off-white */
+#define MOP_COLOR_BONE_DIM    ((MopColor){0.55, 0.54, 0.51, 1.0}) /* secondary text */
+#define MOP_COLOR_GEL_RED     ((MopColor){0.88, 0.18, 0.20, 1.0}) /* legacy accent  */
+#define MOP_COLOR_NEAR_BLACK  ((MopColor){0.055, 0.055, 0.063, 1.0})
+```
+
+Linear-space values; the rasterizer's gamma-2.0 sqrt at composite
+time turns them into the sRGB bytes the design language specifies.
+
+## 2D screen-pinned
+
+```c
+void mop_text_draw_2d(MopViewport *vp, const MopFont *font, const char *utf8,
+                      float pixel_x, float pixel_y, MopTextStyle style);
+```
+
+`pixel_x` / `pixel_y` are the **top-left of the glyph cell** in
+framebuffer pixels — the cell-top convention, not baseline. The
+rasterizer adds `ascent * px_size` internally.
+
+`utf8` is caller-owned; the viewport copies it into the per-frame
+queue, so the source string can be freed or mutated immediately
+after the call.
+
+`font = NULL` falls back to `mop_font_hud()` (the embedded JBM).
+If both are NULL, the call is a silent no-op.
+
+```c
+mop_text_draw_2d(vp, NULL, "SCENE \xe2\x80\xba INTERACTIVE",
+                 16, 12,
+                 (MopTextStyle){
+                     .color    = MOP_COLOR_BONE,
+                     .px_size  = 12.0f,
+                     .weight   = 0.18f,    /* semibold */
+                 });
+```
+
+## World-anchored label
+
+```c
+typedef enum MopLabelAnchor {
+    MOP_LABEL_TOP_CENTER,    /* world AABB top-center, +Y up           */
+    MOP_LABEL_BOTTOM_CENTER, /* world AABB bottom-center               */
+    MOP_LABEL_FOLLOW_PIVOT,  /* mesh translation — cheaper, robust     */
+} MopLabelAnchor;
+
+typedef enum MopLabelDepth {
+    MOP_LABEL_ALWAYS_ON_TOP, /* default                                */
+    MOP_LABEL_FADE_OCCLUDED, /* dim when behind geometry        [SOON] */
+    MOP_LABEL_DEPTH_TEST,    /* hard occlude when behind        [SOON] */
+} MopLabelDepth;
+
+void mop_text_draw_label(MopViewport *vp, const MopFont *font,
+                         MopMesh *target, const char *utf8,
+                         MopLabelAnchor anchor, MopLabelDepth depth_mode,
+                         MopTextStyle style);
+```
+
+Each frame, the rasterizer projects the mesh's world AABB anchor
+to screen pixels, applies a default 12-px-above offset, and
+rasterizes the text there. Size is screen-space — labels never
+scale with distance.
+
+```c
+mop_text_draw_label(vp, NULL, cube, "CUBE",
+                    MOP_LABEL_TOP_CENTER, MOP_LABEL_ALWAYS_ON_TOP,
+                    (MopTextStyle){
+                        .color      = (MopColor){0, 0, 0, 1},      /* black */
+                        .px_size    = 13.0f,
+                        .weight     = 0.22f,
+                        .bg_color   = (MopColor){1.0, 0.0062, 0.332, 1}, /* hot pink */
+                        .bg_padding = 6.0f,
+                    });
+```
+
+If `target` is NULL or removed before the frame renders, the label
+is silently dropped — host code does not need to track lifetimes
+beyond submission.
+
+## Multi-selection stacking
+
+When multiple labels' anchors project near each other, the
+rasterizer runs a greedy push-up pass before drawing:
+
+1. Collect all label prims, project each anchor.
+2. Sort by anchor screen-Y (top of viewport first).
+3. For each, place at preferred offset; if overlapping any
+   already-placed label's bbox, push up by `label_height + 4 px`
+   until clear.
+4. If pushed off-screen vertically, drop the label for that frame.
+
+`MOP_LABEL_MAX_VISIBLE = 32` caps the number of labels rasterized
+per frame — overflow is dropped.
+
+## Z-ordering with overlay primitives
+
+`mop_text_draw_label` and `mop_text_draw_2d` go through the
+**per-frame text queue** which composites _after_ all overlay
+primitives. The other path is `mop_overlay_push_text` —
+`MOP_PRIM_TEXT` is a first-class overlay primitive, z-ordered with
+the surrounding `MOP_PRIM_LINE` / `MOP_PRIM_FILLED_CIRCLE` /
+`MOP_PRIM_DIAMOND`. The corner axis navigator and transform gizmo
+letters use this path so a closer disc cleanly overpaints the
+letter of the disc behind it.
+
+## SSAA scaling
+
+The text rasterizer takes a `pixel_scale` factor (= viewport
+`ssaa_factor`). Submission is in **presentation pixels**; the
+rasterizer paints into the SSAA framebuffer at the right
+resolution and SSAA downsample produces correctly-AA'd output.
+
+This means a `12 px` text submission lands as `12 px` in the
+final image regardless of `ssaa_factor`. No host-side scaling
+required.
+
+## Boldness via SDF weight
+
+`MopTextStyle.weight > 0` shifts the SDF iso-contour outward,
+thickening every stroke uniformly. Cheaper than a Bold atlas; not
+quite as good at very small sizes (a real Bold variant baked from
+JetBrainsMono-Bold.ttf is the future fix).
+
+## Defensive contracts
+
+- `vp = NULL`, `utf8 = NULL`, or `px_size <= 0` → no-op, no error.
+- `font = NULL` → fall back to `mop_font_hud()`.
+- Missing glyphs draw a half-em gap; never wedge layout.
+- Inactive / removed `MopMesh*` for `mop_text_draw_label` →
+  silently dropped.
+- Behind-camera anchor (clip.w ≤ 0) → silently dropped.
+
+## See Also
+
+- [Font](reference-core-font) — the loader / metrics layer
+- [Theme](reference-core-theme) — `accent` / `selection_outline`
+  drive the highlight pill behind selection callouts
+- [Viewport](reference-core-viewport) — text queue lifecycle and
+  composite ordering
