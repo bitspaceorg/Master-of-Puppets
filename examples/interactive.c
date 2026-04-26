@@ -340,19 +340,32 @@ int main(int argc, char **argv) {
   mop_viewport_set_post_effects(vp, MOP_POST_GAMMA | MOP_POST_TONEMAP |
                                         MOP_POST_FXAA);
 
-  MopLight key = {.type = MOP_LIGHT_DIRECTIONAL,
-                  .direction = {-0.4f, -0.9f, -0.3f},
-                  .color = {1.0f, 0.95f, 0.9f, 1.0f},
-                  .intensity = 3.0f,
+  /* Three-light colored rig — shows off the multi-light + linear
+   * color path.  Warm amber sun overhead, magenta key-rim from the
+   * right, electric-cyan fill from the left.  Matching MopLight
+   * fields are already linear RGB; intensity is the brightness
+   * multiplier (point lights use 1/d² attenuation so they need
+   * larger numbers than directional). */
+  MopLight sun = {.type = MOP_LIGHT_DIRECTIONAL,
+                  .direction = {-0.3f, -0.9f, -0.2f},
+                  .color = {1.0f, 0.72f, 0.32f, 1.0f}, /* warm amber */
+                  .intensity = 2.5f,
                   .active = true};
-  MopLight rim = {.type = MOP_LIGHT_POINT,
-                  .position = {-3, 2, -2},
-                  .color = {0.4f, 0.6f, 1.0f, 1.0f},
-                  .intensity = 30.0f,
-                  .range = 12.0f,
-                  .active = true};
-  mop_viewport_add_light(vp, &key);
-  mop_viewport_add_light(vp, &rim);
+  MopLight magenta = {.type = MOP_LIGHT_POINT,
+                      .position = {3.5f, 1.6f, 1.5f},
+                      .color = {1.0f, 0.10f, 0.65f, 1.0f}, /* hot magenta */
+                      .intensity = 35.0f,
+                      .range = 14.0f,
+                      .active = true};
+  MopLight cyan = {.type = MOP_LIGHT_POINT,
+                   .position = {-3.5f, 1.4f, -1.5f},
+                   .color = {0.10f, 0.78f, 1.0f, 1.0f}, /* electric cyan */
+                   .intensity = 35.0f,
+                   .range = 14.0f,
+                   .active = true};
+  mop_viewport_add_light(vp, &sun);
+  mop_viewport_add_light(vp, &magenta);
+  mop_viewport_add_light(vp, &cyan);
 
   if (hdri_path) {
     bool env_ok = mop_viewport_set_environment(vp, &(MopEnvironmentDesc){
