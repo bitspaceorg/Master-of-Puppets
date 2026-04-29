@@ -12,6 +12,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Vector types
  * ------------------------------------------------------------------------- */
@@ -122,5 +126,9 @@ MopVec3 mop_vec3_cross(MopVec3 a, MopVec3 b);
 float mop_vec3_dot(MopVec3 a, MopVec3 b);
 float mop_vec3_length(MopVec3 v);
 MopVec3 mop_vec3_normalize(MopVec3 v);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_TYPES_H */

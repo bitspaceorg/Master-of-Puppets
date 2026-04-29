@@ -18,6 +18,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -83,5 +87,9 @@ MopFrameStats mop_viewport_get_stats(const MopViewport *viewport);
 /* Return the GPU frame time in milliseconds for the last completed frame.
  * Returns 0.0 if GPU timing is not available.
  * Note: declaration matches viewport.h (non-const viewport pointer). */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_UTIL_PROFILE_H */

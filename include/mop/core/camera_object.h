@@ -14,6 +14,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct MopViewport MopViewport;
 typedef struct MopCameraObject MopCameraObject;
 
@@ -68,5 +72,9 @@ uint32_t mop_viewport_get_camera_count(const MopViewport *vp);
 
 /* Get camera by index (0-based) */
 MopCameraObject *mop_viewport_get_camera(const MopViewport *vp, uint32_t index);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_CAMERA_OBJECT_H */

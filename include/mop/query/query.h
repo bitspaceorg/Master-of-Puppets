@@ -13,4 +13,12 @@
 #include <mop/query/snapshot.h>
 #include <mop/query/spatial.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MOP_QUERY_H */

@@ -387,6 +387,60 @@ float mop_text_measure(const MopFont *font, const char *utf8, float px_size) {
   return em * px_size;
 }
 
+void mop_text_measure_extent(const MopFont *font, const char *utf8,
+                             float px_size, float *out_width,
+                             float *out_height) {
+  if (out_width)
+    *out_width = 0.0f;
+  if (out_height)
+    *out_height = 0.0f;
+  if (!font || !utf8 || px_size <= 0.0f)
+    return;
+
+  float line_em = 0.0f;
+  float max_em = 0.0f;
+  uint32_t lines = 1;
+  const MopFontGlyph *prev = NULL;
+
+  for (const char *p = utf8; *p;) {
+    uint32_t cp = utf8_next(&p);
+    if (cp == '\n') {
+      if (line_em > max_em)
+        max_em = line_em;
+      line_em = 0.0f;
+      lines++;
+      prev = NULL;
+      continue;
+    }
+    const MopFontGlyph *g = mop_font_lookup_glyph(font, cp);
+    if (!g) {
+      line_em += 0.5f;
+      prev = NULL;
+      continue;
+    }
+    if (prev)
+      line_em += mop_font_kerning(font, prev, g);
+    line_em += g->advance;
+    prev = g;
+  }
+  if (line_em > max_em)
+    max_em = line_em;
+
+  if (out_width)
+    *out_width = max_em * px_size;
+
+  if (out_height) {
+    MopFontMetrics m = mop_font_metrics(font);
+    /* ascent - descent gives the cell height for one line; line_height
+     * already includes line_gap, so additional lines stack at line_height
+     * intervals starting from the first cell's bottom edge. */
+    float cell = (m.ascent - m.descent) * px_size;
+    float spacing =
+        (lines > 1) ? ((float)(lines - 1) * m.line_height * px_size) : 0.0f;
+    *out_height = cell + spacing;
+  }
+}
+
 /* -------------------------------------------------------------------------
  * Built-in HUD font — populated by the embedded blob generated at
  * build time.  When the build excludes fonts (e.g., during early

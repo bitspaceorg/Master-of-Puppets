@@ -12,4 +12,12 @@
 #include <mop/export/obj_export.h>
 #include <mop/export/scene_export.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MOP_EXPORT_H */

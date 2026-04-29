@@ -113,3 +113,26 @@ MopRay mop_viewport_pixel_to_ray(const MopViewport *vp, float x, float y) {
   }
   return ray;
 }
+
+bool mop_viewport_pixel_to_ground(const MopViewport *vp, float x, float y,
+                                  float ground_y, MopVec3 *out_world) {
+  if (!out_world)
+    return false;
+  MopRay ray = mop_viewport_pixel_to_ray(vp, x, y);
+
+  /* Plane y = ground_y, normal = (0, 1, 0). Solve ray.origin + t*dir
+   * intersects the plane: origin.y + t * dir.y = ground_y
+   *                  →    t = (ground_y - origin.y) / dir.y
+   * dir.y near zero means the ray is grazing or parallel — no stable hit.
+   * t < 0 means the plane is behind the ray origin. */
+  if (fabsf(ray.direction.y) < 1e-6f)
+    return false;
+  float t = (ground_y - ray.origin.y) / ray.direction.y;
+  if (t < 0.0f)
+    return false;
+
+  out_world->x = ray.origin.x + t * ray.direction.x;
+  out_world->y = ground_y;
+  out_world->z = ray.origin.z + t * ray.direction.z;
+  return true;
+}

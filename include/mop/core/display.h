@@ -13,6 +13,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Debug visualization modes (Phase 9B)
  *
@@ -87,5 +91,9 @@ void mop_viewport_set_display(MopViewport *vp, const MopDisplaySettings *ds);
 
 /* Get the current display settings. */
 MopDisplaySettings mop_viewport_get_display(const MopViewport *vp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_DISPLAY_H */

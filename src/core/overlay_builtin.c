@@ -110,6 +110,74 @@ void mop_overlay_push_text(MopViewport *vp, float fb_x, float fb_y, float r,
 }
 
 /* -------------------------------------------------------------------------
+ * Public 2D / 3D line submission
+ *
+ * mop_overlay_push_line is the internal screen-space helper above. The
+ * 2D wrapper just normalizes the color to floats and forwards. The 3D
+ * wrapper projects world endpoints through the current view/projection
+ * matrices, applies the perspective divide, maps NDC to framebuffer
+ * pixels, then forwards to the same queue. Both end up in
+ * vp->overlay_prims, drained by the readback compositor.
+ * ------------------------------------------------------------------------- */
+
+void mop_overlay_push_line_2d(MopViewport *vp, float x0, float y0, float x1,
+                              float y1, MopColor color, float width,
+                              float depth) {
+  mop_overlay_push_line(vp, x0, y0, x1, y1, color.r, color.g, color.b, width,
+                        color.a, depth);
+}
+
+bool mop_overlay_push_line_3d(MopViewport *vp, MopVec3 world_a, MopVec3 world_b,
+                              MopColor color, float width) {
+  if (!vp || vp->width <= 0 || vp->height <= 0)
+    return false;
+
+  MopMat4 vp_mat = mop_mat4_multiply(vp->projection_matrix, vp->view_matrix);
+
+  MopVec4 a4 = {world_a.x, world_a.y, world_a.z, 1.0f};
+  MopVec4 b4 = {world_b.x, world_b.y, world_b.z, 1.0f};
+  MopVec4 ac = mop_mat4_mul_vec4(vp_mat, a4);
+  MopVec4 bc = mop_mat4_mul_vec4(vp_mat, b4);
+
+  /* Behind-camera reject: when both endpoints have w <= 0, the line is
+   * entirely behind the near plane. Partial behind-camera lines render
+   * with their visible portion clipped at the framebuffer edge — host
+   * code that needs proper near-plane clipping should clip to the frustum
+   * before submitting. */
+  if (ac.w <= 0.0f && bc.w <= 0.0f)
+    return false;
+
+  /* Avoid divide-by-zero from grazing endpoints by nudging tiny w's away
+   * from 0. The result for a clipped endpoint is off-screen; the
+   * rasterizer culls those pixels naturally. */
+  float aw = (fabsf(ac.w) > 1e-6f) ? ac.w : (ac.w < 0 ? -1e-6f : 1e-6f);
+  float bw = (fabsf(bc.w) > 1e-6f) ? bc.w : (bc.w < 0 ? -1e-6f : 1e-6f);
+
+  float ax_ndc = ac.x / aw;
+  float ay_ndc = ac.y / aw;
+  float az_ndc = ac.z / aw;
+  float bx_ndc = bc.x / bw;
+  float by_ndc = bc.y / bw;
+
+  /* NDC → framebuffer pixels (top-left origin). MOP's CPU compositor
+   * matches GL convention: NDC y=+1 is top of screen. */
+  float fbw = (float)vp->width;
+  float fbh = (float)vp->height;
+  float ax_px = (ax_ndc * 0.5f + 0.5f) * fbw;
+  float ay_px = (1.0f - (ay_ndc * 0.5f + 0.5f)) * fbh;
+  float bx_px = (bx_ndc * 0.5f + 0.5f) * fbw;
+  float by_px = (1.0f - (by_ndc * 0.5f + 0.5f)) * fbh;
+
+  /* Use the front endpoint's NDC z so the depth-test path (when wired)
+   * sorts the line correctly. Average is fine for short sparks. */
+  float depth = az_ndc;
+  (void)by_ndc;
+  mop_overlay_push_line(vp, ax_px, ay_px, bx_px, by_px, color.r, color.g,
+                        color.b, width, color.a, depth);
+  return true;
+}
+
+/* -------------------------------------------------------------------------
  * CPU rasterizer for overlay primitives
  *
  * Paints lines / filled circles / diamonds onto an RGBA8 buffer with

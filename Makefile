@@ -328,8 +328,14 @@ FONT_SRC_DIR  := assets/fonts
 FONT_OUT_DIR  := $(BUILD_DIR)/fonts
 FONT_BAKE_BIN := $(BUILD_DIR)/tools/mop_font_bake
 
+# Build ONLY the font-bake tool, not the full tools target. mop_convert
+# depends on libmop.a, so `make -C tools` would fail on a clean tree —
+# and the `make → make fonts → make` bootstrap loop reported by hosts
+# with no pre-existing libmop.a came from exactly that. mop_font_bake
+# itself only needs libm, so this targeted build works on a fresh clone.
+# The `font-bake-only` subtarget below scopes the build to that one tool.
 $(FONT_BAKE_BIN):
-	$(MAKE) -C tools
+	$(MAKE) -C tools font-bake-only
 
 $(FONT_OUT_DIR):
 	@mkdir -p $@
@@ -342,6 +348,14 @@ $(FONT_OUT_DIR)/jbm_regular.mfa: $(FONT_SRC_DIR)/JetBrainsMono-Regular.ttf $(FON
 fonts: $(FONT_OUT_DIR)/jbm_regular.mfa
 	@echo "[mop] fonts baked → $(FONT_OUT_DIR)"
 	@echo "[mop] re-run \`make\` to relink libmop with the embedded HUD font"
+
+# One-shot build for fresh clones: bake fonts, then build libmop with the
+# embedded HUD font wired in. Replaces the documented `make → make fonts
+# → make` bootstrap dance hosts had to discover by trial and error.
+.PHONY: all-with-fonts
+all-with-fonts:
+	$(MAKE) fonts
+	$(MAKE) lib
 
 # -----------------------------------------------------------------------------
 # Docs checks

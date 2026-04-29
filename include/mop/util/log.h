@@ -10,6 +10,10 @@
 
 #include <stdarg.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Log levels
  * ------------------------------------------------------------------------- */
@@ -82,6 +86,10 @@ void mop_log_emit(MopLogLevel level, const char *file, int line,
   mop_log_emit(MOP_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
 #else
 #define MOP_ERROR(...) ((void)0)
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* MOP_UTIL_LOG_H */

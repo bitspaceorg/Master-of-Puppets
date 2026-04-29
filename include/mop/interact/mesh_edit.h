@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct MopMesh MopMesh;
 typedef struct MopViewport MopViewport;
 
@@ -64,5 +68,9 @@ void mop_mesh_delete_faces(MopMesh *mesh, MopViewport *vp,
 /* Reverse winding order of selected faces, flipping their normals. */
 void mop_mesh_flip_normals(MopMesh *mesh, MopViewport *vp,
                            const uint32_t *face_indices, uint32_t count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_INTERACT_MESH_EDIT_H */

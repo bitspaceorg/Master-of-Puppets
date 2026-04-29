@@ -11,6 +11,10 @@
 #include <mop/interact/camera.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -67,5 +71,26 @@ typedef struct MopRay {
  * ------------------------------------------------------------------------- */
 
 MopRay mop_viewport_pixel_to_ray(const MopViewport *vp, float x, float y);
+
+/* -------------------------------------------------------------------------
+ * Ground-plane projection
+ *
+ * Project a screen pixel onto a horizontal world-space plane at y = `y`.
+ * Returns the world-space hit point in *out_world. Returns false if the
+ * pixel ray is parallel to the plane (camera looking straight along ±X
+ * or ±Z) or aimed away from it (the plane is behind the camera at this
+ * angle) — in those cases *out_world is left unchanged.
+ *
+ * Cheaper than mop_viewport_raycast against tile geometry for the common
+ * RTS / city-builder pattern of "click → world coordinate on the ground"
+ * picking. Uses the same MopRay pipeline as pixel_to_ray.
+ * ------------------------------------------------------------------------- */
+
+bool mop_viewport_pixel_to_ground(const MopViewport *vp, float x, float y,
+                                  float ground_y, MopVec3 *out_world);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_QUERY_CAMERA_QUERY_H */

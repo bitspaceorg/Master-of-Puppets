@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -56,5 +60,9 @@ typedef void (*MopFrameCallbackFn)(MopViewport *vp, bool is_pre_render,
 
 void mop_viewport_set_frame_callback(MopViewport *vp, MopFrameCallbackFn fn,
                                      void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_PIPELINE_H */

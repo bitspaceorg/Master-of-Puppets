@@ -24,6 +24,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Meshlet limits (matching VK_EXT_mesh_shader recommendations)
  * ------------------------------------------------------------------------- */
@@ -102,5 +106,9 @@ void mop_meshlet_free(MopMeshletData *data);
 
 /* Compute the number of meshlets needed for a mesh. */
 uint32_t mop_meshlet_count_estimate(uint32_t triangle_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_MESHLET_H */

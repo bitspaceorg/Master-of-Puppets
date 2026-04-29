@@ -8,6 +8,9 @@
 #ifndef MOP_RENDER_BACKEND_H
 #define MOP_RENDER_BACKEND_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 /* -------------------------------------------------------------------------
  * Backend type enumeration
  *
@@ -31,5 +34,9 @@ const char *mop_backend_name(MopBackendType type);
 
 /* Return the default backend for the current platform. */
 MopBackendType mop_backend_default(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_RENDER_BACKEND_H */

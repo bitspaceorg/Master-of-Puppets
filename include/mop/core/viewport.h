@@ -12,6 +12,10 @@
 #include <mop/render/backend.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Render result — returned by mop_viewport_render
  * ------------------------------------------------------------------------- */
@@ -134,6 +138,19 @@ MopCameraMode mop_viewport_get_camera_mode(const MopViewport *viewport);
 
 MopRenderResult mop_viewport_render(MopViewport *viewport);
 
+/* Render and synchronously wait for the GPU to finish, populating the
+ * readback buffers (color, depth, object-id) before returning.
+ *
+ * Use this for screenshot tooling and CI golden-image flows where you need
+ * a single render → read sequence to be deterministic. The standard
+ * mop_viewport_render returns as soon as commands are submitted; on Vulkan,
+ * readback is normally deferred to the next frame's fence wait, which
+ * means the first call returns an empty buffer.
+ *
+ * Backends without deferred readback (CPU, OpenGL) treat this identically
+ * to mop_viewport_render — there is no extra cost. */
+MopRenderResult mop_viewport_render_sync(MopViewport *viewport);
+
 /* Return the last error message from mop_viewport_render, or NULL. */
 const char *mop_viewport_get_last_error(const MopViewport *viewport);
 
@@ -244,5 +261,9 @@ MopRenderResult mop_viewport_render_to(MopViewport *viewport,
  * activation requires uber-shader + pipeline bucketing; see docs/TODO.md.
  * Toggling this today is safe but a no-op. */
 void mop_viewport_set_gpu_driven_rendering(MopViewport *viewport, bool enabled);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_VIEWPORT_H */

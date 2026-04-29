@@ -15,6 +15,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Attribute semantics
  * ------------------------------------------------------------------------- */
@@ -94,5 +98,9 @@ const MopVertexAttrib *mop_vertex_format_find(const MopVertexFormat *fmt,
 
 /* Return the byte size of a given attribute format. */
 uint32_t mop_attrib_format_size(MopAttribFormat fmt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_VERTEX_FORMAT_H */

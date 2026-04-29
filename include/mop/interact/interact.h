@@ -15,4 +15,12 @@
 #include <mop/interact/selection.h>
 #include <mop/interact/undo.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MOP_INTERACT_H */

@@ -12,6 +12,10 @@
 #include <mop/loader/mop_scene.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Loaded mesh data
  *
@@ -98,5 +102,9 @@ bool mop_load(const char *path, MopLoadedMesh *out);
 
 /* Free memory allocated by mop_load. */
 void mop_load_free(MopLoadedMesh *mesh);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_LOADER_LOADER_H */

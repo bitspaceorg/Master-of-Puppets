@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * MOP Design Language — all visual constants in one place
  *
@@ -95,5 +99,9 @@ MopTheme mop_theme_default(void);
 /* Set/get the active theme for a viewport */
 void mop_viewport_set_theme(MopViewport *vp, const MopTheme *theme);
 const MopTheme *mop_viewport_get_theme(const MopViewport *vp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_THEME_H */

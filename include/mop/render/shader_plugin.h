@@ -2,10 +2,25 @@
  * Master of Puppets — Backend-Agnostic Viewport Rendering Engine
  * shader_plugin.h — Custom shader plugin registration and execution
  *
- * Allows host applications to inject custom rendering passes (VFX shaders,
- * post-process effects, volume rendering, overlays) into the MOP pipeline.
- * Each plugin registers SPIR-V bytecode and a draw callback; MOP creates
- * the shader modules and invokes the callback at the designated stage.
+ * What this is (today):
+ *   A render-graph hook. The host registers a callback bound to a stage
+ *   (POST_OPAQUE, POST_SCENE, POST_PROCESS, OVERLAY); MOP invokes it at the
+ *   right point each frame, holding the scene mutex so the callback can
+ *   safely call public mutators (mop_mesh_set_*, animations, etc.).
+ *   Optionally MOP compiles SPIR-V you provide into shader modules and
+ *   exposes them via mop_shader_plugin_get_vertex/fragment/compute, but
+ *   the public API does not yet expose the active command buffer or render
+ *   pass — submitting custom draws into MOP's framebuffer is internals-only
+ *   work. Treat the SPIR-V slots as managed storage you can fetch back via
+ *   the accessors when (or if) you build a backend-specific bridge.
+ *
+ * What this is NOT (yet):
+ *   A "submit your own draws into MOP's framebuffer" API. There is no
+ *   exposed VkCommandBuffer / VkRenderPass / GL FBO in MopShaderDrawContext.
+ *   Plugin-driven draw injection is on the roadmap; today's headline use
+ *   case is "do something each frame against MOP's clock and scene state"
+ *   — animating procedural content, driving meshes you already added via
+ *   mop_viewport_add_mesh, ticking shader-plugin-owned simulations.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,6 +32,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
@@ -51,8 +70,12 @@ typedef struct MopShaderDrawContext {
   int height;
   float time;
   float delta_time;
-  /* RHI device handle — for direct backend calls (Vulkan command
-   * recording, etc.).  NULL on the CPU backend. */
+  /* RHI device handle — opaque backend pointer (`MopRhiDevice *`).
+   * Provided as an escape hatch for hosts that have studied the unstable
+   * internal RHI; not part of the public contract. The active command
+   * buffer / render pass for the current frame are NOT exposed here, so
+   * issuing your own draws into MOP's framebuffer is not supported by the
+   * public API. NULL on the CPU backend. */
   void *rhi_device;
 } MopShaderDrawContext;
 
@@ -124,5 +147,9 @@ const char *mop_shader_plugin_get_name(const MopShaderPlugin *plugin);
 MopRhiShader *mop_shader_plugin_get_vertex(const MopShaderPlugin *plugin);
 MopRhiShader *mop_shader_plugin_get_fragment(const MopShaderPlugin *plugin);
 MopRhiShader *mop_shader_plugin_get_compute(const MopShaderPlugin *plugin);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_RENDER_SHADER_PLUGIN_H */

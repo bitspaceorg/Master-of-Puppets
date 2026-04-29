@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -67,5 +71,9 @@ typedef struct MopVolumetricParams {
 
 void mop_viewport_set_volumetric(MopViewport *viewport,
                                  const MopVolumetricParams *params);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_RENDER_POSTPROCESS_H */

@@ -18,6 +18,10 @@
 #include <mop/core/vertex_format.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 typedef struct MopMesh MopMesh;
@@ -91,5 +95,9 @@ float mop_mesh_get_opacity(const MopMesh *mesh);
 /* Return the light at the given index [0, mop_viewport_light_count).
  * Returns NULL if index is out of range or the light is inactive. */
 const MopLight *mop_viewport_light_at(const MopViewport *vp, uint32_t index);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_QUERY_SCENE_QUERY_H */

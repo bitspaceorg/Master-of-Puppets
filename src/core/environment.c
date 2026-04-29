@@ -504,6 +504,12 @@ static float perez(float theta, float gamma, float A, float B, float C, float D,
   return (1.0f + A * expf(B / ct)) * (1.0f + C * expf(D * gamma) + E * cg * cg);
 }
 
+/* Internal — called from set_environment, set_procedural_sky, and the
+ * render-time defensive recovery path in viewport.c when env_type is
+ * PROCEDURAL_SKY but env_texture is NULL (stale state or failed first
+ * upload). Caller holds the scene lock. */
+void mop_env_generate_procedural_sky(MopViewport *vp);
+
 static void generate_procedural_sky(MopViewport *vp) {
   float T = vp->sky_desc.turbidity;
   if (T < 2.0f)
@@ -544,8 +550,11 @@ static void generate_procedural_sky(MopViewport *vp) {
 
   size_t px = (size_t)SKY_W * SKY_H;
   float *sky = calloc(px * 4, sizeof(float));
-  if (!sky)
+  if (!sky) {
+    MOP_ERROR("[env] procedural sky: alloc failed (%zu bytes)",
+              px * 4 * sizeof(float));
     return;
+  }
 
   for (int y = 0; y < SKY_H; y++) {
     for (int x = 0; x < SKY_W; x++) {
@@ -616,10 +625,29 @@ static void generate_procedural_sky(MopViewport *vp) {
     vp->rhi->texture_destroy(vp->device, vp->env_texture);
     vp->env_texture = NULL;
   }
-  if (vp->rhi->texture_create_hdr) {
-    vp->env_texture =
-        vp->rhi->texture_create_hdr(vp->device, SKY_W, SKY_H, sky);
+  if (!vp->rhi->texture_create_hdr) {
+    /* No GPU HDR texture path on this backend — env_hdr_data is still
+     * usable for the CPU skybox fallback, but the GPU skybox path will
+     * silently fail. Surface this so hosts on stripped backends know to
+     * either enable an HDR-capable backend or fall back to GRADIENT. */
+    MOP_WARN("[env] procedural sky: backend has no texture_create_hdr; "
+             "GPU skybox unavailable");
+    return;
   }
+  vp->env_texture = vp->rhi->texture_create_hdr(vp->device, SKY_W, SKY_H, sky);
+  if (!vp->env_texture) {
+    /* Loud — when this fires, the next pass_background WARN will already
+     * be one-shot, but this gives the upstream cause. Likely culprits:
+     * R32G32B32A32_SFLOAT not sampled-image-filterable on the device, or
+     * staging-buffer upload failed. */
+    MOP_ERROR("[env] procedural sky: texture_create_hdr returned NULL "
+              "(SKY_W=%d SKY_H=%d) — skybox draw will fall back to clear",
+              SKY_W, SKY_H);
+  }
+}
+
+void mop_env_generate_procedural_sky(MopViewport *vp) {
+  generate_procedural_sky(vp);
 }
 
 /* -------------------------------------------------------------------------

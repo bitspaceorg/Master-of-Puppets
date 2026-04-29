@@ -20,6 +20,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 typedef struct MopTexture MopTexture;
@@ -112,5 +116,9 @@ void mop_tex_cache_flush(MopViewport *viewport, uint32_t max_age_frames);
  * consume the texture directly in their render pipeline. */
 bool mop_tex_read_rgba8(MopViewport *viewport, MopTexture *texture,
                         uint8_t *out_buf, size_t buf_size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_TEXTURE_PIPELINE_H */

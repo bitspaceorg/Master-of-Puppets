@@ -25,4 +25,12 @@
 #include <mop/core/vertex_format.h>
 #include <mop/core/viewport.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MOP_CORE_H */

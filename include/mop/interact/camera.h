@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -89,5 +93,9 @@ typedef enum MopViewAxis {
 /* Snap the orbit camera to an axis-aligned view. Preserves target and
  * distance. */
 void mop_orbit_camera_snap_to_view(MopOrbitCamera *cam, MopViewAxis view);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_INTERACT_CAMERA_H */

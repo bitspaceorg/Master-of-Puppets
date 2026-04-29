@@ -13,6 +13,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Light types
  * ------------------------------------------------------------------------- */
@@ -40,7 +44,15 @@ typedef struct MopLight {
   float spot_inner_cos; /* cos(inner_cone_angle) */
   float spot_outer_cos; /* cos(outer_cone_angle) */
   bool active;
-  bool cast_shadows; /* reserved for future use */
+  /* Shadow caster opt-in. Only meaningful for directional lights — point and
+   * spot lights do not cast shadows. The shadow pass runs only when at least
+   * one active directional light has cast_shadows = true.
+   *
+   * Default sun (slot 0, created with the viewport) has cast_shadows = true,
+   * so out-of-the-box behavior is preserved. Hosts that replace the default
+   * with their own directional light must set cast_shadows = true on the
+   * descriptor to keep cascaded shadows. */
+  bool cast_shadows;
 
   /* Viewport back-pointer: set by mop_viewport_add_light for the pool
    * copy so setters (mop_light_set_position etc.) can auto-acquire the
@@ -75,5 +87,9 @@ void mop_light_set_intensity(MopLight *l, float intensity);
 
 /* Query */
 uint32_t mop_viewport_light_count(const MopViewport *vp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_LIGHT_H */

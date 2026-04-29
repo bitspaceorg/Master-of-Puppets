@@ -25,6 +25,10 @@
 #include <mop/core/font.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -152,5 +156,9 @@ typedef enum MopLabelDepth {
 void mop_text_draw_label(MopViewport *vp, const MopFont *font, MopMesh *target,
                          const char *utf8, MopLabelAnchor anchor,
                          MopLabelDepth depth_mode, MopTextStyle style);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_TEXT_H */

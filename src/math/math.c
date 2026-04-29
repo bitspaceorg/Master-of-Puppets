@@ -264,11 +264,20 @@ MopMat4 mop_mat4_inverse(MopMat4 m) {
 
   float det = a[0] * o[0] + a[1] * o[4] + a[2] * o[8] + a[3] * o[12];
   if (fabsf(det) < 1e-8f) {
-    /* Skybox ray reconstruction and degenerate camera transforms produce
-     * singular matrices regularly under normal rendering. Returning
-     * identity is the right fallback; log only at DEBUG so the main
-     * output stays clean. */
-    MOP_DEBUG("singular matrix in inverse (det=%.2e)", det);
+    /* Returning identity is the right fallback. Singular matrices arrive
+     * legitimately every frame from scene graphs with degenerate scales
+     * (HP-bar billboards parented to chains of transforms, hidden meshes
+     * with scale=0, off-screen children of dying entities). The previous
+     * MOP_DEBUG spammed hundreds of lines/sec under those conditions even
+     * though the fallback is correct — log once per process at INFO so a
+     * developer still gets a signal, then stay silent. */
+    static bool warned_once = false;
+    if (!warned_once) {
+      warned_once = true;
+      MOP_INFO("mop_mat4_inverse: singular matrix encountered (det=%.2e). "
+               "Returning identity; further occurrences silenced.",
+               det);
+    }
     return mop_mat4_identity();
   }
 

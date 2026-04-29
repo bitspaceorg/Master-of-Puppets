@@ -18,6 +18,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Magic and version
  * ------------------------------------------------------------------------- */
@@ -104,5 +108,9 @@ bool mop_scene_get_camera(const MopSceneFile *s, MopVec3 *eye, MopVec3 *target,
 
 /* Number of light sections in the scene. */
 uint32_t mop_scene_light_count(const MopSceneFile *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_LOADER_MOP_SCENE_H */

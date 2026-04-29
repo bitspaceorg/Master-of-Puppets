@@ -14,4 +14,12 @@
 #include <mop/render/postprocess.h>
 #include <mop/render/shader_plugin.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MOP_RENDER_H */

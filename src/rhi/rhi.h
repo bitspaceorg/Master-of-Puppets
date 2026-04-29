@@ -102,6 +102,11 @@ typedef struct MopRhiDrawCall {
    * Zero min/max = no bounds available (skip culling for this draw). */
   MopVec3 aabb_min;
   MopVec3 aabb_max;
+
+  /* Per-frame shadow gate — set by the viewport on every draw call.
+   * True when at least one active directional light has cast_shadows=true.
+   * Backends use this to skip shadow-map capture and the shadow pass. */
+  bool cast_shadows;
 } MopRhiDrawCall;
 
 /* -------------------------------------------------------------------------
@@ -156,6 +161,15 @@ typedef struct MopRhiBackend {
                       MopColor clear_color);
   void (*frame_end)(MopRhiDevice *device, MopRhiFramebuffer *fb);
   void (*frame_submit)(MopRhiDevice *device, MopRhiFramebuffer *fb);
+
+  /* Optional — block until the most recently submitted frame's readback
+   * buffers are populated. Backends with deferred readback (e.g. Vulkan,
+   * which normally memcpys the previous frame's pixels at the next
+   * frame_begin) implement this hook so callers can issue render → wait →
+   * read deterministically on the very first frame. CPU and any backend
+   * with synchronous readback may leave this NULL. */
+  void (*frame_wait_readback)(MopRhiDevice *device, MopRhiFramebuffer *fb);
+
   void (*draw)(MopRhiDevice *device, MopRhiFramebuffer *fb,
                const MopRhiDrawCall *call);
 

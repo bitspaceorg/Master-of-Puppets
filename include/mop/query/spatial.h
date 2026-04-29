@@ -11,6 +11,10 @@
 #include <mop/query/camera_query.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 typedef struct MopMesh MopMesh;
@@ -108,5 +112,9 @@ MopRayHit mop_viewport_raycast(const MopViewport *vp, float pixel_x,
 
 /* Cast an arbitrary world-space ray. */
 MopRayHit mop_viewport_raycast_ray(const MopViewport *vp, MopRay ray);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_QUERY_SPATIAL_H */

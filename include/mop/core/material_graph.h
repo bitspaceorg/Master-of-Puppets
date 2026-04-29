@@ -25,6 +25,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 
@@ -172,5 +176,9 @@ bool mop_mat_graph_compile(MopMaterialGraph *graph, MopViewport *viewport,
 
 /* Free any allocated resources in the graph (compiled GLSL, etc.) */
 void mop_mat_graph_destroy(MopMaterialGraph *graph);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_MATERIAL_GRAPH_H */

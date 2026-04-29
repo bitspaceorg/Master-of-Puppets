@@ -11,6 +11,10 @@
 #include <mop/types.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -67,5 +71,9 @@ void mop_viewport_set_environment_background(MopViewport *vp, bool show);
 /* Set procedural sky parameters (only when type == MOP_ENV_PROCEDURAL_SKY). */
 void mop_viewport_set_procedural_sky(MopViewport *vp,
                                      const MopProceduralSkyDesc *desc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_ENVIRONMENT_H */

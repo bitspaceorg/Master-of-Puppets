@@ -11,4 +11,12 @@
 #include <mop/util/log.h>
 #include <mop/util/profile.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* MOP_UTIL_H */

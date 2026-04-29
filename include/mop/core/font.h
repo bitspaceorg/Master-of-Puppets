@@ -19,6 +19,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* -------------------------------------------------------------------------
  * Atlas type — picked at bake time.  The runtime sampler is selected
  * automatically; user code does not branch on this.
@@ -83,8 +87,33 @@ MopFontMetrics mop_font_metrics(const MopFont *font);
 MopFontAtlasType mop_font_atlas_type(const MopFont *font);
 
 /* Width of a UTF-8 string at px_size, in pixels.  Includes kerning.
- * Returns 0.0f for an empty string or NULL inputs. */
+ * Returns 0.0f for an empty string or NULL inputs.
+ *
+ * Single-line strings only — newlines reset kerning but do not break the
+ * advance accumulator, so for multi-line text use mop_text_measure_extent
+ * which returns both width (longest line) and height (line count * line
+ * height + ascent). */
 float mop_text_measure(const MopFont *font, const char *utf8, float px_size);
+
+/* Measure both width (pixels of the longest line) and height (pixels from
+ * top of first line to bottom of last line) for a UTF-8 string at px_size.
+ *
+ * Width sums per-glyph advances + kerning, in line-local terms; '\n' resets
+ * the line accumulator and bumps the line count. Height is line_height in
+ * pixels times (lines - 1) plus ascent - descent for the first/last line.
+ *
+ * Either output pointer may be NULL — pass &w only if you don't care about
+ * height. Returns 0 width / 0 height for empty or NULL inputs.
+ *
+ * Use case: right-aligning HUD text without hardcoded glyph widths:
+ *
+ *   float w;
+ *   mop_text_measure_extent(font, "FPS 144", 14.0f, &w, NULL);
+ *   mop_text_draw_2d(vp, font, "FPS 144", screen_w - w - 8, 8, style);
+ */
+void mop_text_measure_extent(const MopFont *font, const char *utf8,
+                             float px_size, float *out_width,
+                             float *out_height);
 
 /* -------------------------------------------------------------------------
  * Default font — JetBrains Mono
@@ -109,5 +138,9 @@ float mop_text_measure(const MopFont *font, const char *utf8, float px_size);
  * ------------------------------------------------------------------------- */
 
 const MopFont *mop_font_hud(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_FONT_H */

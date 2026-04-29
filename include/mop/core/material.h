@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration — defined in scene.h */
 typedef struct MopTexture MopTexture;
 typedef struct MopMesh MopMesh;
@@ -27,5 +31,9 @@ typedef struct MopMaterial {
 
 void mop_mesh_set_material(MopMesh *mesh, const MopMaterial *material);
 MopMaterial mop_material_default(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_MATERIAL_H */

@@ -14,6 +14,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct MopViewport MopViewport;
 typedef struct MopRhiTexture MopRhiTexture;
 
@@ -35,5 +39,9 @@ void mop_viewport_remove_decal(MopViewport *vp, int32_t decal_id);
 
 /* Remove all decals. */
 void mop_viewport_clear_decals(MopViewport *vp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_RENDER_DECAL_H */

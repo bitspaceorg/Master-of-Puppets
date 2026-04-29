@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct MopViewport MopViewport;
 typedef struct MopMesh MopMesh;
 
@@ -45,5 +49,9 @@ void mop_viewport_select_object(MopViewport *vp, uint32_t id, bool additive);
 void mop_viewport_deselect_object(MopViewport *vp, uint32_t id);
 bool mop_viewport_is_object_selected(const MopViewport *vp, uint32_t id);
 uint32_t mop_viewport_get_selected_count(const MopViewport *vp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_INTERACT_SELECTION_H */

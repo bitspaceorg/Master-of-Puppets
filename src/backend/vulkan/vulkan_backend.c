@@ -4872,8 +4872,11 @@ static void vk_draw(MopRhiDevice *dev, MopRhiFramebuffer *fb,
 
     /* Shadow: store opaque draw info for shadow map rendering in frame_end.
      * Shadow maps are rendered after the main pass (temporal, 1 frame behind).
-     * Only store opaque draws — transparent objects don't cast shadows. */
-    if (dev->shadow_pipeline && call->blend_mode == MOP_BLEND_OPAQUE) {
+     * Only store opaque draws — transparent objects don't cast shadows.
+     * call->cast_shadows is the per-frame gate: viewport sets it true when
+     * any active directional light has cast_shadows=true. */
+    if (dev->shadow_pipeline && call->blend_mode == MOP_BLEND_OPAQUE &&
+        call->cast_shadows) {
       /* Capture view/proj/light on first draw for cascade computation */
       if (!dev->shadow_data_valid) {
         memcpy(dev->cached_view, call->view.d, 64);
@@ -7784,6 +7787,42 @@ static const uint8_t *vk_framebuffer_read_color(MopRhiDevice *dev,
   return fb->readback_color;
 }
 
+/* Block until the GPU finishes the most recent submission and populate the
+ * framebuffer's readback buffers eagerly. Without this, the first frame's
+ * readback_color is empty because vk_frame_begin defers the memcpy until
+ * the next frame's fence wait — CI screenshot tooling needs render → wait
+ * → read to be a single deterministic sequence. */
+static void vk_frame_wait_readback(MopRhiDevice *dev, MopRhiFramebuffer *fb) {
+  if (!dev || !fb)
+    return;
+
+  /* The submission for `fb` happened in vk_frame_submit using dev->fence
+   * (alias for the frame slot's fence). After submit, frame_index advanced
+   * but dev->fence still references the just-submitted fence, so wait on it
+   * — this is cheaper than vkDeviceWaitIdle and only blocks for this fb. */
+  if (dev->fence) {
+    vkWaitForFences(dev->device, 1, &dev->fence, VK_TRUE, UINT64_MAX);
+  } else {
+    vkDeviceWaitIdle(dev->device);
+  }
+
+  size_t npixels = (size_t)fb->width * (size_t)fb->height;
+  if (fb->readback_color && fb->readback_color_mapped)
+    memcpy(fb->readback_color, fb->readback_color_mapped, npixels * 4);
+  if (fb->readback_pick && fb->readback_pick_mapped)
+    memcpy(fb->readback_pick, fb->readback_pick_mapped,
+           npixels * sizeof(uint32_t));
+  if (fb->readback_depth && fb->readback_depth_mapped)
+    memcpy(fb->readback_depth, fb->readback_depth_mapped,
+           npixels * sizeof(float));
+
+  /* Clear prev_framebuffer so the next vk_frame_begin doesn't redo the
+   * memcpy we just did (the fence is already signaled and not yet reset;
+   * frame_begin's vkResetFences would be a no-op here too). */
+  if (dev->prev_framebuffer == fb)
+    dev->prev_framebuffer = NULL;
+}
+
 /* =========================================================================
  * 13b. framebuffer_read_object_id
  * ========================================================================= */
@@ -9128,6 +9167,7 @@ static const MopRhiBackend VK_BACKEND = {
     .frame_end = vk_frame_end,
     .frame_submit = vk_frame_submit,
     .draw = vk_draw,
+    .frame_wait_readback = vk_frame_wait_readback,
     .pick_read_id = vk_pick_read_id,
     .pick_read_depth = vk_pick_read_depth,
     .framebuffer_read_color = vk_framebuffer_read_color,

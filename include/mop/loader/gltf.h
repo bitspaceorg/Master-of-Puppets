@@ -24,6 +24,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 
@@ -180,5 +184,9 @@ void mop_gltf_free(MopGltfScene *scene);
  * base_object_id: starting object ID for picking (auto-increments). */
 uint32_t mop_gltf_import(const MopGltfScene *scene, MopViewport *viewport,
                          uint32_t base_object_id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_LOADER_GLTF_H */

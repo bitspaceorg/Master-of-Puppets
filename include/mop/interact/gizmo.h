@@ -16,6 +16,10 @@
 #include <mop/render/picking.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 typedef struct MopMesh MopMesh;
@@ -119,5 +123,9 @@ MopGizmoAxis mop_gizmo_test_pick(const MopGizmo *gizmo, MopPickResult pick);
 
 MopGizmoDelta mop_gizmo_drag(const MopGizmo *gizmo, MopGizmoAxis axis,
                              float mouse_dx, float mouse_dy);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_INTERACT_GIZMO_H */

@@ -16,6 +16,10 @@
 #include <mop/query/camera_query.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -114,5 +118,9 @@ bool mop_triangle_iter_next(MopTriangleIter *iter, MopTriangle *out);
 
 /* Total triangle count across all scene meshes (for BVH pre-allocation). */
 uint32_t mop_snapshot_triangle_count(const MopSceneSnapshot *snap);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_QUERY_SNAPSHOT_H */

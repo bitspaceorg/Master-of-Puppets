@@ -10,6 +10,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -40,5 +44,9 @@ typedef struct MopPickResult {
  * ------------------------------------------------------------------------- */
 
 MopPickResult mop_viewport_pick(MopViewport *viewport, int x, int y);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_RENDER_PICKING_H */

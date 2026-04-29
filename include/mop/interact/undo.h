@@ -16,6 +16,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declarations */
 typedef struct MopViewport MopViewport;
 typedef struct MopMesh MopMesh;
@@ -37,5 +41,9 @@ void mop_viewport_undo(MopViewport *viewport);
 
 /* Redo the most recently undone change.  No-op if nothing to redo. */
 void mop_viewport_redo(MopViewport *viewport);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_INTERACT_UNDO_H */

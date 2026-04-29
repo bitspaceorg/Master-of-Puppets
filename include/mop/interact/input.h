@@ -17,6 +17,10 @@
 
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration */
 typedef struct MopViewport MopViewport;
 
@@ -144,5 +148,9 @@ bool mop_viewport_poll_event(MopViewport *vp, MopEvent *out);
  * ------------------------------------------------------------------------- */
 
 uint32_t mop_viewport_get_selected(const MopViewport *vp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_INTERACT_INPUT_H */

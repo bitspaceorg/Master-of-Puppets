@@ -14,9 +14,15 @@ LDFLAGS  := -L../build/lib -lmop -lm
 
 BUILD_DIR := ../build/tools
 
-.PHONY: all clean
+.PHONY: all clean font-bake-only
 
 all: $(BUILD_DIR)/mop_convert $(BUILD_DIR)/mop_font_bake
+
+# Build just the font-bake tool. mop_font_bake links only -lm (no libmop),
+# so the parent Makefile's `fonts` target can invoke this on a fresh clone
+# without first needing libmop.a — which itself wants the embedded font
+# header that this tool produces.
+font-bake-only: $(BUILD_DIR)/mop_font_bake
 
 $(BUILD_DIR):
 	@mkdir -p $@

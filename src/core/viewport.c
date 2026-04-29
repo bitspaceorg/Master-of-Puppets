@@ -686,6 +686,7 @@ MopViewport *mop_viewport_create(const MopViewportDesc *desc) {
       .color = (MopColor){1.0f, 1.0f, 1.0f, 1.0f},
       .intensity = 1.0f - vp->ambient,
       .active = true,
+      .cast_shadows = true,
   };
   vp->light_count = 1;
   vp->default_light_active = true;
@@ -1816,6 +1817,14 @@ void mop_mesh_set_opacity(MopMesh *mesh, float opacity) {
     return;
   MOP_VP_LOCK(mesh->viewport);
   mesh->opacity = (opacity < 0.0f) ? 0.0f : (opacity > 1.0f) ? 1.0f : opacity;
+  /* Auto-promote to alpha blend when opacity goes below 1.0 on an opaque
+   * mesh — prior behavior silently no-op'd because the opaque pass writes
+   * RGB without honouring the alpha channel. We don't auto-revert when
+   * opacity climbs back to 1.0: hosts that set blend mode explicitly
+   * (additive, multiply) keep their choice. */
+  if (mesh->opacity < 1.0f && mesh->blend_mode == MOP_BLEND_OPAQUE) {
+    mesh->blend_mode = MOP_BLEND_ALPHA;
+  }
   MOP_VP_UNLOCK(mesh->viewport);
 }
 
@@ -1985,6 +1994,20 @@ static uint32_t s_lod_transitions;
 static uint32_t lod_select(const MopMesh *mesh, float projected_diameter,
                            float lod_bias);
 
+/* True when at least one active directional light has cast_shadows=true.
+ * Drives MopRhiDrawCall.cast_shadows so backends can skip the shadow pass
+ * entirely when the user opted out. The default sun at slot 0 has
+ * cast_shadows=true, so out-of-the-box behavior is preserved. */
+static inline bool mop_viewport_shadows_enabled_(const MopViewport *vp) {
+  for (uint32_t i = 0; i < vp->light_count; i++) {
+    if (vp->lights[i].active && vp->lights[i].type == MOP_LIGHT_DIRECTIONAL &&
+        vp->lights[i].cast_shadows) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* ---- Helper macro: issue a draw call for a mesh ---- */
 /* Chrome meshes (grid = MOP_GRID_ID, >= 0xFFFE0000 for gizmo/indicators)
  * are rendered fully unlit (ambient=1, no lights) so they keep their vertex
@@ -2059,6 +2082,7 @@ static uint32_t lod_select(const MopMesh *mesh, float projected_diameter,
         .vertex_format = m_->vertex_format,                                    \
         .aabb_min = m_->aabb_valid ? m_->aabb_local.min : (MopVec3){0, 0, 0},  \
         .aabb_max = m_->aabb_valid ? m_->aabb_local.max : (MopVec3){0, 0, 0},  \
+        .cast_shadows = !chrome_ && mop_viewport_shadows_enabled_(vp),         \
     };                                                                         \
     (vp)->rhi->draw((vp)->device, (vp)->framebuffer, &call_);                  \
   } while (0)
@@ -2155,7 +2179,25 @@ static void pass_background_hdri_cpu(MopViewport *vp) {
   }
 }
 
+/* Internal recovery hook — see environment.c. Called when env_type is
+ * PROCEDURAL_SKY but env_texture is NULL on the rendering path, so we
+ * can self-heal a stale or failed-upload state without forcing the host
+ * to re-issue set_environment. */
+extern void mop_env_generate_procedural_sky(MopViewport *vp);
+
 static void pass_background(MopViewport *vp) {
+  /* Defensive recovery: env_type says PROCEDURAL_SKY and we've got the
+   * host-side data, but the GPU texture is missing — most likely a first
+   * upload that failed silently or a backend that wasn't ready when
+   * set_environment ran. Re-run generate once; if it still fails the
+   * one-shot WARN below surfaces it. We do NOT attempt this for HDRI
+   * because that path needs the original file/buffer the host loaded. */
+  if (vp->env_type == MOP_ENV_PROCEDURAL_SKY && vp->env_hdr_data &&
+      vp->show_env_background && !vp->env_texture &&
+      vp->backend_type != MOP_BACKEND_CPU) {
+    mop_env_generate_procedural_sky(vp);
+  }
+
   /* HDRI/procedural sky as skybox */
   if ((vp->env_type == MOP_ENV_HDRI ||
        vp->env_type == MOP_ENV_PROCEDURAL_SKY) &&
@@ -2176,6 +2218,20 @@ static void pass_background(MopViewport *vp) {
                            inv_vp.d, cam_pos, vp->env_rotation,
                            vp->env_intensity);
       return;
+    }
+    /* Setup looked complete (env_type set, host data present, background
+     * enabled) but the GPU path can't draw: skybox pipeline missing or
+     * env_texture failed to upload. Without this signal the host sees a
+     * silent fallback to the clear color and assumes the sky API is broken.
+     * One-shot WARN — don't spam every frame. */
+    static bool warned_once = false;
+    if (!warned_once) {
+      warned_once = true;
+      MOP_WARN("environment background requested (type=%d) but GPU skybox "
+               "path is unavailable: draw_skybox=%p env_texture=%p. "
+               "Falling back to clear color.",
+               (int)vp->env_type, (void *)vp->rhi->draw_skybox,
+               (void *)vp->env_texture);
     }
   }
 
@@ -2230,10 +2286,14 @@ static void pass_background(MopViewport *vp) {
 #define MOP_SHADOW_MAP_SIZE 1024
 
 static void pass_shadow(MopViewport *vp) {
-  /* Find first active directional light */
+  /* Find first active directional light that opts into shadows.
+   * cast_shadows must be explicitly true; the default sun at slot 0 has
+   * it set, so out-of-the-box behavior is preserved. Hosts that add their
+   * own directional light must set cast_shadows = true on the descriptor. */
   int dir_light_idx = -1;
   for (uint32_t i = 0; i < vp->light_count; i++) {
-    if (vp->lights[i].active && vp->lights[i].type == MOP_LIGHT_DIRECTIONAL) {
+    if (vp->lights[i].active && vp->lights[i].type == MOP_LIGHT_DIRECTIONAL &&
+        vp->lights[i].cast_shadows) {
       dir_light_idx = (int)i;
       break;
     }
@@ -2577,6 +2637,7 @@ static void pass_instanced(MopViewport *vp) {
         .lights = vp->lights,
         .light_count = vp->light_count,
         .vertex_format = NULL,
+        .cast_shadows = mop_viewport_shadows_enabled_(vp),
     };
 
     vp->rhi->draw_instanced(vp->device, vp->framebuffer, &inst_call,
@@ -3197,6 +3258,19 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
   viewport->last_render_error[0] = '\0';
   viewport->frame_counter++;
   pthread_mutex_unlock(&viewport->scene_mutex);
+  return MOP_RENDER_OK;
+}
+
+MopRenderResult mop_viewport_render_sync(MopViewport *viewport) {
+  MopRenderResult r = mop_viewport_render(viewport);
+  if (r != MOP_RENDER_OK)
+    return r;
+  /* Backends with deferred readback (Vulkan) implement frame_wait_readback
+   * to block until this frame's pixels are CPU-visible. CPU/OpenGL leave
+   * the hook NULL and return immediately. */
+  if (viewport && viewport->rhi && viewport->rhi->frame_wait_readback) {
+    viewport->rhi->frame_wait_readback(viewport->device, viewport->framebuffer);
+  }
   return MOP_RENDER_OK;
 }
 

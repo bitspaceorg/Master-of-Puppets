@@ -12,6 +12,10 @@
 #include <mop/core/vertex_format.h>
 #include <mop/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward declaration — defined in viewport.h */
 typedef struct MopViewport MopViewport;
 
@@ -59,10 +63,13 @@ typedef struct MopMeshDesc {
 
 /* Add a mesh to the viewport.  Returns NULL on failure.
  *
- * NOTE: The returned MopMesh pointer may be invalidated if the internal
- * mesh array is reallocated (when adding more meshes beyond the current
- * capacity).  Do not cache this pointer across calls to mop_viewport_add_mesh.
- * Instead, re-query using mop_viewport_mesh_at or mop_viewport_mesh_by_id. */
+ * Pointer stability: the returned MopMesh* is stable for the lifetime of the
+ * mesh. The viewport stores meshes as an array of MopMesh* (each struct is
+ * separately heap-allocated), so growing the pool reallocates the pointer
+ * array, not the individual mesh structs. You may cache the returned pointer
+ * across subsequent add/remove calls, including in ECS components. The
+ * pointer is only invalidated by mop_viewport_remove_mesh on this mesh, or
+ * when the owning viewport is destroyed. */
 MopMesh *mop_viewport_add_mesh(MopViewport *viewport, const MopMeshDesc *desc);
 
 /* -------------------------------------------------------------------------
@@ -102,7 +109,16 @@ void mop_mesh_update_geometry(MopMesh *mesh, MopViewport *viewport,
 void mop_mesh_set_transform(MopMesh *mesh, const MopMat4 *transform);
 
 /* Set the opacity for a mesh.  1.0 = fully opaque (default), 0.0 = invisible.
- */
+ *
+ * Auto-promotion: setting opacity < 1.0 on a mesh whose blend mode is still
+ * MOP_BLEND_OPAQUE (the default) automatically switches it to MOP_BLEND_ALPHA
+ * so the alpha channel is honoured by the renderer. The opaque pass writes
+ * RGB only; without this promotion, set_opacity would silently no-op.
+ *
+ * If you've explicitly set a blend mode (additive, multiply), it is left
+ * alone — opacity then acts as the colour multiplier appropriate to that
+ * mode. Use mop_mesh_set_blend_mode(mesh, MOP_BLEND_OPAQUE) after this call
+ * if you want to force the opaque path. */
 void mop_mesh_set_opacity(MopMesh *mesh, float opacity);
 
 /* Set the blend mode for a mesh.  MOP_BLEND_OPAQUE by default. */
@@ -272,5 +288,9 @@ float mop_viewport_get_lod_bias(const MopViewport *viewport);
 /* Set debug visualization mode for the viewport. */
 void mop_viewport_set_debug_viz(MopViewport *viewport, MopDebugViz mode);
 MopDebugViz mop_viewport_get_debug_viz(const MopViewport *viewport);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* MOP_CORE_SCENE_H */
