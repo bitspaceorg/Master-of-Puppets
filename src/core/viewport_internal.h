@@ -568,6 +568,13 @@ struct MopViewport {
   uint32_t text_prim_count;
   uint32_t text_prim_capacity;
 
+  /* Set true by mop_viewport_render_sync for the duration of a single
+   * synchronous render. Tells rg_post_frame_overlays to skip the text-
+   * queue drain so the prims survive the wait_readback memcpy and can
+   * be replayed onto the freshly-populated readback buffer. Cleared
+   * after the replay + drain in render_sync. */
+  bool _sync_render_active;
+
   /* Pre-allocated transparent sort arrays (reused across frames) */
   uint32_t *trans_sort_idx;
   float *trans_sort_dist;

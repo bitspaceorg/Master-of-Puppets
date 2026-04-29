@@ -2871,8 +2871,13 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
   }
   /* Drain the text queue once consumed.  Host submissions for the
    * next frame must start from empty; otherwise per-frame text
-   * accumulates indefinitely. */
-  mop_text_queue_reset(vp);
+   * accumulates indefinitely.
+   *
+   * mop_viewport_render_sync sets _sync_render_active so the prims
+   * survive the wait_readback memcpy and can be replayed against the
+   * freshly-copied buffer. The replay path drains right after. */
+  if (!vp->_sync_render_active)
+    mop_text_queue_reset(vp);
 
   /* Dispatch grid (if any) to backend. Prim count is zeroed because we
    * already painted them via the CPU path above; letting the backend
@@ -2882,6 +2887,56 @@ static void rg_post_frame_overlays(MopViewport *vp, void *ud) {
     vp->rhi->draw_overlays(vp->device, vp->framebuffer, vp->overlay_prims, 0,
                            gp, w, h);
   }
+}
+
+/* Replay the CPU compositor onto the framebuffer's readback color buffer.
+ * Called from mop_viewport_render_sync after frame_wait_readback has
+ * memcpy'd the freshly-completed GPU output, clobbering the composite
+ * that rg_post_frame_overlays painted earlier in the frame.
+ *
+ * We re-paint outline (idempotent: reads the object-ID readback, which
+ * wait_readback also refreshed) and re-rasterize the chrome prims +
+ * text queue (both still populated because the drain was deferred).
+ * Grid on Vulkan is GPU-rendered into the overlay attachment before
+ * readback, so it survives the memcpy and doesn't need replay. */
+static void replay_post_frame_overlays_cpu(MopViewport *vp) {
+  if (!vp || !vp->rhi || !vp->rhi->framebuffer_read_color)
+    return;
+
+  if (vp->overlay_enabled[MOP_OVERLAY_OUTLINE])
+    mop_overlay_builtin_outline(vp, NULL);
+
+  bool gpu_grid = (vp->backend_type != MOP_BACKEND_CPU);
+  if (vp->show_chrome && !gpu_grid)
+    mop_overlay_builtin_grid(vp, NULL);
+
+  if (vp->overlay_prim_count == 0 && vp->text_prim_count == 0)
+    return;
+
+  int w = vp->width * vp->ssaa_factor;
+  int h = vp->height * vp->ssaa_factor;
+  int cw = 0, ch = 0;
+  const uint8_t *color_ro =
+      vp->rhi->framebuffer_read_color(vp->device, vp->framebuffer, &cw, &ch);
+  if (!color_ro || cw != w || ch != h)
+    return;
+
+  const float *depth_buf = NULL;
+  if (vp->rhi->framebuffer_read_depth) {
+    int dw = 0, dh = 0;
+    depth_buf =
+        vp->rhi->framebuffer_read_depth(vp->device, vp->framebuffer, &dw, &dh);
+    if (!depth_buf || dw != w || dh != h)
+      depth_buf = NULL;
+  }
+
+  bool is_cpu_ndc = (vp->backend_type == MOP_BACKEND_CPU);
+  uint8_t *color_rw = (uint8_t *)(uintptr_t)color_ro;
+  mop_overlay_rasterize_prims_cpu(color_rw, cw, ch, vp->overlay_prims,
+                                  vp->overlay_prim_count, depth_buf,
+                                  vp->reverse_z, is_cpu_ndc);
+  mop_text_rasterize_cpu(vp, color_rw, cw, ch, vp->text_prims,
+                         vp->text_prim_count, (float)vp->ssaa_factor);
 }
 
 /* Submit — finalize and submit the GPU command buffer after overlays */
@@ -3262,15 +3317,37 @@ MopRenderResult mop_viewport_render(MopViewport *viewport) {
 }
 
 MopRenderResult mop_viewport_render_sync(MopViewport *viewport) {
+  if (!viewport)
+    return MOP_RENDER_ERROR;
+
+  /* Tell rg_post_frame_overlays to defer the text-queue drain so the
+   * prims survive the wait_readback memcpy below. Cleared in the unwind
+   * paths and at the end of this function. */
+  viewport->_sync_render_active = true;
+
   MopRenderResult r = mop_viewport_render(viewport);
-  if (r != MOP_RENDER_OK)
+  if (r != MOP_RENDER_OK) {
+    viewport->_sync_render_active = false;
+    mop_text_queue_reset(viewport);
     return r;
+  }
+
   /* Backends with deferred readback (Vulkan) implement frame_wait_readback
    * to block until this frame's pixels are CPU-visible. CPU/OpenGL leave
-   * the hook NULL and return immediately. */
-  if (viewport && viewport->rhi && viewport->rhi->frame_wait_readback) {
+   * the hook NULL — for them, the composite that rg_post_frame_overlays
+   * already painted is the final image. */
+  if (viewport->rhi && viewport->rhi->frame_wait_readback) {
     viewport->rhi->frame_wait_readback(viewport->device, viewport->framebuffer);
+    /* The memcpy inside frame_wait_readback overwrote the readback color
+     * buffer with this frame's GPU output, clobbering the CPU composite
+     * (chrome overlays + text) that rg_post_frame_overlays painted. Replay
+     * it onto the freshly-populated buffer so the host sees both. */
+    replay_post_frame_overlays_cpu(viewport);
   }
+
+  /* Drain the text queue we deferred above. */
+  mop_text_queue_reset(viewport);
+  viewport->_sync_render_active = false;
   return MOP_RENDER_OK;
 }
 
